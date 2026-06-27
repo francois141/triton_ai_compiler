@@ -1,0 +1,12 @@
+/.venv/
+/prompts/initial/
+/prompts/follow_up/
+/prompts/follow_up/__pycache__/
+/__pycache__/
+/.pytest_cache/
+/llm_endpoint/__pycache__/
+/tmp/
+/database/
+__pycache__/
+*.py[cod]
+*$py.class

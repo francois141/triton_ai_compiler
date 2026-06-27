@@ -1,0 +1,13 @@
+loop:
+  rounds: 10
+  k: 1
+  max_retries: 15
+
+generator:
+  provider: openai
+  model: gpt-5
+  options:
+    reasoning_effort: medium
+
+storage:
+  database_dir: database

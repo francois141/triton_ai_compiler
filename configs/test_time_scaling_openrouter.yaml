@@ -1,0 +1,11 @@
+loop:
+  rounds: 10
+  k: 2
+  max_retries: 25
+
+generator:
+  provider: openrouter
+  model: qwen/qwen3-coder
+  
+storage:
+  database_dir: database
