@@ -171,15 +171,12 @@ Use this exact entry template shape and fill the body with your PTX:
 def correctness_rules():
     return """
 ## Correctness Rules
-
 - Implement the same computation and control flow as the Triton kernel.
 - Respect all masks and boundary conditions exactly.
 - Assume pointer inputs refer to contiguous GPU global memory unless the Triton code says otherwise.
 - Treat tl.constexpr values as compile-time constants supplied by the operator defaults.
-- The launch grid is computed from the operator constexpr values, not from `num_threads_x`.
 - If PTX uses one thread for one element in a constexpr-sized tile, set `num_threads_x` to the matching tile size; otherwise explicitly loop each CTA's threads over the full constexpr tile.
 - Do not add, remove, reorder, or reinterpret runtime arguments.
-- Do not emit host code, CUDA C, Triton, LLVM IR, explanations, or pseudocode.
 """.strip()
 
 
@@ -204,32 +201,11 @@ Optimize for the specific Triton kernel shown below. Use only optimizations that
 Launch tuning guidance:
 - `num_threads_x` should be explicitly defined for this kernel and determines the number of threads launched in the CTA's x dimension.
 - If you need a multi-dimensional CTA shape, you may also define `num_threads_y` and `num_threads_z` to specify the y and z dimensions.
-- Query `num_warps` from the kernel metadata for this operator.
-- The sum of the provided thread dimensions must be exactly `32 * num_warps = {total_threads}`: `num_threads_x + num_threads_y + num_threads_z == {total_threads}`, treating omitted `num_threads_y` and `num_threads_z` as 0.
-- Choose the launch dimensions deliberately to achieve the best performance while preserving correctness.
-- It is important to evaluate a range of grid and block sizes, as these parameters can significantly impact performance.
-- Avoid assuming that the current best-performing configuration is optimal. In practice, seemingly unexpected block sizes or thread counts can sometimes deliver superior performance.
+- The sum of the provided thread dimensions must be exactly `32 * num_warps = {total_threads}`: `num_threads_x * num_threads_y * num_threads_z == {total_threads}`, treating omitted `num_threads_y` and `num_threads_z` as 1.
 
-For elementwise kernels:
-1. Use coalesced global loads and stores.
-2. Use predicated memory operations for masks.
-3. Use one or more elements per thread when beneficial.
-4. Use vectorized loads/stores only when alignment and masking semantics are safe.
-5. Use approximate fp32 math instructions only if they satisfy the requested tolerance.
-6. Keep temporary values in registers.
-7. Fold operator-default tl.constexpr values into immediates.
-8. Prefer efficient address arithmetic such as mad.wide, shl, and add.
-9. Avoid shared memory, barriers, atomics, tensor cores, async copies, and local memory unless the Triton kernel structure clearly benefits from them.
-
-For reduction kernels:
-1. Use coalesced global loads.
-2. Use warp-level reductions when beneficial.
-3. Use shared memory only when needed for cross-warp reduction.
-4. Prefer one global atomic per CTA when the Triton kernel uses an atomic accumulation.
-
-For matrix/tensor contraction kernels:
-1. Use mma/wgmma/tensor-core instructions when the shapes and data types are compatible.
-2. Use tiling, shared memory, async copies, and double buffering when beneficial.
+Hardware rule: 
+- Use modern GPU features as much as possible. Shared memory, ldmatrix, tensor cores, async loads and stores should be used as much as possible.
+- You should be aggressive in the optimisations. If the code is not correct, next iteration will be used to fix the correctness issues. The goal is to get the fastest PTX possible for this kernel.
 """.format(total_threads=total_threads).strip()
 
 
