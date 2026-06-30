@@ -16,6 +16,7 @@ from .blocks import (
     triton_kernel_block,
 )
 from .next import candidate_results_block
+from .skills import common_ptxas_issues_skill
 
 
 def repair_task(retry_index: int, max_retries: int) -> str:
@@ -35,7 +36,8 @@ def repair_rules() -> str:
     return """
 ## Repair Rules
 
-- Fix the smallest part of the PTX needed to address the reported compilation or verification failure.
+- Compilation is the first priority, correctness is second, and performance is last.
+- Fix only the first concrete compiler error class and make the smallest change needed.
 - Preserve the exact PTX header, kernel entry name, runtime argument order, and launch metadata keys.
 - If compilation failed, prioritize valid PTX syntax, declarations, parameter loads, address spaces, and instruction types.
 - If correctness verification failed, prioritize matching the Triton semantics, masks, indexing, and stores exactly.
@@ -56,6 +58,7 @@ def prompt_builder(
 ) -> str:
     sections = [
         repair_task(retry_index, max_retries),
+        common_ptxas_issues_skill(),
         ptx_header()
         .format(
             version=version,

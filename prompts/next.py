@@ -21,6 +21,7 @@ from .blocks import (
     signature_template,
     triton_kernel_block,
 )
+from .skills import async_load_store_skill, common_ptxas_issues_skill
 
 
 def _format_metric(value: float) -> str:
@@ -151,6 +152,8 @@ def prompt_builder(
     ptx_signature=None,
 ) -> str:
     sections = [
+        async_load_store_skill(),
+        common_ptxas_issues_skill(),
         follow_up_task().strip(),
         ptx_header()
         .format(

@@ -28,7 +28,7 @@ def format_argument_list(parameters):
     return "\n".join(lines)
 
 
-def initial_task():
+def initial_task() -> str:
     return """
 # Triton to Fastest PTX Conversion
 
@@ -38,7 +38,7 @@ PTX version and target listed below.
     """
 
 
-def follow_up_task():
+def follow_up_task() -> str:
     return """
 # PTX Test-Time Scaling
 
@@ -75,9 +75,7 @@ def extracted_signature_information(parameters):
 
 def constexpr_values_block(spec):
     constexpr_params = [
-        param
-        for param in spec.parameters
-        if _is_constexpr_annotation(param.annotation)
+        param for param in spec.parameters if _is_constexpr_annotation(param.annotation)
     ]
     if not constexpr_params:
         return "\n\n".join(
@@ -134,12 +132,25 @@ def _is_constexpr_annotation(annotation) -> bool:
         or ("triton.language" in annotation_text and "constexpr" in annotation_text)
     )
 
-def signature_template(parameters, *, version, target, address_size, kernel_name="kernel", ptx_signature=None):
-    runtime_params = [param for param in parameters if not _is_constexpr_annotation(param.annotation)]
+
+def signature_template(
+    parameters,
+    *,
+    version,
+    target,
+    address_size,
+    kernel_name="kernel",
+    ptx_signature=None,
+):
+    runtime_params = [
+        param for param in parameters if not _is_constexpr_annotation(param.annotation)
+    ]
 
     lines = []
     for index, param in enumerate(runtime_params):
-        ptx_type = ptx_signature[index].ptx_type if ptx_signature is not None else ".u64"
+        ptx_type = (
+            ptx_signature[index].ptx_type if ptx_signature is not None else ".u64"
+        )
         lines.append(f"    .param {ptx_type} {param.name},")
 
     lines.append("    .param .u64 dummy_ptr1,")
@@ -152,6 +163,8 @@ def signature_template(parameters, *, version, target, address_size, kernel_name
 
 Use this exact entry template shape and fill the body with your PTX:
 - Any argument name containing `_ptr` should be treated as a pointer to float32 data.
+
+
 
 ```ptx
 .version {version}
@@ -204,7 +217,8 @@ Launch tuning guidance:
 - The sum of the provided thread dimensions must be exactly `32 * num_warps = {total_threads}`: `num_threads_x * num_threads_y * num_threads_z == {total_threads}`, treating omitted `num_threads_y` and `num_threads_z` as 1.
 
 Hardware rule: 
-- Use modern GPU features as much as possible. Shared memory, ldmatrix, tensor cores, async loads and stores should be used as much as possible.
+- Use modern GPU features as much as possible. Shared memory, ldmatrix, tensor cores, and async global-to-shared loads should be used when valid for the target.
+- Use normal `st.global` instructions for stores on `sm_89`.
 - You should be aggressive in the optimisations. If the code is not correct, next iteration will be used to fix the correctness issues. The goal is to get the fastest PTX possible for this kernel.
 """.format(total_threads=total_threads).strip()
 

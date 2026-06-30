@@ -14,6 +14,7 @@ from .blocks import (
     signature_template,
     triton_kernel_block,
 )
+from .skills import async_load_store_skill, common_ptxas_issues_skill
 
 
 # TODO: Dehardcode the target here
@@ -27,6 +28,8 @@ def prompt_builder(
     ptx_signature=None,
 ):
     sections = [
+        async_load_store_skill(),
+        common_ptxas_issues_skill(),
         initial_task().strip(),
         ptx_header()
         .format(
