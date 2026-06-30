@@ -6,6 +6,7 @@
 /.pytest_cache/
 /llm_endpoint/__pycache__/
 /tmp/
+/tmp_files/
 /database/
 __pycache__/
 *.py[cod]

@@ -103,7 +103,7 @@ def calculate_total(items: list[dict], tax_rate: float = 0.0) -> float:
 
 ## Testing
 
-- **MUST** write unit tests for all new functions and classes
+- **NEVER** write unit tests for all new functions and classes
 - **MUST** mock external dependencies (APIs, databases, file systems)
 - **MUST** use pytest as the testing framework
 - **NEVER** run tests you generate without first saving them as their own discrete file
