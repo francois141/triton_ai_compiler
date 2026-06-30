@@ -1,3 +1,5 @@
+from time import perf_counter
+
 from openai import OpenAI
 
 from .base import LLMEndpoint, parse_response_text
@@ -132,7 +134,15 @@ class OpenAIPrompt(LLMEndpoint):
             if self.reasoning_effort is not None:
                 request_kwargs["reasoning_effort"] = self.reasoning_effort
 
+            print("======== Sending prompt to OpenAI ========", flush=True)
+            request_start = perf_counter()
             response = self.client.chat.completions.create(**request_kwargs)
+            request_duration = perf_counter() - request_start
+            print(
+                "======== Received response from OpenAI "
+                f"in {request_duration:.3f}s ========",
+                flush=True,
+            )
 
             cost = self._estimate_cost(response)
             if cost is None:
@@ -160,6 +170,7 @@ class OpenAIPrompt(LLMEndpoint):
                     all_answers.extend(parsed)
 
                 except Exception:
+                    print("Failure in json output - openai api endpoint")
                     # Bad JSON / malformed response. Ignore this one;
                     # the while loop will re-query the missing answer.
                     pass
