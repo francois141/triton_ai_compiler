@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import orjson
 
 from triton_ptx.evaluation import EvaluatedCandidate
 from triton_ptx.helpers.kernels import extract_specification_from_operator
@@ -45,6 +46,25 @@ def repair_rules() -> str:
 """.strip()
 
 
+def sanitizer_diagnostics_block(candidate: EvaluatedCandidate) -> str:
+    result = (
+        orjson.dumps(
+            candidate.sanitizer_report,
+            default=str,
+            option=orjson.OPT_INDENT_2 | orjson.OPT_SORT_KEYS,
+        ).decode()
+        if candidate.sanitizer_report
+        else "None"
+    )
+    return f"""
+## Compute Sanitizer Diagnostics
+
+```json
+{result}
+```
+""".strip()
+
+
 def prompt_builder(
     spec,
     failed_candidate: EvaluatedCandidate,
@@ -81,6 +101,7 @@ def prompt_builder(
         commenting_rules(),
         triton_kernel_block(spec.source),
         candidate_results_block([failed_candidate]),
+        sanitizer_diagnostics_block(failed_candidate),
         repair_rules(),
         output_contract(spec),
     ]
