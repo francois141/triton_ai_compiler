@@ -10,8 +10,8 @@ class AnthropicPrompt(LLMEndpoint):
         # Price estimates in USD per 1M tokens.
         # Keep these aligned with Anthropic API pricing.
         "claude-opus-4-8": {
-            "input": 15.00,
-            "output": 75.00,
+            "input": 5.00,
+            "output": 25.00,
         },
         "claude-opus-4": {
             "input": 15.00,
@@ -20,6 +20,10 @@ class AnthropicPrompt(LLMEndpoint):
         "claude-sonnet-4": {
             "input": 3.00,
             "output": 15.00,
+        },
+        "claude-fable-5": {
+            "input": 10.00,
+            "output": 50.00,
         },
     }
 
