@@ -2,7 +2,7 @@ import os
 
 from openai import OpenAI
 
-from .base import LLMEndpoint, parse_response_text
+from .base import LLMEndpoint, PtxKernel
 
 
 class OpenRouterPrompt(LLMEndpoint):
@@ -81,57 +81,39 @@ class OpenRouterPrompt(LLMEndpoint):
         if requested <= 0:
             raise ValueError("num_answers must be positive when provided.")
 
-        prompt = (
-            f"{prompt}\n\n"
-            "Generate exactly one answer dictionary as `ptx_kernel`."
-        )
+        prompt = f"{prompt}\n\nGenerate exactly one answer dictionary as `ptx_kernel`."
+
+        request_kwargs = {
+            "model": self.model,
+            "messages": [{"role": "user", "content": prompt}],
+            "n": requested,
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "ptx_kernel",
+                    "strict": True,
+                    "schema": PtxKernel.model_json_schema(),
+                },
+            },
+        }
+
+        response = self.client.chat.completions.create(**request_kwargs)
+
+        cost = self._estimate_cost(response)
+        if cost is None:
+            print(f"Estimated query cost: unavailable for model {self.model!r}")
+        else:
+            print(f"Estimated total query cost: ${cost:.6f}")
 
         all_answers = []
-        total_cost = 0.0
-        cost_available = True
+        for choice in response.choices:
+            text = choice.message.content or ""
+            if not text:
+                refusal = getattr(choice.message, "refusal", None)
+                detail = refusal or "No structured output returned."
+                raise ValueError(f"OpenRouter did not return a PTX kernel: {detail}")
 
-        while len(all_answers) < requested:
-            remaining = requested - len(all_answers)
-
-            request_kwargs = {
-                "model": self.model,
-                "messages": [
-                    {"role": "user", "content": prompt},
-                ],
-                "n": remaining,
-            }
-
-            response = self.client.chat.completions.create(**request_kwargs)
-
-            cost = self._estimate_cost(response)
-            if cost is None:
-                cost_available = False
-                print(f"Estimated query cost: unavailable for model {self.model!r}")
-            else:
-                total_cost += cost
-                print(f"Estimated query cost: ${cost:.6f}")
-
-            for choice in response.choices:
-                text = choice.message.content or ""
-
-                try:
-                    parsed = parse_response_text(text)
-
-                    if len(parsed) != 1:
-                        raise ValueError(
-                            "Expected exactly one answer per completion, "
-                            f"got {len(parsed)}."
-                        )
-
-                    all_answers.extend(parsed)
-                except Exception:
-                    # Bad JSON / malformed response. Ignore this one;
-                    # the while loop will re-query the missing answer.
-                    pass
-
-        if cost_available:
-            print(f"Estimated total query cost: ${total_cost:.6f}")
-        else:
-            print(f"Estimated total query cost: unavailable for model {self.model!r}")
+            parsed = PtxKernel.model_validate_json(text)
+            all_answers.append(parsed.model_dump(exclude_none=True))
 
         return all_answers

@@ -2,7 +2,7 @@ from time import perf_counter
 
 from openai import OpenAI
 
-from .base import LLMEndpoint, parse_response_text
+from .base import LLMEndpoint, PtxKernel
 
 
 class OpenAIPrompt(LLMEndpoint):
@@ -62,9 +62,7 @@ class OpenAIPrompt(LLMEndpoint):
         self.model = model or self.DEFAULT_MODEL
 
         if reasoning_effort not in self.ALLOWED_REASONING_EFFORTS:
-            allowed = sorted(
-                v for v in self.ALLOWED_REASONING_EFFORTS if v is not None
-            )
+            allowed = sorted(v for v in self.ALLOWED_REASONING_EFFORTS if v is not None)
             raise ValueError(
                 f"Invalid reasoning_effort. Expected one of {allowed} or None."
             )
@@ -87,13 +85,9 @@ class OpenAIPrompt(LLMEndpoint):
         cached_input_tokens = 0
 
         if prompt_details is not None:
-            cached_input_tokens = (
-                getattr(prompt_details, "cached_tokens", 0) or 0
-            )
+            cached_input_tokens = getattr(prompt_details, "cached_tokens", 0) or 0
 
-        uncached_input_tokens = max(
-            input_tokens - cached_input_tokens, 0
-        )
+        uncached_input_tokens = max(input_tokens - cached_input_tokens, 0)
 
         return (
             uncached_input_tokens * pricing["input"]
@@ -102,87 +96,45 @@ class OpenAIPrompt(LLMEndpoint):
         ) / 1_000_000
 
     def generate_response(self, prompt, *, num_answers=None):
-        requested = (
-            int(num_answers) if num_answers is not None else 1
-        )
+        requested = int(num_answers) if num_answers is not None else 1
 
         if requested <= 0:
-            raise ValueError(
-                "num_answers must be positive when provided."
-            )
+            raise ValueError("num_answers must be positive when provided.")
 
-        prompt = (
-            f"{prompt}\n\n"
-            "Generate exactly one answer dictionary as `ptx_kernel`."
+        prompt = f"{prompt}\n\nGenerate exactly one answer dictionary as `ptx_kernel`."
+
+        request_kwargs = {
+            "model": self.model,
+            "messages": [{"role": "user", "content": prompt}],
+            "n": requested,
+            "response_format": PtxKernel,
+        }
+
+        if self.reasoning_effort is not None:
+            request_kwargs["reasoning_effort"] = self.reasoning_effort
+
+        print("======== Sending prompt to OpenAI ========", flush=True)
+        request_start = perf_counter()
+        response = self.client.chat.completions.parse(**request_kwargs)
+        request_duration = perf_counter() - request_start
+        print(
+            "======== Received response from OpenAI "
+            f"in {request_duration:.3f}s ========",
+            flush=True,
         )
 
-        all_answers = []
-        total_cost = 0.0
-        cost_available = True
-
-        while len(all_answers) < requested:
-            remaining = requested - len(all_answers)
-
-            request_kwargs = {
-                "model": self.model,
-                "messages": [
-                    {"role": "user", "content": prompt},
-                ],
-                "n": remaining,
-            }
-
-            if self.reasoning_effort is not None:
-                request_kwargs["reasoning_effort"] = self.reasoning_effort
-
-            print("======== Sending prompt to OpenAI ========", flush=True)
-            request_start = perf_counter()
-            response = self.client.chat.completions.create(**request_kwargs)
-            request_duration = perf_counter() - request_start
-            print(
-                "======== Received response from OpenAI "
-                f"in {request_duration:.3f}s ========",
-                flush=True,
-            )
-
-            cost = self._estimate_cost(response)
-            if cost is None:
-                cost_available = False
-                print(
-                    f"Estimated query cost: unavailable for "
-                    f"model {self.model!r}"
-                )
-            else:
-                total_cost += cost
-                print(f"Estimated query cost: ${cost:.6f}")
-
-            for choice in response.choices:
-                text = choice.message.content or ""
-
-                try:
-                    parsed = parse_response_text(text)
-
-                    if len(parsed) != 1:
-                        raise ValueError(
-                            "Expected exactly one answer per completion, "
-                            f"got {len(parsed)}."
-                        )
-
-                    all_answers.extend(parsed)
-
-                except Exception:
-                    print("Failure in json output - openai api endpoint")
-                    # Bad JSON / malformed response. Ignore this one;
-                    # the while loop will re-query the missing answer.
-                    pass
-
-        if not cost_available:
-            print(
-                f"Estimated query cost: unavailable for "
-                f"model {self.model!r}"
-            )
+        cost = self._estimate_cost(response)
+        if cost is None:
+            print(f"Estimated query cost: unavailable for model {self.model!r}")
         else:
-            print(
-                f"Estimated total query cost: ${total_cost:.6f}"
-            )
+            print(f"Estimated total query cost: ${cost:.6f}")
+
+        all_answers = []
+        for choice in response.choices:
+            parsed = choice.message.parsed
+            if parsed is None:
+                refusal = choice.message.refusal or "No structured output returned."
+                raise ValueError(f"OpenAI did not return a PTX kernel: {refusal}")
+            all_answers.append(parsed.model_dump(exclude_none=True))
 
         return all_answers

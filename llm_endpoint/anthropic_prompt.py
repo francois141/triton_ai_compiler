@@ -1,6 +1,6 @@
 from anthropic import Anthropic
 
-from .base import LLMEndpoint, parse_response_text
+from .base import LLMEndpoint, PtxKernel
 
 
 class AnthropicPrompt(LLMEndpoint):
@@ -43,16 +43,8 @@ class AnthropicPrompt(LLMEndpoint):
         output_tokens = getattr(usage, "output_tokens", 0) or 0
 
         return (
-            input_tokens * pricing["input"]
-            + output_tokens * pricing["output"]
+            input_tokens * pricing["input"] + output_tokens * pricing["output"]
         ) / 1_000_000
-
-    def _extract_text(self, response):
-        parts = []
-        for block in getattr(response, "content", []) or []:
-            if getattr(block, "type", None) == "text":
-                parts.append(block.text)
-        return "\n".join(parts)
 
     def generate_response(self, prompt, *, num_answers=None):
         requested = int(num_answers) if num_answers is not None else 1
@@ -60,22 +52,20 @@ class AnthropicPrompt(LLMEndpoint):
         if requested <= 0:
             raise ValueError("num_answers must be positive when provided.")
 
-        prompt = (
-            f"{prompt}\n\n"
-            "Generate exactly one answer dictionary as `ptx_kernel`."
-        )
+        prompt = f"{prompt}\n\nGenerate exactly one answer dictionary as `ptx_kernel`."
 
         all_answers = []
         total_cost = 0.0
         cost_available = True
 
-        while len(all_answers) < requested:
-            response = self.client.messages.create(
+        for _ in range(requested):
+            response = self.client.messages.parse(
                 model=self.model,
                 max_tokens=self.max_tokens,
                 messages=[
                     {"role": "user", "content": prompt},
                 ],
+                output_format=PtxKernel,
             )
 
             cost = self._estimate_cost(response)
@@ -86,22 +76,14 @@ class AnthropicPrompt(LLMEndpoint):
                 total_cost += cost
                 print(f"Estimated query cost: ${cost:.6f}")
 
-            text = self._extract_text(response)
-
-            try:
-                parsed = parse_response_text(text)
-
-                if len(parsed) != 1:
-                    raise ValueError(
-                        "Expected exactly one answer per completion, "
-                        f"got {len(parsed)}."
-                    )
-
-                all_answers.extend(parsed)
-            except Exception:
-                # Bad JSON / malformed response. Ignore this one;
-                # the while loop will re-query the missing answer.
-                pass
+            parsed = response.parsed_output
+            if parsed is None:
+                stop_reason = getattr(response, "stop_reason", None) or "unknown"
+                raise ValueError(
+                    "Anthropic did not return a PTX kernel "
+                    f"(stop reason: {stop_reason})."
+                )
+            all_answers.append(parsed.model_dump(exclude_none=True))
 
         if cost_available:
             print(f"Estimated total query cost: ${total_cost:.6f}")

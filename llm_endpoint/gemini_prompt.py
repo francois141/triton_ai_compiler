@@ -1,4 +1,4 @@
-from .base import LLMEndpoint, parse_response_text
+from .base import LLMEndpoint, PtxKernel
 
 
 class GeminiPrompt(LLMEndpoint):
@@ -46,10 +46,7 @@ class GeminiPrompt(LLMEndpoint):
         if requested <= 0:
             raise ValueError("num_answers must be positive when provided.")
 
-        prompt = (
-            f"{prompt}\n\n"
-            "Generate exactly one answer dictionary as `ptx_kernel`."
-        )
+        prompt = f"{prompt}\n\nGenerate exactly one answer dictionary as `ptx_kernel`."
 
         all_answers = []
         total_cost = 0.0
@@ -58,9 +55,10 @@ class GeminiPrompt(LLMEndpoint):
         config = self._types.GenerateContentConfig(
             candidate_count=1,
             response_mime_type="application/json",
+            response_json_schema=PtxKernel.model_json_schema(),
         )
 
-        while len(all_answers) < requested:
+        for _ in range(requested):
             response = self.client.models.generate_content(
                 model=self.model,
                 contents=prompt,
@@ -76,21 +74,11 @@ class GeminiPrompt(LLMEndpoint):
                 print(f"Estimated query cost: ${cost:.6f}")
 
             text = self._extract_text(response)
+            if not text:
+                raise ValueError("Gemini did not return a PTX kernel.")
 
-            try:
-                parsed = parse_response_text(text)
-
-                if len(parsed) != 1:
-                    raise ValueError(
-                        "Expected exactly one answer per completion, "
-                        f"got {len(parsed)}."
-                    )
-
-                all_answers.extend(parsed)
-            except Exception:
-                # Bad JSON / malformed response. Ignore this one;
-                # the while loop will re-query the missing answer.
-                pass
+            parsed = PtxKernel.model_validate_json(text)
+            all_answers.append(parsed.model_dump(exclude_none=True))
 
         if cost_available:
             print(f"Estimated total query cost: ${total_cost:.6f}")

@@ -2,11 +2,30 @@ from abc import ABC, abstractmethod
 import ast
 import json
 
+from typing import Annotated
+
+from pydantic import BaseModel, ConfigDict, Field
+
+
+PositiveInteger = Annotated[int, Field(ge=1)]
+
+
+class PtxKernel(BaseModel):
+    """Represent a validated PTX kernel returned by an LLM."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    ptx: str
+    num_threads_x: PositiveInteger
+    num_threads_y: PositiveInteger | None = None
+    num_threads_z: PositiveInteger | None = None
+
 
 class LLMEndpoint(ABC):
-
     @abstractmethod
-    def generate_response(self, prompt: str, *, num_answers: int | None = None) -> list[dict]:
+    def generate_response(
+        self, prompt: str, *, num_answers: int | None = None
+    ) -> list[dict]:
         """Generate a response from a prompt."""
         pass
 
@@ -42,7 +61,9 @@ def parse_response_text(text: str) -> list[dict]:
             return [obj]
         answers = obj.get("answers")
         if not isinstance(answers, list):
-            raise ValueError("Response dictionary must contain either a 'ptx' key or an 'answers' list.")
+            raise ValueError(
+                "Response dictionary must contain either a 'ptx' key or an 'answers' list."
+            )
         obj = answers
 
     if not isinstance(obj, list):
