@@ -52,27 +52,6 @@ target the exact PTX version and GPU target listed below. The operator defaults 
     """
 
 
-def ptx_header():
-    return """
-## PTX Header
-
-Use exactly this PTX header:
-
-.version {version}
-.target {target}
-.address_size {address_size}
-"""
-
-
-def extracted_signature_information(parameters):
-    return "\n\n".join(
-        [
-            "## Extracted Triton Signature Information",
-            format_argument_list(parameters),
-        ]
-    )
-
-
 def constexpr_values_block(spec):
     constexpr_params = [
         param for param in spec.parameters if _is_constexpr_annotation(param.annotation)
@@ -107,18 +86,11 @@ def constexpr_values_block(spec):
     )
 
 
-def num_warps_block(spec):
-    total_threads = 32 * spec.num_warps
+def launch_configuration_block() -> str:
     return "\n\n".join(
         [
-            "## Operator Warp Configuration",
-            "\n".join(
-                [
-                    f"- `num_warps` from the kernel: {spec.num_warps}",
-                    f"- The total CTA thread count must equal `32 * num_warps = {total_threads}`.",
-                    "- Query this warp count from the kernel metadata instead of assuming a fixed thread count.",
-                ]
-            ),
+            "## Launch Configuration",
+            "Only launch the kernel with exactly 128 threads.",
         ]
     )
 
@@ -188,7 +160,7 @@ def correctness_rules():
 - Respect all masks and boundary conditions exactly.
 - Assume pointer inputs refer to contiguous GPU global memory unless the Triton code says otherwise.
 - Treat tl.constexpr values as compile-time constants supplied by the operator defaults.
-- If PTX uses one thread for one element in a constexpr-sized tile, set `num_threads_x` to the matching tile size; otherwise explicitly loop each CTA's threads over the full constexpr tile.
+- If PTX uses one thread for one element in a constexpr-sized tile, map the 128 launched threads across that tile; otherwise explicitly loop the launched threads over the full constexpr tile.
 - Do not add, remove, reorder, or reinterpret runtime arguments.
 """.strip()
 
@@ -205,22 +177,19 @@ def commenting_rules():
 
 
 def performance_rules(target, version, spec):
-    total_threads = 32 * spec.num_warps
     return """
 ## Performance Rules
 
 Optimize for the specific Triton kernel shown below. Use only optimizations that are semantically valid for this kernel.
 
 Launch tuning guidance:
-- `num_threads_x` should be explicitly defined for this kernel and determines the number of threads launched in the CTA's x dimension.
-- If you need a multi-dimensional CTA shape, you may also define `num_threads_y` and `num_threads_z` to specify the y and z dimensions.
-- The sum of the provided thread dimensions must be exactly `32 * num_warps = {total_threads}`: `num_threads_x * num_threads_y * num_threads_z == {total_threads}`, treating omitted `num_threads_y` and `num_threads_z` as 1.
+- `num_threads_x` should be explicitly defined for this kernel.
+- If you need a multi-dimensional launch shape, you may also define `num_threads_y` and `num_threads_z`.
+- The product of the provided thread dimensions must be exactly 128, treating omitted `num_threads_y` and `num_threads_z` as 1.
 
 Hardware rule: 
-- Use modern GPU features as much as possible. Shared memory, ldmatrix, tensor cores, and async global-to-shared loads should be used when valid for the target.
-- Use normal `st.global` instructions for stores on `sm_89`.
-- You should be aggressive in the optimisations. If the code is not correct, next iteration will be used to fix the correctness issues. The goal is to get the fastest PTX possible for this kernel.
-""".format(total_threads=total_threads).strip()
+- Use modern GPU features as much as possible. Shared memory, ldmatrix, tensor cores, and async global-to-shared loads should be used when useful for the target.
+""".strip()
 
 
 def triton_kernel_block(source):
@@ -233,7 +202,6 @@ def triton_kernel_block(source):
 
 
 def output_contract(spec):
-    total_threads = 32 * spec.num_warps
     return """
 ## Output Contract
 
@@ -251,23 +219,11 @@ The output must follow this format:
 - generate exactly one answer;
 - put the PTX code directly under the top-level `"ptx"` key;
 - include `"num_threads_x"` as a positive Python integer literal for every answer;
-- include `"num_threads_y"` and `"num_threads_z"` only when the kernel needs a multi-dimensional CTA shape;
-- query `num_warps` from the kernel and make the sum of included thread dimensions exactly `32 * num_warps = __TOTAL_THREADS__`, treating omitted `"num_threads_y"` and `"num_threads_z"` as 1;
+- include `"num_threads_y"` and `"num_threads_z"` only when the kernel needs a multi-dimensional launch shape;
+- the product of the included thread dimensions must equal 128, treating omitted `"num_threads_y"` and `"num_threads_z"` as 1;
 - do not include tl.constexpr parameters in the dictionary; the operator defaults are used when launching the PTX kernel;
 - make the PTX string valid PTX;
 - include concise human-readable PTX comments that explain the logic and each logical instruction group;
 - ASCII-only;
 - free of markdown fences;
-- free of explanations.
--  Predicated execution does not support block syntax. Instead, the predicate must be applied individually to each instruction by placing it at the beginning of the instruction. 
-
-The following syntax is invalid:
-
-@p_warp0 {
-    setp.lt.u32 pvalid, rLane, 8;
-}
-
-The following syntax is valid
-
-@p_warp0 setp.lt.u32 pvalid, rLane, 8;
-""".replace("__TOTAL_THREADS__", str(total_threads)).strip()
+""".strip()

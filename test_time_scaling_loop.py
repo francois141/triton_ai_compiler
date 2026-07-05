@@ -14,7 +14,11 @@ from prompts import (
     build_repair_prompt_for_operator,
 )
 from storage import JsonDatasetWriter, ensure_safe_folder_name
-from triton_ptx.evaluation import Payload, TritonPTXCandidateEvaluator
+from triton_ptx.evaluation import (
+    EvaluatedCandidate,
+    Payload,
+    TritonPTXCandidateEvaluator,
+)
 from triton_ptx.helpers.environment import get_ptx_system_config
 from triton_ptx.helpers.ptx import parse_ptx_signature
 from triton_ptx.helpers.triton import dump_kernel_ptx
@@ -37,8 +41,17 @@ DEFAULT_CONFIG = {
 }
 
 
-def needs_compile_or_verification_retry(candidate) -> bool:
+def needs_compile_or_verification_retry(candidate: EvaluatedCandidate) -> bool:
+    """Return whether a failed candidate can benefit from an LLM repair."""
     if not candidate.compiles:
+        return True
+
+    sanitizer_report = candidate.sanitizer_report
+    if (
+        not candidate.correct
+        and sanitizer_report.get("available") is True
+        and sanitizer_report.get("clean") is False
+    ):
         return True
 
     message = (candidate.message or "").lower()
@@ -86,14 +99,19 @@ def run_test_time_scaling_loop(
 
     # Keep an immutable per-run archive in database/<timestamp>_<kernel>.
     run_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_archive_root = database_root / f"{run_timestamp}_{ensure_safe_folder_name(kernel_cls.__name__)}"
+    run_archive_root = (
+        database_root
+        / f"{run_timestamp}_{ensure_safe_folder_name(kernel_cls.__name__)}"
+    )
     run_archive_root.mkdir(parents=True, exist_ok=True)
 
     print(f"Compiling baseline Triton PTX for {kernel_cls.__name__}")
     baseline_ptx = dump_kernel_ptx(kernel_cls())
     ptx_signature = parse_ptx_signature(baseline_ptx)
     version, target, address_size = get_ptx_system_config()
-    (run_archive_root / "compiled_triton_kernel.ptx").write_text(baseline_ptx + "\n", encoding="utf-8")
+    (run_archive_root / "compiled_triton_kernel.ptx").write_text(
+        baseline_ptx + "\n", encoding="utf-8"
+    )
 
     OmegaConf.save(config, run_archive_root / "config.yaml")
     experiment_metadata = {
@@ -132,7 +150,9 @@ def run_test_time_scaling_loop(
         ptx_signature=ptx_signature,
     )
 
-    (run_archive_root / "initial_prompt.md").write_text(current_prompt + "\n", encoding="utf-8")
+    (run_archive_root / "initial_prompt.md").write_text(
+        current_prompt + "\n", encoding="utf-8"
+    )
 
     current_candidates = []
 
@@ -150,7 +170,10 @@ def run_test_time_scaling_loop(
             original_result = result
 
             retry_index = 1
-            while needs_compile_or_verification_retry(result) and retry_index <= max_retries:
+            while (
+                needs_compile_or_verification_retry(result)
+                and retry_index <= max_retries
+            ):
                 if retry_index == 1:
                     repair_results.append(original_result)
 
@@ -169,8 +192,13 @@ def run_test_time_scaling_loop(
                     f"repair_prompt_iteration_{round_index}"
                     f"_candidate_{index}_retry_{retry_index}.md"
                 )
-                (run_archive_root / repair_prompt_name).write_text(
+                archive_repair_prompt_path = run_archive_root / repair_prompt_name
+                archive_repair_prompt_path.write_text(
                     repair_prompt + "\n",
+                    encoding="utf-8",
+                )
+                archive_repair_prompt_path.with_suffix(".json").write_text(
+                    result.to_json() + "\n",
                     encoding="utf-8",
                 )
 
@@ -210,7 +238,9 @@ def run_test_time_scaling_loop(
             ptx_signature=ptx_signature,
         )
 
-        archive_follow_up_path = run_archive_root / f"follow_up_iteration_{round_index}.md"
+        archive_follow_up_path = (
+            run_archive_root / f"follow_up_iteration_{round_index}.md"
+        )
         archive_follow_up_path.write_text(follow_up_prompt + "\n", encoding="utf-8")
 
         current_prompt = follow_up_prompt

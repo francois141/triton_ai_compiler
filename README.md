@@ -80,6 +80,13 @@ Run test-time scaling against Gemini 2.5 Pro:
 python3 -m test_time_scaling_loop AddKernel --config configs/test_time_scaling_gemini.yaml
 ```
 
+
+Run test-time scaling against Openrouter: 
+
+```bash
+python3 -m test_time_scaling_loop AddKernel --config configs/test_time_scaling_openrouter.yaml
+```
+
 Write test-time scaling artifacts to a custom database directory:
 
 ```bash

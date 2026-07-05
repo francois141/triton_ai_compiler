@@ -12,12 +12,10 @@ from .blocks import (
     commenting_rules,
     correctness_rules,
     constexpr_values_block,
-    extracted_signature_information,
     follow_up_task,
-    num_warps_block,
+    launch_configuration_block,
     output_contract,
     performance_rules,
-    ptx_header,
     signature_template,
     triton_kernel_block,
 )
@@ -155,16 +153,8 @@ def prompt_builder(
         async_load_store_skill(),
         common_ptxas_issues_skill(),
         follow_up_task().strip(),
-        ptx_header()
-        .format(
-            version=version,
-            target=target,
-            address_size=address_size,
-        )
-        .strip(),
-        extracted_signature_information(spec.parameters),
         constexpr_values_block(spec),
-        num_warps_block(spec),
+        launch_configuration_block(),
         signature_template(
             spec.parameters,
             version=version,

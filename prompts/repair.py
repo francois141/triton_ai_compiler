@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import orjson
 
+from .skills import async_load_store_skill
 from triton_ptx.evaluation import EvaluatedCandidate
 from triton_ptx.helpers.kernels import extract_specification_from_operator
 from triton_ptx.kernels.base import TritonPTXKernel
@@ -9,10 +10,8 @@ from .blocks import (
     commenting_rules,
     correctness_rules,
     constexpr_values_block,
-    extracted_signature_information,
-    num_warps_block,
+    launch_configuration_block,
     output_contract,
-    ptx_header,
     signature_template,
     triton_kernel_block,
 )
@@ -21,15 +20,10 @@ from .skills import common_ptxas_issues_skill
 
 
 def repair_task(retry_index: int, max_retries: int) -> str:
-    return f"""
+    return """
 # PTX Isolated Candidate Repair
 
-You are given one failed PTX candidate for a Triton kernel.
-Repair only this candidate and return one replacement answer.
-
-This is repair attempt {retry_index} of {max_retries}. Focus on the concrete
-compiler and verification feedback below. Do not blend in other candidates or
-produce multiple alternatives.
+You are given one failed PTX candidate for a Triton kernel and you have to repair it. 
 """.strip()
 
 
@@ -37,12 +31,20 @@ def repair_rules() -> str:
     return """
 ## Repair Rules
 
-- Compilation is the first priority, correctness is second, and performance is last.
 - Fix only the first concrete compiler error class and make the smallest change needed.
 - Preserve the exact PTX header, kernel entry name, runtime argument order, and launch metadata keys.
-- If compilation failed, prioritize valid PTX syntax, declarations, parameter loads, address spaces, and instruction types.
-- If correctness verification failed, prioritize matching the Triton semantics, masks, indexing, and stores exactly.
-- Return one complete replacement candidate, not a patch or explanation.
+- Return the ptx code with the same json format, not a patch or explanation.
+
+# The candidate intentionally uses cp.async and asynchronous shared-memory staging.
+
+Your job is NOT to redesign the kernel.
+
+Only fix the PTXAS compilation errors while preserving:
+- cp.async
+- async commit/wait groups
+- shared-memory pipeline
+- buffering strategy
+- tiling strategy
 """.strip()
 
 
@@ -79,16 +81,9 @@ def prompt_builder(
     sections = [
         repair_task(retry_index, max_retries),
         common_ptxas_issues_skill(),
-        ptx_header()
-        .format(
-            version=version,
-            target=target,
-            address_size=address_size,
-        )
-        .strip(),
-        extracted_signature_information(spec.parameters),
+        async_load_store_skill(),
         constexpr_values_block(spec),
-        num_warps_block(spec),
+        launch_configuration_block(),
         signature_template(
             spec.parameters,
             version=version,

@@ -7,6 +7,7 @@ def async_load_store_skill() -> str:
     Returns:
         Markdown prompt text describing async load and store requirements.
     """
+    return """"""
     return """
 # Async Load and Store Skills
 
@@ -42,6 +43,35 @@ cp.async.wait_group 0;
 ```
 
 Use the 16-byte path only when alignment and full-vector bounds are guaranteed.
+
+###`cvta.to` (Convert Address)
+
+The `cvta.to` instruction converts a **generic address** into an address belonging to a specific PTX memory space (`.global`, `.shared`, `.local`, or `.const`).
+
+```ptx
+cvta.to.global.u64  dst, src;
+cvta.to.shared.u64  dst, src;
+cvta.to.local.u64   dst, src;
+cvta.to.const.u64   dst, src;
+```
+
+- `dst`: destination register (typically `.u64`)
+- `src`: source generic address
+- `.global`, `.shared`, `.local`, `.const`: target memory space
+
+## Example
+
+```ptx
+.reg .u64 %rd1, %rd2;
+
+cvta.to.global.u64 %rd2, %rd1;
+ld.global.u32 %r1, [%rd2];
+```
+
+In particular, this is wrong
+
+.shared .align 16 .b8 smemA[16384];
+cvta.to.shared.u64 sA_base, smemA; // Not a generic pointer here
 """.strip()
 
 
@@ -52,7 +82,7 @@ def common_ptxas_issues_skill() -> str:
         Markdown prompt text listing common PTXAS issues and mitigations.
     """
     return """
-# Common PTXAS Issues
+# Common PTX Issues
 
 - `cvta.to.shared` requires a register operand. Move a shared symbol into a
   `.u64` register before conversion, and use a shared-address form accepted by
@@ -67,8 +97,13 @@ def common_ptxas_issues_skill() -> str:
 - Control register pressure by reducing per-thread accumulator tiles, reusing
   address temporaries, and avoiding unnecessary `.u64` registers. Inspect
   verbose compiler feedback before tuning further.
-- Do not invent async global stores. On `sm_89`, `cp.async` supports
-  global-to-shared loads; use `st.global` for stores.
-- During syntax repair, do not introduce `mma`, `ldmatrix`, swizzling, or double
-  buffering. Consider those only after the candidate compiles and is correct.
+- The following syntax is invalid:
+
+@p_warp0 {
+    setp.lt.u32 pvalid, rLane, 8;
+}
+
+The following syntax is valid
+
+@p_warp0 setp.lt.u32 pvalid, rLane, 8;
 """.strip()
