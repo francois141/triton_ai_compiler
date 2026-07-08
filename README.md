@@ -68,6 +68,16 @@ compile, correctness, and benchmark tools:
 python3 -m openai_agent_tools MatrixMultiplicationKernel
 ```
 
+The complete response trace is written to `trace.json`, while the final
+candidate and its measured speedup are written beside it as `trace_final.json`.
+To continue
+optimizing an existing candidate, pass either its file or inline JSON:
+
+```bash
+python3 -m openai_agent_tools MatrixMultiplicationKernel \
+  --start-json trace_final.json
+```
+
 Run test-time scaling against Anthropic Claude Opus 4.8:
 
 ```bash

@@ -2,354 +2,151 @@ from __future__ import annotations
 
 import argparse
 import json
-from dataclasses import asdict, is_dataclass
+import sys
+from time import perf_counter
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from openai import OpenAI
-from llm_endpoint.base import parse_response_text
-from prompts import (
-    build_follow_up_prompt_for_operator,
-    build_prompt_for_operator,
-    build_repair_prompt_for_operator,
+
+LOCAL_TRITON_PTX_ROOT = Path(__file__).resolve().parent / "triton_ptx"
+if LOCAL_TRITON_PTX_ROOT.is_dir():
+    sys.path.insert(0, str(LOCAL_TRITON_PTX_ROOT))
+
+from prompts import build_prompt_for_operator  # noqa: E402
+from llm_endpoint.base import PtxKernel  # noqa: E402
+from triton_ptx import (  # noqa: E402
+    Payload,
+    TritonPTXCandidateEvaluator,
+    dump_kernel_ptx,
+    get_ptx_system_config,
+    parse_ptx_signature,
+    resolve_kernel,
 )
-from triton_ptx.evaluation import EvaluatedCandidate, Payload, TritonPTXCandidateEvaluator
-from triton_ptx.evaluation import compile_ptx
-from triton_ptx.helpers.environment import get_ptx_system_config
-from triton_ptx.helpers.ptx import parse_ptx_signature
-from triton_ptx.helpers.triton import dump_kernel_ptx
-from triton_ptx.kernels import resolve_kernel
 
-PACKAGE_DIR = Path(__file__).resolve().parent
-TENSOR_CORE_SKILL_PATH = PACKAGE_DIR / "skills" / "use-tensor-cores-ptx-mma" / "SKILL.md"
-
-TENSOR_CORE_FALLBACK_PROMPT = """You are optimizing NVIDIA PTX kernels.
-Prefer Tensor Core paths for GEMM-like work when viable: FP16/BF16/TF32 inputs, FP32 accumulation,
-ldmatrix/shared-memory staging, and mma.sync.aligned or newer WGMMA-family instructions. Use local
-tools to compile, verify, benchmark, and repair candidates before finalizing."""
-
-AGENT_PROMPTS_PATH = PACKAGE_DIR / "prompts"
-SYSTEM_PROMPT_PATH = AGENT_PROMPTS_PATH / "SYSTEM.md"
-
-def log_section(title: str) -> None:
-    print("\n" + "=" * 80)
-    print(title)
-    print("=" * 80)
-
-
-def log_subsection(title: str) -> None:
-    print("\n" + "-" * 80)
-    print(title)
-    print("-" * 80)
-
-
-def log_json(title: str, value: Any, limit: int = 300) -> None:
-    log_subsection(title)
-    text = json.dumps(_json_safe(value), indent=2, ensure_ascii=False)
-    print(text)
-    return
-    if len(text) > limit:
-        print(text[:limit])
-        print(f"\n... truncated after {limit} characters ...")
-    else:
-        print(text)
-
-
-def load_tensor_core_skill_prompt(skill_path: Path = TENSOR_CORE_SKILL_PATH) -> str:
-    if not skill_path.exists():
-        return TENSOR_CORE_FALLBACK_PROMPT
-
-    skill_text = skill_path.read_text(encoding="utf-8").strip()
-    return (
-        "You are optimizing NVIDIA PTX kernels with the following skill loaded.\n\n"
-        f"{skill_text}\n\n"
-        "Use the available local tools to compile, verify, benchmark, and repair candidates before finalizing."
-    )
-
-
-def get_system_prompt() -> str:
-    system_prompt = SYSTEM_PROMPT_PATH.read_text()
-    skills = [load_tensor_core_skill_prompt()]
-    skill_prompt = "\n=============\n".join(skills)
-    return system_prompt + "\n\n<skills>" + skill_prompt + "\n</skills>"
-
-
-def _json_safe(value: Any) -> Any:
-    if is_dataclass(value):
-        return _json_safe(asdict(value))
-    if isinstance(value, dict):
-        return {str(key): _json_safe(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple, set)):
-        return [_json_safe(item) for item in value]
-    if isinstance(value, Path):
-        return str(value)
-    if hasattr(value, "detach") and hasattr(value, "cpu") and hasattr(value, "tolist"):
-        return _json_safe(value.detach().cpu().tolist())
-    if hasattr(value, "item") and callable(value.item):
-        try:
-            return _json_safe(value.item())
-        except Exception:
-            pass
-    try:
-        json.dumps(value)
-        return value
-    except TypeError:
-        return str(value)
-
-
-def _candidate_from_text_or_payload(candidate: Any) -> Payload:
-    if isinstance(candidate, dict):
-        return Payload.from_input(candidate)
-    if isinstance(candidate, str):
-        parsed = parse_response_text(candidate)
-        if len(parsed) != 1:
-            raise ValueError(f"Expected exactly one candidate, got {len(parsed)}.")
-        return Payload.from_input(parsed[0])
-    raise TypeError("candidate must be a dictionary or serialized candidate text.")
-
-
-PAYLOAD_INPUT_SCHEMA: dict[str, Any] = {
+SYSTEM_PROMPT_PATH = Path(__file__).parent / "prompts" / "SYSTEM.md"
+PAYLOAD_SCHEMA = {
     "type": "object",
     "properties": {
         "ptx": {"type": "string", "minLength": 1},
-        "threads_x": {"type": "integer", "minimum": 1},
-        "threads_y": {"type": "integer", "minimum": 1},
-        "threads_z": {"type": "integer", "minimum": 1},
+        "num_threads_x": {"type": "integer", "minimum": 1},
+        "num_threads_y": {
+            "anyOf": [{"type": "integer", "minimum": 1}, {"type": "null"}]
+        },
+        "num_threads_z": {
+            "anyOf": [{"type": "integer", "minimum": 1}, {"type": "null"}]
+        },
     },
-    "required": ["ptx", "threads_x"],
+    "required": ["ptx", "num_threads_x", "num_threads_y", "num_threads_z"],
     "additionalProperties": False,
 }
-
-
-def _evaluated_candidate_from_dict(data: dict[str, Any]) -> EvaluatedCandidate:
-    fields = set(EvaluatedCandidate.__dataclass_fields__) - {"sort_index"}
-    payload = {key: value for key, value in data.items() if key in fields}
-
-    defaults = {
-        "kernel_name": "",
-        "git_commit_hash": "unknown",
-        "payload": {},
-        "compiles": False,
-        "correct": False,
-        "message": "",
-        "triton_p20": float("inf"),
-        "triton_p50": float("inf"),
-        "triton_p80": float("inf"),
-        "triton_p90": float("inf"),
-        "triton_p95": float("inf"),
-        "triton_p99": float("inf"),
-        "p20": float("inf"),
-        "p50": float("inf"),
-        "p80": float("inf"),
-        "p90": float("inf"),
-        "p95": float("inf"),
-        "p99": float("inf"),
-        "speedup_vs_triton": 0,
-        "compile_output": "",
-        "compile_error": "",
-        "timing_error": "",
-        "verifier_report": {},
-    }
-    defaults.update(payload)
-    return EvaluatedCandidate(**defaults)
-
-
-def get_kernel_prompt(kernel_name: str, num_answers: int = 1) -> dict[str, Any]:
-    kernel_cls = resolve_kernel(kernel_name)
-    baseline_ptx = dump_kernel_ptx(kernel_cls())
-    ptx_signature = parse_ptx_signature(baseline_ptx)
-    version, target, address_size = get_ptx_system_config()
-
-    prompt = build_prompt_for_operator(
-        kernel_cls,
-        num_answers=num_answers,
-        version=version,
-        target=target,
-        address_size=address_size,
-        ptx_signature=ptx_signature,
-    )
-
-    result = {
-        "kernel_name": kernel_cls.__name__,
-        "version": version,
-        "target": target,
-        "address_size": address_size,
-        #"ptx_signature": ptx_signature,
-        #"baseline_ptx": baseline_ptx,
-        "prompt": prompt,
-    }
-
-    log_json("KERNEL PROMPT CONTEXT", result)
-    return result
-
-
-def compile_candidate(kernel_name: str, candidate: dict[str, Any] | str) -> dict[str, Any]:
-    payload = _candidate_from_text_or_payload(candidate)
-
-    log_json("COMPILING CANDIDATE PAYLOAD", payload)
-
-    result = compile_ptx(payload)
-    result = _json_safe(result)
-
-    log_json("COMPILE RESULT", result)
-    return result
-
-def evaluate_candidate(
-    kernel_name: str,
-    candidate: dict[str, Any] | str,
-) -> dict[str, Any]:
-    kernel_cls = resolve_kernel(kernel_name)
-    payload = _candidate_from_text_or_payload(candidate)
-
-    log_json("EVALUATING CANDIDATE PAYLOAD", payload)
-
-    evaluator = TritonPTXCandidateEvaluator(kernel_cls)
-    result = evaluator.evaluate(payload)
-
-    result_dict = _json_safe(result.to_dict())
-    log_json("EVALUATION RESULT", result_dict)
-    return result_dict
-
-
-def get_repair_prompt(
-    kernel_name: str,
-    evaluation_result: dict[str, Any],
-    retry_index: int = 1,
-    max_retries: int = 3,
-) -> dict[str, Any]:
-    kernel_cls = resolve_kernel(kernel_name)
-    version, target, address_size = get_ptx_system_config()
-    baseline_ptx = dump_kernel_ptx(kernel_cls())
-    ptx_signature = parse_ptx_signature(baseline_ptx)
-
-    failed_candidate = _evaluated_candidate_from_dict(evaluation_result)
-
-    prompt = build_repair_prompt_for_operator(
-        failed_candidate,
-        kernel_cls,
-        retry_index=retry_index,
-        max_retries=max_retries,
-        version=version,
-        target=target,
-        address_size=address_size,
-        ptx_signature=ptx_signature,
-    )
-
-    result = {"prompt": prompt}
-    log_json("REPAIR PROMPT", result)
-    return result
-
-
-def get_follow_up_prompt(
-    kernel_name: str,
-    evaluation_results: list[dict[str, Any]],
-    num_answers: int = 1,
-) -> dict[str, Any]:
-    kernel_cls = resolve_kernel(kernel_name)
-    version, target, address_size = get_ptx_system_config()
-    baseline_ptx = dump_kernel_ptx(kernel_cls())
-    ptx_signature = parse_ptx_signature(baseline_ptx)
-
-    candidates = [_evaluated_candidate_from_dict(result) for result in evaluation_results]
-
-    prompt = build_follow_up_prompt_for_operator(
-        candidates,
-        kernel_cls,
-        num_answers=num_answers,
-        version=version,
-        target=target,
-        address_size=address_size,
-        ptx_signature=ptx_signature,
-    )
-
-    result = {"prompt": prompt}
-    log_json("FOLLOW-UP PROMPT", result)
-    return result
-
-
-TOOL_FUNCTIONS: dict[str, Callable[..., dict[str, Any]]] = {
-    "compile_candidate": compile_candidate,
-    "evaluate_candidate": evaluate_candidate,
-    "get_repair_prompt": get_repair_prompt,
-    "get_follow_up_prompt": get_follow_up_prompt,
+RESPONSE_FORMAT = {
+    "type": "json_schema",
+    "name": "ptx_kernel",
+    "strict": True,
+    "schema": PAYLOAD_SCHEMA,
 }
 
-
-OPENAI_TOOLS = [
+TOOLS = [
+    {"type": "web_search"},
     {
         "type": "function",
-        "function": {
-            "name": "compile_candidate",
-            "description": "Compile a PTX candidate payload without running full correctness or benchmark evaluation.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "kernel_name": {"type": "string"},
-                    "candidate": {
-                        "description": "Candidate payload object or serialized candidate text containing PTX and launch dimensions.",
-                        "oneOf": [PAYLOAD_INPUT_SCHEMA, {"type": "string"}],
-                    },
-                },
-                "required": ["kernel_name", "candidate"],
-                "additionalProperties": False,
-            },
+        "name": "triton_ptx",
+        "description": "Compile, test, verify, and benchmark one PTX candidate.",
+        "parameters": {
+            "type": "object",
+            "properties": {"candidate": PAYLOAD_SCHEMA},
+            "required": ["candidate"],
+            "additionalProperties": False,
         },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "evaluate_candidate",
-            "description": "Compile, verify correctness, benchmark, and return timing/speedup metrics for one PTX candidate.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "kernel_name": {"type": "string"},
-                    "candidate": {
-                        "description": "Candidate payload object or serialized candidate text containing PTX and launch dimensions.",
-                        "oneOf": [PAYLOAD_INPUT_SCHEMA, {"type": "string"}],
-                    },
-                },
-                "required": ["kernel_name", "candidate"],
-                "additionalProperties": False,
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_repair_prompt",
-            "description": "Build a repair prompt from an evaluation result after compile, verification, or benchmark failure.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "kernel_name": {"type": "string"},
-                    "evaluation_result": {"type": "object"},
-                    "retry_index": {"type": "integer", "minimum": 1, "default": 1},
-                    "max_retries": {"type": "integer", "minimum": 0, "default": 3},
-                },
-                "required": ["kernel_name", "evaluation_result"],
-                "additionalProperties": False,
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_follow_up_prompt",
-            "description": "Build a follow-up prompt from previous evaluated candidates.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "kernel_name": {"type": "string"},
-                    "evaluation_results": {"type": "array", "items": {"type": "object"}},
-                    "num_answers": {"type": "integer", "minimum": 1, "default": 1},
-                },
-                "required": ["kernel_name", "evaluation_results"],
-                "additionalProperties": False,
-            },
-        },
+        "strict": True,
     },
 ]
+
+
+def build_initial_prompt(kernel_name: str) -> str:
+    """Build the optimization prompt for a kernel.
+
+    Args:
+        kernel_name: Registered Triton PTX kernel class name.
+
+    Returns:
+        Complete initial optimization prompt.
+    """
+    kernel_cls = resolve_kernel(kernel_name)
+    version, target, address_size = get_ptx_system_config()
+    signature = parse_ptx_signature(dump_kernel_ptx(kernel_cls()))
+    return build_prompt_for_operator(
+        kernel_cls,
+        num_answers=1,
+        version=version,
+        target=target,
+        address_size=address_size,
+        ptx_signature=signature,
+    )
+
+
+def _write_trace(trace_path: Path | None, events: list[dict[str, Any]]) -> None:
+    if trace_path is not None:
+        trace_path.write_text(json.dumps(events, indent=2), encoding="utf-8")
+
+
+def _load_start_json(start_json: str | Path | None) -> PtxKernel | None:
+    """Load and validate an optional starting implementation.
+
+    Args:
+        start_json: Inline candidate JSON, a JSON file path, or ``None``.
+
+    Returns:
+        The validated starting candidate, or ``None`` when one was not supplied.
+
+    Raises:
+        OSError: If a supplied JSON file cannot be read.
+        ValueError: If the JSON does not contain a valid PTX candidate.
+    """
+    if start_json is None:
+        return None
+
+    value = str(start_json)
+    serialized_candidate = (
+        value
+        if value.lstrip().startswith("{")
+        else Path(value).read_text(encoding="utf-8")
+    )
+    candidate_data = json.loads(serialized_candidate)
+    if not isinstance(candidate_data, dict):
+        raise ValueError("Starting candidate JSON must contain an object.")
+    candidate_data.pop("speedup", None)
+    return PtxKernel.model_validate(candidate_data)
+
+
+def _final_path(trace_path: Path) -> Path:
+    """Return the final-answer path corresponding to a trace path.
+
+    Args:
+        trace_path: Full response trace destination.
+
+    Returns:
+        Sibling path with ``_final`` appended to the trace stem.
+    """
+    return trace_path.with_name(f"{trace_path.stem}_final.json")
+
+
+def _candidate_key(candidate: PtxKernel) -> tuple[str, int, int | None, int | None]:
+    """Return a stable lookup key for a candidate implementation.
+
+    Args:
+        candidate: Validated PTX candidate.
+
+    Returns:
+        PTX and launch dimensions identifying the candidate.
+    """
+    return (
+        candidate.ptx,
+        candidate.num_threads_x,
+        candidate.num_threads_y,
+        candidate.num_threads_z,
+    )
 
 
 def run_agent_loop(
@@ -358,146 +155,189 @@ def run_agent_loop(
     model: str = "gpt-5",
     max_tool_rounds: int = 20,
     reasoning_effort: str | None = "medium",
-    trace_path: str | Path | None = "trace.json",
+    trace_path: Path | None = Path("trace.json"),
+    start_json: str | Path | None = None,
 ) -> str:
+    """Optimize a kernel with native web search and one local evaluation tool.
+
+    Args:
+        kernel_name: Registered Triton PTX kernel class name.
+        model: OpenAI model identifier.
+        max_tool_rounds: Maximum model responses before stopping.
+        reasoning_effort: Optional reasoning effort.
+        trace_path: Optional response trace destination.
+        start_json: Optional inline JSON or JSON file containing the implementation
+            from which optimization should continue.
+
+    Returns:
+        Final model response text.
+
+    Raises:
+        RuntimeError: If the model does not finish within the round limit.
+    """
+    evaluator = TritonPTXCandidateEvaluator(resolve_kernel(kernel_name))
     client = OpenAI()
+    initial_prompt = build_initial_prompt(kernel_name)
+    starting_candidate = _load_start_json(start_json)
+    if starting_candidate is not None:
+        initial_prompt = (
+            f"{initial_prompt}\n\n"
+            "Continue optimizing from this current implementation. Evaluate it or "
+            "improve it using the existing optimization loop:\n"
+            f"{starting_candidate.model_dump_json(exclude_none=False, indent=2)}"
+        )
+    input_items: list[Any] = [{"role": "user", "content": initial_prompt}]
+    previous_response_id: str | None = None
+    responses: list[dict[str, Any]] = []
+    measured_speedups: dict[tuple[str, int, int | None, int | None], float] = {}
 
-    kernel_context = get_kernel_prompt(kernel_name)
-
-    messages: list[dict[str, Any]] = [
-        {"role": "system", "content": get_system_prompt()},
-        {"role": "user", "content": kernel_context["prompt"]},
-    ]
-
-    trace: list[dict[str, Any]] = []
-
-    for round_idx in range(max_tool_rounds):
-        log_section(f"MODEL ROUND {round_idx + 1}")
-
-        create_kwargs: dict[str, Any] = {
+    for round_index in range(1, max_tool_rounds + 1):
+        print(
+            f"=== Agent iteration {round_index}/{max_tool_rounds}: "
+            "requesting the next optimization step ===",
+            flush=True,
+        )
+        kwargs: dict[str, Any] = {
             "model": model,
-            "messages": messages,
-            "tools": OPENAI_TOOLS,
+            "instructions": SYSTEM_PROMPT_PATH.read_text(encoding="utf-8"),
+            "input": input_items,
+            "tools": TOOLS,
+            "text": {"format": RESPONSE_FORMAT},
         }
-
+        if previous_response_id is not None:
+            kwargs["previous_response_id"] = previous_response_id
         if reasoning_effort is not None:
-            create_kwargs["reasoning_effort"] = reasoning_effort
+            kwargs["reasoning"] = {"effort": reasoning_effort}
 
-        response = client.chat.completions.create(**create_kwargs)
-
-        message = response.choices[0].message
-
-        print(message)
-        message_dict = message.model_dump(exclude_none=True)
-
-        messages.append(message_dict)
-
-        trace.append(
-            {
-                "round": round_idx + 1,
-                "type": "assistant",
-                "message": _json_safe(message_dict),
-            }
+        request_start = perf_counter()
+        response = client.responses.create(**kwargs)
+        request_duration = perf_counter() - request_start
+        print(
+            f"=== Agent iteration {round_index}: received model response "
+            f"in {request_duration:.3f}s ===",
+            flush=True,
         )
+        previous_response_id = response.id
+        responses.append(response.model_dump(mode="json"))
+        _write_trace(trace_path, responses)
+        calls = [item for item in response.output if item.type == "function_call"]
 
-        if VERBOSE:
-            if message.content:
-                log_subsection("ASSISTANT CONTENT")
-                print(message.content)
-
-            if message.tool_calls:
-                log_subsection("ASSISTANT TOOL CALLS")
-                for tool_call in message.tool_calls:
-                    print(f"\nTool: {tool_call.function.name}")
-                    print(tool_call.function.arguments)
-
-        tool_calls = message.tool_calls or []
-        if not tool_calls:
-            if trace_path:
-                Path(trace_path).write_text(
-                    json.dumps(trace, indent=2, ensure_ascii=False),
-                    encoding="utf-8",
+        if not calls:
+            print(
+                f"=== Agent iteration {round_index}: optimization complete; "
+                "returning the best verified candidate ===",
+                flush=True,
+            )
+            final_candidate = PtxKernel.model_validate_json(response.output_text)
+            speedup = measured_speedups.get(_candidate_key(final_candidate))
+            if speedup is None:
+                evaluated_final = evaluator.evaluate(
+                    Payload.from_input(final_candidate.model_dump())
                 )
-            return message.content or ""
+                speedup = evaluated_final.speedup_vs_triton
+            final_payload = final_candidate.model_dump(exclude_none=True)
+            final_payload["speedup"] = speedup
+            final_json = json.dumps(final_payload, indent=2)
+            if trace_path is not None:
+                _final_path(trace_path).write_text(f"{final_json}\n", encoding="utf-8")
+            return final_json
 
-        for tool_call in tool_calls:
-            name = tool_call.function.name
-            args = json.loads(tool_call.function.arguments or "{}")
-
-            log_json(f"TOOL INPUT: {name}", args)
-
-            try:
-                result = TOOL_FUNCTIONS[name](**args)
-            except Exception as exc:
-                result = {
-                    "error": f"{type(exc).__name__}: {exc}",
-                    "tool": name,
-                    "arguments": args,
-                }
-
-            safe_result = _json_safe(result)
-
-            log_json(f"TOOL OUTPUT: {name}", safe_result)
-
-            trace.append(
+        input_items = []
+        for call_index, call in enumerate(calls, start=1):
+            print(
+                f"=== Agent iteration {round_index}: evaluating candidate "
+                f"{call_index}/{len(calls)} ===",
+                flush=True,
+            )
+            candidate = json.loads(call.arguments)["candidate"]
+            validated_candidate = PtxKernel.model_validate(candidate)
+            print(
+                "--- Generated candidate ---\n"
+                f"{json.dumps(candidate, indent=2)}\n"
+                "--- End generated candidate ---",
+                flush=True,
+            )
+            evaluated_candidate = evaluator.evaluate(Payload.from_input(candidate))
+            measured_speedups[_candidate_key(validated_candidate)] = (
+                evaluated_candidate.speedup_vs_triton
+            )
+            result_json = evaluated_candidate.to_json(indent=2)
+            result = json.loads(result_json)
+            print(
+                f"Candidate result: compiles={evaluated_candidate.compiles}, "
+                f"correct={evaluated_candidate.correct}, "
+                f"p50={evaluated_candidate.p50}, "
+                f"speedup={evaluated_candidate.speedup_vs_triton}, "
+                f"message={evaluated_candidate.message}",
+                flush=True,
+            )
+            if evaluated_candidate.verifier_report:
+                verifier_report = evaluated_candidate.verifier_report
+                print(
+                    "Verifier report: "
+                    f"status={verifier_report.get('status')}, "
+                    f"size={verifier_report.get('size')}, "
+                    f"iteration={verifier_report.get('iteration')}, "
+                    f"num_wrong={verifier_report.get('num_wrong')}",
+                    flush=True,
+                )
+            print(
+                "--- Evaluator output ---\n"
+                f"{result_json}\n"
+                "--- End evaluator output ---",
+                flush=True,
+            )
+            responses.append(
                 {
-                    "round": round_idx + 1,
-                    "type": "tool",
-                    "tool": name,
-                    "args": _json_safe(args),
-                    "result": safe_result,
+                    "agent_iteration": round_index,
+                    "candidate_index": call_index,
+                    "evaluation": result,
                 }
             )
-
-            messages.append(
+            _write_trace(trace_path, responses)
+            input_items.append(
                 {
-                    "role": "tool",
-                    "tool_call_id": tool_call.id,
-                    "content": json.dumps(safe_result, ensure_ascii=False),
+                    "type": "function_call_output",
+                    "call_id": call.call_id,
+                    "output": result_json,
                 }
             )
 
-        if trace_path:
-            Path(trace_path).write_text(
-                json.dumps(trace, indent=2, ensure_ascii=False),
-                encoding="utf-8",
-            )
-
-    if trace_path:
-        Path(trace_path).write_text(
-            json.dumps(trace, indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
-
-    return "Stopped after max_tool_rounds without a final answer."
+    raise RuntimeError(f"No final answer after {max_tool_rounds} tool rounds.")
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run an OpenAI tool-calling PTX optimization loop.")
-    parser.add_argument("kernel", help="Kernel class name, for example MatrixMultiplicationKernel.")
+    """Parse command-line arguments.
+
+    Returns:
+        Parsed command-line namespace.
+    """
+    parser = argparse.ArgumentParser(description="Optimize PTX with an OpenAI agent.")
+    parser.add_argument("kernel", help="Kernel class name, for example AddKernel.")
     parser.add_argument("--model", default="gpt-5")
     parser.add_argument("--max-tool-rounds", type=int, default=20)
-    parser.add_argument("--reasoning-effort", default="medium")
-    parser.add_argument("--trace-path", default="trace.json")
-    parser.add_argument("--verbose", action="store_true")
+    parser.add_argument("--reasoning-effort", default="high")
+    parser.add_argument("--trace-path", type=Path, default=Path("trace.json"))
+    parser.add_argument(
+        "--start-json",
+        help="Inline candidate JSON or path to a candidate JSON file.",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
-    global VERBOSE
-
+    """Run the PTX optimization command."""
     args = parse_args()
-    VERBOSE = args.verbose
-
-    reasoning_effort = None if args.reasoning_effort == "none" else args.reasoning_effort
-
     print(
         run_agent_loop(
             args.kernel,
             model=args.model,
             max_tool_rounds=args.max_tool_rounds,
-            reasoning_effort=reasoning_effort,
+            reasoning_effort=(
+                None if args.reasoning_effort == "none" else args.reasoning_effort
+            ),
             trace_path=args.trace_path,
+            start_json=args.start_json,
         )
     )
 

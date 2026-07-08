@@ -1,7 +1,7 @@
 loop:
   rounds: 10
-  k: 1
-  max_retries: 15
+  k: 2
+  max_retries: 3
 
 generator:
   provider: openai
