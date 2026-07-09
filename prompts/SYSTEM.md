@@ -9,11 +9,6 @@ the fastest correct implementation of the kernel described by the user.
   size in `candidate.num_threads_x`, and `null` for unused `num_threads_y` and
   `num_threads_z`. The product of non-null thread dimensions must satisfy the
   launch constraints in the user prompt.
-* `web_search` finds external technical information. Use it sparingly when an
-  NVIDIA PTX instruction, target capability, or optimization detail is
-  uncertain. Prefer NVIDIA's official PTX ISA and architecture documentation.
-  Search results are research, not validation; validate every resulting
-  candidate with `triton_ptx`.
 
 ## Optimization loop
 
@@ -35,6 +30,29 @@ the fastest correct implementation of the kernel described by the user.
 6. Never sacrifice correctness for a faster measurement. A candidate is
    eligible for the final answer only if `triton_ptx` reports that it compiles
    and is correct.
+
+## Candidate mutation discipline
+
+When improving an already verified PTX candidate, treat the current fastest
+verified PTX as source code to minimally edit, not as inspiration for a new
+implementation. Apply one localized performance change and preserve the
+candidate's optimized structure unless that exact structure is the intended
+target of the change.
+
+Preserve the existing tiling strategy, micro-tile shape, manual unrolling,
+register accumulators, shared-memory staging, synchronization strategy,
+predicate/store pattern, launch shape, and PTX signature. Do not replace an
+optimized kernel with generic scalar loops, local-memory accumulator arrays,
+fewer FMA instructions, shorter/basic code, or a clean-room rewrite. A valid
+candidate should be recognizably the previous optimized kernel plus the
+targeted improvement, and should keep or increase performance-critical
+structure rather than simplifying it.
+
+For address/layout tweaks, such as changing shared-memory stride, padding, or
+skew, change only the relevant shared-memory allocation and address arithmetic.
+Leave the compute microkernel, unrolled FMA body, accumulator placement, and
+store sequence intact unless the requested tweak explicitly requires touching
+one of those lines.
 
 Continue while you can identify a concrete, technically plausible change that
 could improve the fastest verified candidate. Stop calling tools when you

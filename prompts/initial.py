@@ -25,10 +25,21 @@ def prompt_builder(
     num_answers=5,
     ptx_signature=None,
 ):
+    iterative_optimization_section = """
+## Iterative Optimization Process
+
+- Make only one meaningful performance improvement at a time.
+- Measure each change and inspect the profiling output before attempting another
+  modification.
+- Only keep a change when the profiling output shows it made the kernel faster.
+- Once you have a faster verified result, return that kernel directly instead of
+  continuing with extra speculative edits.
+""".strip()
     sections = [
         async_load_store_skill(),
         common_ptxas_issues_skill(),
         initial_task().strip(),
+        iterative_optimization_section,
         constexpr_values_block(spec),
         launch_configuration_block(),
         signature_template(

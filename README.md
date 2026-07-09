@@ -68,6 +68,11 @@ compile, correctness, and benchmark tools:
 python3 -m openai_agent_tools MatrixMultiplicationKernel
 ```
 
+By default, this command clones `https://github.com/francois141/ptx_skill.git`,
+uploads the nested `ptx_skill/` package as an OpenAI skill, and mounts it on the
+agent's shell container. Pass `--skill-dir /path/to/ptx_skill` to use a local
+copy, or `--no-ptx-skill` to run without mounting the skill.
+
 The complete response trace is written to `trace.json`, while the final
 candidate and its measured speedup are written beside it as `trace_final.json`.
 To continue
@@ -167,3 +172,6 @@ python3 -m ruff check --fix triton_ptx/triton_ptx
 
 - Test-time scaling archives each run under `database/<timestamp>_<kernel>/`.
 - `measure_ptx` reads archived `output_winner_*.json` files and reports the best valid `speedup_vs_triton` found for each kernel.
+- As the final evaluation step, successful candidates run once under NVIDIA
+  Nsight Compute (`ncu --set full`). The complete raw CSV metrics and diagnostics
+  are returned in `ncu_report`. Set `NCU_PATH` when `ncu` is not on `PATH`.
