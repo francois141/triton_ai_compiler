@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import atexit
 import json
-import subprocess
 import sys
 import tempfile
 import time
@@ -80,7 +79,7 @@ IMPROVEMENT_PLAN_FORMAT = {
     },
 }
 COST_LOG_PATH = Path(__file__).resolve().parent / "costs.txt"
-DEFAULT_PTX_SKILL_REPO_URL = "https://github.com/francois141/ptx_skill.git"
+DEFAULT_PTX_SKILL_ROOT = Path(__file__).resolve().parent / "ptx_skill"
 DEFAULT_PTX_SKILL_SUBDIR = "ptx_skill"
 RESPONSE_RETRY_ATTEMPTS = 6
 DEFAULT_REPAIR_ATTEMPTS = 2
@@ -213,22 +212,6 @@ def _validate_skill_dir(skill_dir: Path) -> None:
         raise FileNotFoundError(f"Skill file not found: {skill_dir / 'SKILL.md'}")
 
 
-def _clone_skill_repo(repo_url: str, destination: Path) -> None:
-    """Clone a skill repository into a destination directory."""
-    try:
-        subprocess.run(
-            ["git", "clone", "--depth", "1", repo_url, str(destination)],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-    except subprocess.CalledProcessError as exc:
-        message = (exc.stderr or exc.stdout or str(exc)).strip()
-        raise RuntimeError(
-            f"Failed to clone skill repo {repo_url!r}: {message}"
-        ) from exc
-
-
 def _zip_skill_dir(skill_dir: Path, zip_path: Path) -> None:
     """Create a skill ZIP preserving the package directory name."""
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as archive:
@@ -241,18 +224,14 @@ def _upload_skill(
     client: OpenAI,
     *,
     skill_dir: Path | None,
-    skill_repo_url: str,
     skill_subdir: str,
 ) -> str:
-    """Upload a local or Git-backed skill and return its OpenAI skill ID."""
+    """Upload a submodule-backed or explicitly provided skill directory."""
     with tempfile.TemporaryDirectory(prefix="openai_ptx_skill_") as temp_dir_text:
         temp_dir = Path(temp_dir_text)
-        if skill_dir is None:
-            repo_dir = temp_dir / "repo"
-            _clone_skill_repo(skill_repo_url, repo_dir)
-            resolved_skill_dir = repo_dir / skill_subdir
-        else:
-            resolved_skill_dir = skill_dir
+        resolved_skill_dir = (
+            DEFAULT_PTX_SKILL_ROOT / skill_subdir if skill_dir is None else skill_dir
+        )
 
         _validate_skill_dir(resolved_skill_dir)
         zip_path = temp_dir / f"{resolved_skill_dir.name}.zip"
@@ -937,7 +916,6 @@ def run_agent_loop(
     start_json: str | Path | None = None,
     use_ptx_skill: bool = True,
     skill_dir: Path | None = None,
-    skill_repo_url: str = DEFAULT_PTX_SKILL_REPO_URL,
     skill_subdir: str = DEFAULT_PTX_SKILL_SUBDIR,
 ) -> str:
     """Optimize a kernel with compact explicit test-time scaling rounds.
@@ -953,10 +931,9 @@ def run_agent_loop(
         start_json: Optional inline JSON or JSON file containing the implementation
             from which optimization should continue.
         use_ptx_skill: Whether to upload and mount the PTX skill.
-        skill_dir: Optional local skill directory. When omitted, the skill is cloned
-            from ``skill_repo_url``.
-        skill_repo_url: Git repository URL containing the PTX skill.
-        skill_subdir: Repository-relative skill directory used as the skill package.
+        skill_dir: Optional local skill directory. When omitted, the skill is read
+            from the checked-out PTX skill submodule.
+        skill_subdir: Submodule-relative skill directory used as the skill package.
 
     Returns:
         Final model response text.
@@ -974,7 +951,6 @@ def run_agent_loop(
         skill_id = _upload_skill(
             client,
             skill_dir=skill_dir,
-            skill_repo_url=skill_repo_url,
             skill_subdir=skill_subdir,
         )
         print(f"=== Uploaded PTX skill {skill_id} ===", flush=True)
@@ -1000,8 +976,7 @@ def run_agent_loop(
     try:
         if starting_candidate is None:
             print(
-                "=== Generating initial candidate because --start-json was not "
-                "provided ===",
+                "=== Generating initial candidate ===",
                 flush=True,
             )
             _record_prompt(
@@ -1161,26 +1136,6 @@ def parse_args() -> argparse.Namespace:
         "--start-json",
         help="Inline candidate JSON or path to a candidate JSON file.",
     )
-    parser.add_argument(
-        "--no-ptx-skill",
-        action="store_true",
-        help="Disable uploading and mounting the PTX skill.",
-    )
-    parser.add_argument(
-        "--skill-dir",
-        type=Path,
-        help="Local PTX skill directory. Defaults to cloning the configured repo.",
-    )
-    parser.add_argument(
-        "--skill-repo-url",
-        default=DEFAULT_PTX_SKILL_REPO_URL,
-        help="Git repository URL used when --skill-dir is omitted.",
-    )
-    parser.add_argument(
-        "--skill-subdir",
-        default=DEFAULT_PTX_SKILL_SUBDIR,
-        help="Repository-relative skill directory used when --skill-dir is omitted.",
-    )
     return parser.parse_args()
 
 
@@ -1198,10 +1153,6 @@ def main() -> None:
             ),
             trace_path=args.trace_path,
             start_json=args.start_json,
-            use_ptx_skill=not args.no_ptx_skill,
-            skill_dir=args.skill_dir,
-            skill_repo_url=args.skill_repo_url,
-            skill_subdir=args.skill_subdir,
         )
     )
 
