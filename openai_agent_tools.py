@@ -688,6 +688,40 @@ return the closest tested repair so the outer loop can record its diagnostics.
 """.strip()
 
 
+def _build_initial_repair_prompt(
+    base_prompt: str,
+    failed_evaluation: Any,
+    *,
+    repair_index: int,
+    max_repair_attempts: int,
+) -> str:
+    """Build a prompt that repairs the first generated candidate."""
+    return f"""{base_prompt}
+
+## Failed Initial Candidate And Diagnostics
+
+{_evaluation_summary(failed_evaluation, include_ptx=True)}
+
+## Initial Candidate Repair Task
+
+This is initial candidate repair attempt {repair_index} of
+{max_repair_attempts}. Repair the failed candidate above rather than generating
+a fresh implementation from scratch.
+
+Make the smallest concrete change needed to fix the compile, verification, or
+runtime failure. Keep the same PTX signature, launch metadata keys, tiling
+strategy, micro-tile shape, shared-memory staging, synchronization strategy,
+predicate/store pattern, and manual unroll structure unless the diagnostic
+proves one of those exact parts is the bug.
+
+Call the available `triton_ptx` tool before returning. If the repaired candidate
+still fails, use the new diagnostic to make one more minimal repair while
+remaining within this attempt. Return only a JSON candidate that you actually
+tested with the tool. If no repair passes, return the closest tested repair so
+the outer loop can record its diagnostics.
+""".strip()
+
+
 def _request_json(
     client: OpenAI,
     *,
@@ -905,6 +939,82 @@ def _generate_tested_candidate(
     return best_attempt
 
 
+def _repair_initial_candidate(
+    client: OpenAI,
+    evaluator: TritonPTXCandidateEvaluator,
+    responses: list[dict[str, Any]],
+    trace_path: Path | None,
+    *,
+    model: str,
+    optimization_prompt: str,
+    initial_evaluation: Any,
+    reasoning_effort: str | None,
+    tools: list[dict[str, Any]],
+    max_repair_attempts: int,
+) -> Any:
+    """Repair the initial candidate before the optimization rounds begin."""
+    best_attempt = initial_evaluation
+    for repair_index in range(1, max_repair_attempts + 1):
+        if not _should_repair_candidate(best_attempt):
+            break
+
+        print(
+            "=== Repairing initial candidate attempt "
+            f"{repair_index}/{max_repair_attempts} ===",
+            flush=True,
+        )
+        repair_prompt = _build_initial_repair_prompt(
+            optimization_prompt,
+            best_attempt,
+            repair_index=repair_index,
+            max_repair_attempts=max_repair_attempts,
+        )
+        _record_prompt(
+            responses,
+            trace_path,
+            prompt_name="initial_candidate_repair",
+            prompt=repair_prompt,
+            round_index=0,
+            candidate_index=0,
+        )
+        response, _ = _request_json(
+            client,
+            model=model,
+            prompt=repair_prompt,
+            response_format=RESPONSE_FORMAT,
+            reasoning_effort=reasoning_effort,
+            tools=tools,
+        )
+        responses.append(response.model_dump(mode="json"))
+        _write_trace(trace_path, responses)
+        repaired_candidate = PtxKernel.model_validate_json(
+            _response_json_text(response)
+        )
+        print(
+            "--- Repaired initial candidate ---\n"
+            f"{_candidate_json(repaired_candidate)}\n"
+            "--- End repaired initial candidate ---",
+            flush=True,
+        )
+        repaired_evaluation = _evaluate_and_record(
+            evaluator,
+            repaired_candidate,
+            responses,
+            trace_path,
+            round_index=0,
+            candidate_index=0,
+            idea=None,
+        )
+        if repaired_evaluation.passed and (
+            not best_attempt.passed or repaired_evaluation.p50 < best_attempt.p50
+        ):
+            best_attempt = repaired_evaluation
+        elif not best_attempt.passed:
+            best_attempt = repaired_evaluation
+
+    return best_attempt
+
+
 def run_agent_loop(
     kernel_name: str,
     *,
@@ -1008,6 +1118,18 @@ def run_agent_loop(
             round_index=0,
             candidate_index=0,
             idea=None,
+        )
+        best_evaluation = _repair_initial_candidate(
+            client,
+            evaluator,
+            responses,
+            trace_path,
+            model=model,
+            optimization_prompt=optimization_prompt,
+            initial_evaluation=best_evaluation,
+            reasoning_effort=reasoning_effort,
+            tools=tools,
+            max_repair_attempts=max_repair_attempts,
         )
         if not best_evaluation.passed:
             raise RuntimeError("Initial candidate must compile and pass verification.")
