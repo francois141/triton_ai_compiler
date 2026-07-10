@@ -83,8 +83,15 @@ COST_LOG_PATH = Path(__file__).resolve().parent / "costs.txt"
 DEFAULT_PTX_SKILL_REPO_URL = "https://github.com/francois141/ptx_skill.git"
 DEFAULT_PTX_SKILL_SUBDIR = "ptx_skill"
 RESPONSE_RETRY_ATTEMPTS = 6
-DEFAULT_REPAIR_ATTEMPTS = 5
+DEFAULT_REPAIR_ATTEMPTS = 2
 WEB_SEARCH_COST_PER_CALL = 10.00 / 1_000
+ASYNC_LOAD_STORE_INSTRUCTION = """
+## Async Load/Store Requirement
+
+Explicitly use async loads and stores where the PTX target supports them. Use
+asynchronous global-to-shared loads/staging whenever legal, and keep final
+global stores coalesced with valid `st.global` instructions.
+""".strip()
 PRICING_PER_1M_TOKENS = {
     # Price estimates in USD per 1M tokens.
     # Keep these aligned with https://developers.openai.com/api/docs/pricing.
@@ -138,7 +145,7 @@ def build_initial_prompt(kernel_name: str) -> str:
     kernel_cls = resolve_kernel(kernel_name)
     version, target, address_size = get_ptx_system_config()
     signature = parse_ptx_signature(dump_kernel_ptx(kernel_cls()))
-    return build_prompt_for_operator(
+    prompt = build_prompt_for_operator(
         kernel_cls,
         num_answers=1,
         version=version,
@@ -146,6 +153,7 @@ def build_initial_prompt(kernel_name: str) -> str:
         address_size=address_size,
         ptx_signature=signature,
     )
+    return f"{prompt}\n\n{ASYNC_LOAD_STORE_INSTRUCTION}"
 
 
 def build_continuation_prompt(kernel_name: str) -> str:
@@ -160,12 +168,41 @@ def build_continuation_prompt(kernel_name: str) -> str:
     return f"""Continue optimizing the verified PTX candidate for {kernel_name}.
 Do not restart from the initial kernel prompt or generate a fresh baseline.
 Use the current best verified candidate as the source of truth and only propose
-targeted changes that preserve the required PTX JSON response schema.""".strip()
+targeted changes that preserve the required PTX JSON response schema.
+
+{ASYNC_LOAD_STORE_INSTRUCTION}""".strip()
+
+
+def _json_default(value: object) -> object:
+    """Return a JSON-safe representation for non-standard diagnostic objects."""
+    if hasattr(value, "detach") and hasattr(value, "numel"):
+        tensor = value.detach()
+        shape = list(tensor.shape)
+        summary: dict[str, object] = {
+            "type": value.__class__.__name__,
+            "shape": shape,
+            "dtype": str(tensor.dtype),
+            "device": str(tensor.device),
+        }
+        if tensor.numel() <= 16:
+            summary["values"] = tensor.cpu().tolist()
+        return summary
+
+    if hasattr(value, "tolist"):
+        return value.tolist()
+
+    if isinstance(value, set):
+        return sorted(value)
+
+    return str(value)
 
 
 def _write_trace(trace_path: Path | None, events: list[dict[str, Any]]) -> None:
     if trace_path is not None:
-        trace_path.write_text(json.dumps(events, indent=2), encoding="utf-8")
+        trace_path.write_text(
+            json.dumps(events, indent=2, default=_json_default),
+            encoding="utf-8",
+        )
 
 
 def _validate_skill_dir(skill_dir: Path) -> None:
@@ -526,13 +563,16 @@ def _evaluation_summary(evaluation: Any, *, include_ptx: bool) -> str:
     if evaluation.verifier_report:
         fields["verifier_report"] = evaluation.verifier_report
     if evaluation.ncu_report:
-        fields["ncu_report"] = json.dumps(evaluation.ncu_report, default=str)[-4000:]
+        fields["ncu_report"] = json.dumps(
+            evaluation.ncu_report,
+            default=_json_default,
+        )[-4000:]
     if evaluation.compile_error:
         fields["compile_error"] = evaluation.compile_error[-2000:]
     if evaluation.timing_error:
         fields["timing_error"] = evaluation.timing_error[-2000:]
 
-    return json.dumps(fields, indent=2)
+    return json.dumps(fields, indent=2, default=_json_default)
 
 
 def _build_improvement_prompt(
@@ -890,7 +930,7 @@ def run_agent_loop(
     kernel_name: str,
     *,
     model: str = "gpt-5",
-    max_tool_rounds: int = 20,
+    max_tool_rounds: int = 3,
     max_repair_attempts: int = DEFAULT_REPAIR_ATTEMPTS,
     reasoning_effort: str | None = "medium",
     trace_path: Path | None = Path("trace.json"),
@@ -1090,7 +1130,7 @@ def run_agent_loop(
         final_payload = final_candidate.model_dump(exclude_none=True)
         final_payload["speedup"] = best_evaluation.speedup_vs_triton
         final_payload["p50"] = best_evaluation.p50
-        final_json = json.dumps(final_payload, indent=2)
+        final_json = json.dumps(final_payload, indent=2, default=_json_default)
         if trace_path is not None:
             _final_path(trace_path).write_text(f"{final_json}\n", encoding="utf-8")
         write_daily_summary()
@@ -1108,7 +1148,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Optimize PTX with an OpenAI agent.")
     parser.add_argument("kernel", help="Kernel class name, for example AddKernel.")
     parser.add_argument("--model", default="gpt-5.5")
-    parser.add_argument("--max-tool-rounds", type=int, default=20)
+    parser.add_argument("--max-tool-rounds", type=int, default=5)
     parser.add_argument(
         "--max-repair-attempts",
         type=int,
