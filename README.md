@@ -1,15 +1,6 @@
 # Triton PTX Client
 
-Client commands for prompt generation, PTX extraction, evaluation, verification, and test-time scaling.
-
-This folder should live next to the `triton_ptx` repository in a shared
-workspace directory:
-
-```text
-<workspace>/
-  client/
-  triton_ptx/
-```
+Client commands for prompt generation, PTX extraction, evaluation, verification, and test-time scaling that can be used with the `triton_ptx` environment.
 
 ## Setup
 
@@ -18,28 +9,14 @@ From the shared workspace directory, create a virtual environment, install the
 importable:
 
 ```bash
-export WORKSPACE_ROOT=/path/to/workspace
-cd "$WORKSPACE_ROOT"
+git submodule update --init --recursive
+
 python3 -m venv .venv
 source .venv/bin/activate
 python3 -m pip install --upgrade pip
 python3 -m pip install -e triton_ptx
-export PYTHONPATH="$WORKSPACE_ROOT${PYTHONPATH:+:${PYTHONPATH}}"
+python3 -m pip install tokencost
 ```
-
-The editable install reads `triton_ptx/requirements.txt`, which is also wired
-through `triton_ptx/pyproject.toml` and `setup.py`.
-
-Other codebases can use the library API after installation:
-
-```python
-from triton_ptx import Payload, TritonPTXCandidateEvaluator, resolve_kernel
-
-kernel_cls = resolve_kernel("AddKernel")
-evaluator = TritonPTXCandidateEvaluator(kernel_cls)
-result = evaluator.evaluate(Payload(ptx="...", threads_x=256))
-```
-
 ## Common Commands
 
 Run all tests and verification checks:
@@ -48,6 +25,25 @@ Run all tests and verification checks:
 cd "$WORKSPACE_ROOT"
 python3 -m pytest triton_ptx/triton_ptx client
 ```
+
+#### Improve test time scaling loop
+
+By default, this command uploads the nested `ptx_skill/` package from the
+`ptx_skill` git submodule as an OpenAI skill, and mounts it on the agent's shell
+container. Initialize it with `git submodule update --init ptx_skill` after
+cloning this repo.
+
+The complete response trace is written to `trace.json`, while the final
+candidate and its measured speedup are written beside it as `trace_final.json`.
+To continue optimizing an existing candidate, pass either its file or inline
+JSON:
+
+```bash
+python3 -m openai_agent_tools MatrixMultiplicationKernel \
+  --start-json trace_final.json
+```
+
+#### Naive test time scaling loop
 
 Run test-time scaling for one kernel:
 
@@ -68,21 +64,6 @@ compile, correctness, and benchmark tools:
 python3 -m openai_agent_tools MatrixMultiplicationKernel
 ```
 
-By default, this command clones `https://github.com/francois141/ptx_skill.git`,
-uploads the nested `ptx_skill/` package as an OpenAI skill, and mounts it on the
-agent's shell container. Pass `--skill-dir /path/to/ptx_skill` to use a local
-copy, or `--no-ptx-skill` to run without mounting the skill.
-
-The complete response trace is written to `trace.json`, while the final
-candidate and its measured speedup are written beside it as `trace_final.json`.
-To continue
-optimizing an existing candidate, pass either its file or inline JSON:
-
-```bash
-python3 -m openai_agent_tools MatrixMultiplicationKernel \
-  --start-json trace_final.json
-```
-
 Run test-time scaling against Anthropic Claude Opus 4.8:
 
 ```bash
@@ -94,7 +75,6 @@ Run test-time scaling against Gemini 2.5 Pro:
 ```bash
 python3 -m test_time_scaling_loop AddKernel --config configs/test_time_scaling_gemini.yaml
 ```
-
 
 Run test-time scaling against Openrouter: 
 
@@ -138,9 +118,6 @@ Ready-to-edit presets live in `configs/`:
 - `test_time_scaling_gemini.yaml`
 - `test_time_scaling_openrouter.yaml`
 
-The OpenRouter preset expects `OPENROUTER_API_KEY` in the environment. The
-`openrouter` provider includes a small price table for these model IDs:
-`qwen/qwen3-coder` and `deepseek/deepseek-v4-pro`.
 
 Extract embedded PTX from Triton kernels:
 
