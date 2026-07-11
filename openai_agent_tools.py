@@ -21,6 +21,11 @@ from utils.response_format import (  # noqa: E402
     PTX_KERNEL_RESPONSE_FORMAT,
     PtxKernel,
 )
+from utils.evaluation import (  # noqa: E402
+    candidate_from_evaluation,
+    evaluation_summary,
+    json_default,
+)
 from triton_ptx import (  # noqa: E402
     Payload,
     TritonPTXCandidateEvaluator,
@@ -104,35 +109,10 @@ targeted changes that preserve the required PTX JSON response schema.
 
 {ASYNC_LOAD_STORE_INSTRUCTION}""".strip()
 
-
-def _json_default(value: object) -> object:
-    """Return a JSON-safe representation for non-standard diagnostic objects."""
-    if hasattr(value, "detach") and hasattr(value, "numel"):
-        tensor = value.detach()
-        shape = list(tensor.shape)
-        summary: dict[str, object] = {
-            "type": value.__class__.__name__,
-            "shape": shape,
-            "dtype": str(tensor.dtype),
-            "device": str(tensor.device),
-        }
-        if tensor.numel() <= 16:
-            summary["values"] = tensor.cpu().tolist()
-        return summary
-
-    if hasattr(value, "tolist"):
-        return value.tolist()
-
-    if isinstance(value, set):
-        return sorted(value)
-
-    return str(value)
-
-
 def _write_trace(trace_path: Path | None, events: list[dict[str, Any]]) -> None:
     if trace_path is not None:
         trace_path.write_text(
-            json.dumps(events, indent=2, default=_json_default),
+            json.dumps(events, indent=2, default=json_default),
             encoding="utf-8",
         )
 
@@ -295,42 +275,6 @@ def _candidate_json(candidate: PtxKernel) -> str:
     return candidate.model_dump_json(exclude_none=False, indent=2)
 
 
-def _candidate_from_evaluation(evaluation: Any) -> PtxKernel:
-    """Return a validated PTX candidate from an evaluator result."""
-    payload = Payload.from_input(evaluation.payload).to_launch_dict()
-    return PtxKernel.model_validate(payload)
-
-
-def _evaluation_summary(evaluation: Any, *, include_ptx: bool) -> str:
-    """Format a compact evaluator result summary for prompts and traces."""
-    payload = _candidate_from_evaluation(evaluation).model_dump(exclude_none=False)
-    if not include_ptx:
-        payload["ptx"] = "<omitted>"
-
-    fields = {
-        "compiles": evaluation.compiles,
-        "correct": evaluation.correct,
-        "p50": evaluation.p50,
-        "p95": evaluation.p95,
-        "speedup_vs_triton": evaluation.speedup_vs_triton,
-        "message": (evaluation.message or "").strip(),
-        "candidate": payload,
-    }
-    if evaluation.verifier_report:
-        fields["verifier_report"] = evaluation.verifier_report
-    if evaluation.ncu_report:
-        fields["ncu_report"] = json.dumps(
-            evaluation.ncu_report,
-            default=_json_default,
-        )[-4000:]
-    if evaluation.compile_error:
-        fields["compile_error"] = evaluation.compile_error[-2000:]
-    if evaluation.timing_error:
-        fields["timing_error"] = evaluation.timing_error[-2000:]
-
-    return json.dumps(fields, indent=2, default=_json_default)
-
-
 def _build_improvement_prompt(
     base_prompt: str,
     best_evaluation: Any,
@@ -338,7 +282,7 @@ def _build_improvement_prompt(
 ) -> str:
     """Build a compact prompt asking for three targeted improvement ideas."""
     recent_block = "\n\n".join(
-        _evaluation_summary(evaluation, include_ptx=False)
+        evaluation_summary(evaluation, include_ptx=False)
         for evaluation in recent_evaluations[-6:]
     )
     if not recent_block:
@@ -353,7 +297,7 @@ Return only the structured three-idea improvement plan requested below.
 
 ## Current Best Verified Candidate
 
-{_evaluation_summary(best_evaluation, include_ptx=True)}
+{evaluation_summary(best_evaluation, include_ptx=True)}
 
 ## Recent Candidate Outcomes
 
@@ -385,7 +329,7 @@ def _build_candidate_prompt(
 
 ## Current Best Verified Candidate
 
-{_evaluation_summary(best_evaluation, include_ptx=True)}
+{evaluation_summary(best_evaluation, include_ptx=True)}
 
 ## Single Improvement To Try
 
@@ -433,7 +377,7 @@ def _build_repair_prompt(
 
 ## Current Best Verified Candidate
 
-{_evaluation_summary(best_evaluation, include_ptx=True)}
+{evaluation_summary(best_evaluation, include_ptx=True)}
 
 ## Original Improvement Being Tried
 
@@ -443,7 +387,7 @@ Instruction: {idea["instruction"]}
 
 ## Failed Candidate And Diagnostics
 
-{_evaluation_summary(failed_evaluation, include_ptx=True)}
+{evaluation_summary(failed_evaluation, include_ptx=True)}
 
 ## Repair Task
 
@@ -477,7 +421,7 @@ def _build_initial_repair_prompt(
 
 ## Failed Initial Candidate And Diagnostics
 
-{_evaluation_summary(failed_evaluation, include_ptx=True)}
+{evaluation_summary(failed_evaluation, include_ptx=True)}
 
 ## Initial Candidate Repair Task
 
@@ -986,11 +930,11 @@ def run_agent_loop(
                     flush=True,
                 )
 
-        final_candidate = _candidate_from_evaluation(best_evaluation)
+        final_candidate = candidate_from_evaluation(best_evaluation)
         final_payload = final_candidate.model_dump(exclude_none=True)
         final_payload["speedup"] = best_evaluation.speedup_vs_triton
         final_payload["p50"] = best_evaluation.p50
-        final_json = json.dumps(final_payload, indent=2, default=_json_default)
+        final_json = json.dumps(final_payload, indent=2, default=json_default)
         if trace_path is not None:
             _final_path(trace_path).write_text(f"{final_json}\n", encoding="utf-8")
         write_daily_summary()
