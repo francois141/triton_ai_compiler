@@ -1,31 +1,12 @@
 from anthropic import Anthropic
 
+from utils.pricing import TokenCounts, estimate_token_cost
+
 from .base import LLMEndpoint, PtxKernel
 
 
 class AnthropicPrompt(LLMEndpoint):
     DEFAULT_MODEL = "claude-opus-4-8"
-
-    PRICING_PER_1M_TOKENS = {
-        # Price estimates in USD per 1M tokens.
-        # Keep these aligned with Anthropic API pricing.
-        "claude-opus-4-8": {
-            "input": 5.00,
-            "output": 25.00,
-        },
-        "claude-opus-4": {
-            "input": 15.00,
-            "output": 75.00,
-        },
-        "claude-sonnet-4": {
-            "input": 3.00,
-            "output": 15.00,
-        },
-        "claude-fable-5": {
-            "input": 10.00,
-            "output": 50.00,
-        },
-    }
 
     def __init__(self, model=None, max_tokens=8192):
         self.model = model or self.DEFAULT_MODEL
@@ -33,18 +14,18 @@ class AnthropicPrompt(LLMEndpoint):
         self.client = Anthropic()
 
     def _estimate_cost(self, response):
-        pricing = self.PRICING_PER_1M_TOKENS.get(self.model)
         usage = getattr(response, "usage", None)
 
-        if pricing is None or usage is None:
+        if usage is None:
             return None
 
         input_tokens = getattr(usage, "input_tokens", 0) or 0
         output_tokens = getattr(usage, "output_tokens", 0) or 0
 
-        return (
-            input_tokens * pricing["input"] + output_tokens * pricing["output"]
-        ) / 1_000_000
+        return estimate_token_cost(
+            self.model,
+            TokenCounts(input_tokens=input_tokens, output_tokens=output_tokens),
+        )
 
     def generate_response(self, prompt, *, num_answers=None):
         requested = int(num_answers) if num_answers is not None else 1

@@ -28,6 +28,7 @@ from triton_ptx import (  # noqa: E402
     parse_ptx_signature,
     resolve_kernel,
 )
+from utils.pricing import TokenCounts, estimate_token_cost  # noqa: E402
 
 SYSTEM_PROMPT_PATH = Path(__file__).parent / "prompts" / "SYSTEM.md"
 PAYLOAD_SCHEMA = {
@@ -91,25 +92,6 @@ Explicitly use async loads and stores where the PTX target supports them. Use
 asynchronous global-to-shared loads/staging whenever legal, and keep final
 global stores coalesced with valid `st.global` instructions.
 """.strip()
-PRICING_PER_1M_TOKENS = {
-    # Price estimates in USD per 1M tokens.
-    # Keep these aligned with https://developers.openai.com/api/docs/pricing.
-    "gpt-5.5": {"input": 5.00, "cached_input": 0.50, "output": 30.00},
-    "gpt-5.4": {"input": 2.50, "cached_input": 0.25, "output": 15.00},
-    "gpt-5.4-mini": {"input": 0.75, "cached_input": 0.075, "output": 4.50},
-    "gpt-5.4-nano": {"input": 0.20, "cached_input": 0.02, "output": 1.25},
-    "gpt-5.3-codex": {"input": 1.75, "cached_input": 0.175, "output": 14.00},
-    "gpt-5": {"input": 2.50, "cached_input": 0.25, "output": 15.00},
-    "gpt-5-mini": {"input": 0.25, "cached_input": 0.025, "output": 2.00},
-    "gpt-5-nano": {"input": 0.05, "cached_input": 0.005, "output": 0.40},
-    "gpt-4.1": {"input": 2.00, "cached_input": 0.20, "output": 8.00},
-    "gpt-4.1-mini": {"input": 0.40, "cached_input": 0.04, "output": 1.60},
-    "gpt-4.1-nano": {"input": 0.10, "cached_input": 0.01, "output": 0.40},
-    "o4-mini": {"input": 1.10, "cached_input": 0.275, "output": 4.40},
-    "o3": {"input": 10.00, "cached_input": 2.50, "output": 40.00},
-}
-
-
 def _build_tools(skill_id: str | None) -> list[dict[str, Any]]:
     """Build the Responses API tools for stateless optimization calls."""
     tools: list[dict[str, Any]] = []#[{"type": "web_search"}]
@@ -256,12 +238,12 @@ def _get_nested_int(value: Any, *keys: str) -> int:
 def _estimate_response_cost(
     response: Any, model: str
 ) -> tuple[float | None, dict[str, int]]:
-    pricing = PRICING_PER_1M_TOKENS.get(model)
     usage = getattr(response, "usage", None)
     if usage is None:
         return None, {
             "input_tokens": 0,
             "cached_input_tokens": 0,
+            "cache_write_tokens": 0,
             "output_tokens": 0,
             "web_search_calls": 0,
         }
@@ -275,6 +257,9 @@ def _estimate_response_cost(
     cached_input_tokens = _get_nested_int(
         usage, "input_tokens_details", "cached_tokens"
     ) or _get_nested_int(usage, "prompt_tokens_details", "cached_tokens")
+    cache_write_tokens = _get_nested_int(
+        usage, "input_tokens_details", "cache_write_tokens"
+    ) or _get_nested_int(usage, "prompt_tokens_details", "cache_write_tokens")
     tool_usage = getattr(response, "tool_usage", None)
     web_search_calls = _get_nested_int(
         tool_usage, "web_search", "num_requests"
@@ -282,19 +267,23 @@ def _estimate_response_cost(
     token_counts = {
         "input_tokens": input_tokens,
         "cached_input_tokens": cached_input_tokens,
+        "cache_write_tokens": cache_write_tokens,
         "output_tokens": output_tokens,
         "web_search_calls": web_search_calls,
     }
 
-    if pricing is None:
+    token_cost = estimate_token_cost(
+        model,
+        TokenCounts(
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cached_input_tokens=cached_input_tokens,
+            cache_write_tokens=cache_write_tokens,
+        ),
+    )
+    if token_cost is None:
         return None, token_counts
 
-    uncached_input_tokens = max(input_tokens - cached_input_tokens, 0)
-    token_cost = (
-        uncached_input_tokens * pricing["input"]
-        + cached_input_tokens * pricing["cached_input"]
-        + output_tokens * pricing["output"]
-    ) / 1_000_000
     tool_cost = web_search_calls * WEB_SEARCH_COST_PER_CALL
     return token_cost + tool_cost, token_counts
 
@@ -338,6 +327,7 @@ def _append_cost_log(
             f"{timestamp.isoformat()} model={model} "
             f"input_tokens={token_counts['input_tokens']} "
             f"cached_input_tokens={token_counts['cached_input_tokens']} "
+            f"cache_write_tokens={token_counts['cache_write_tokens']} "
             f"output_tokens={token_counts['output_tokens']} "
             f"web_search_calls={token_counts['web_search_calls']} "
             f"cost_usd={cost_text} daily_total_usd={daily_total:.8f}\n"

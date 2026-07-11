@@ -2,26 +2,14 @@ import os
 
 from openai import OpenAI
 
+from utils.pricing import TokenCounts, estimate_token_cost
+
 from .base import LLMEndpoint, PtxKernel
 
 
 class OpenRouterPrompt(LLMEndpoint):
     DEFAULT_MODEL = "qwen/qwen3-coder"
     BASE_URL = "https://openrouter.ai/api/v1"
-
-    PRICING_PER_1M_TOKENS = {
-        # Price estimates in USD per 1M tokens.
-        # Keep these aligned with https://openrouter.ai/models.
-        "qwen/qwen3-coder": {
-            "input": 0.22,
-            "output": 1.80,
-        },
-        "deepseek/deepseek-v4-pro": {
-            "input": 0.435,
-            "cached_input": 0.003625,
-            "output": 0.87,
-        },
-    }
 
     def __init__(
         self,
@@ -51,10 +39,9 @@ class OpenRouterPrompt(LLMEndpoint):
         )
 
     def _estimate_cost(self, response):
-        pricing = self.PRICING_PER_1M_TOKENS.get(self.model)
         usage = getattr(response, "usage", None)
 
-        if pricing is None or usage is None:
+        if usage is None:
             return None
 
         input_tokens = getattr(usage, "prompt_tokens", 0) or 0
@@ -66,14 +53,14 @@ class OpenRouterPrompt(LLMEndpoint):
         if prompt_details is not None:
             cached_input_tokens = getattr(prompt_details, "cached_tokens", 0) or 0
 
-        uncached_input_tokens = max(input_tokens - cached_input_tokens, 0)
-        cached_input_price = pricing.get("cached_input", pricing["input"])
-
-        return (
-            uncached_input_tokens * pricing["input"]
-            + cached_input_tokens * cached_input_price
-            + output_tokens * pricing["output"]
-        ) / 1_000_000
+        return estimate_token_cost(
+            self.model,
+            TokenCounts(
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                cached_input_tokens=cached_input_tokens,
+            ),
+        )
 
     def generate_response(self, prompt, *, num_answers=None):
         requested = int(num_answers) if num_answers is not None else 1

@@ -2,57 +2,14 @@ from time import perf_counter
 
 from openai import OpenAI
 
+from utils.pricing import TokenCounts, estimate_token_cost
+
 from .base import LLMEndpoint, PtxKernel
 
 
 class OpenAIPrompt(LLMEndpoint):
-    DEFAULT_MODEL = "gpt-5"
+    DEFAULT_MODEL = "gpt-5.6-sol"
     ALLOWED_REASONING_EFFORTS = {None, "minimal", "low", "medium", "high"}
-
-    PRICING_PER_1M_TOKENS = {
-        # Price estimates in USD per 1M tokens.
-        # Keep these aligned with https://platform.openai.com/pricing.
-        "gpt-5": {
-            "input": 2.50,
-            "cached_input": 0.25,
-            "output": 15.00,
-        },
-        "gpt-5-mini": {
-            "input": 0.25,
-            "cached_input": 0.025,
-            "output": 2.00,
-        },
-        "gpt-5-nano": {
-            "input": 0.05,
-            "cached_input": 0.005,
-            "output": 0.40,
-        },
-        "gpt-4.1": {
-            "input": 2.00,
-            "cached_input": 0.20,
-            "output": 8.00,
-        },
-        "gpt-4.1-mini": {
-            "input": 0.40,
-            "cached_input": 0.04,
-            "output": 1.60,
-        },
-        "gpt-4.1-nano": {
-            "input": 0.10,
-            "cached_input": 0.01,
-            "output": 0.40,
-        },
-        "o4-mini": {
-            "input": 1.10,
-            "cached_input": 0.275,
-            "output": 4.40,
-        },
-        "o3": {
-            "input": 10.00,
-            "cached_input": 2.50,
-            "output": 40.00,
-        },
-    }
 
     def __init__(
         self,
@@ -72,10 +29,9 @@ class OpenAIPrompt(LLMEndpoint):
         self.client = OpenAI()
 
     def _estimate_cost(self, response):
-        pricing = self.PRICING_PER_1M_TOKENS.get(self.model)
         usage = getattr(response, "usage", None)
 
-        if pricing is None or usage is None:
+        if usage is None:
             return None
 
         input_tokens = getattr(usage, "prompt_tokens", 0) or 0
@@ -86,14 +42,21 @@ class OpenAIPrompt(LLMEndpoint):
 
         if prompt_details is not None:
             cached_input_tokens = getattr(prompt_details, "cached_tokens", 0) or 0
+            cache_write_tokens = (
+                getattr(prompt_details, "cache_write_tokens", 0) or 0
+            )
+        else:
+            cache_write_tokens = 0
 
-        uncached_input_tokens = max(input_tokens - cached_input_tokens, 0)
-
-        return (
-            uncached_input_tokens * pricing["input"]
-            + cached_input_tokens * pricing["cached_input"]
-            + output_tokens * pricing["output"]
-        ) / 1_000_000
+        return estimate_token_cost(
+            self.model,
+            TokenCounts(
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                cached_input_tokens=cached_input_tokens,
+                cache_write_tokens=cache_write_tokens,
+            ),
+        )
 
     def generate_response(self, prompt, *, num_answers=None):
         requested = int(num_answers) if num_answers is not None else 1
