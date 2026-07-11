@@ -15,14 +15,12 @@ from .blocks import (
 from .skills import common_ptxas_issues_skill
 
 
-# TODO: Dehardcode the target here
 def prompt_builder(
     spec,
     *,
     version,
     target,
     address_size,
-    num_answers=5,
     ptx_signature=None,
 ):
     sections = [
@@ -40,7 +38,7 @@ def prompt_builder(
         ),
         correctness_rules(),
         commenting_rules(),
-        performance_rules(target, version, spec),
+        performance_rules(),
         triton_kernel_block(spec.source),
         output_contract(spec),
     ]
@@ -53,7 +51,6 @@ def build_prompt_for_operator(
     version,
     target,
     address_size,
-    num_answers=5,
     ptx_signature=None,
 ):
     spec = extract_specification_from_operator(operator)
@@ -62,6 +59,5 @@ def build_prompt_for_operator(
         version=version,
         target=target,
         address_size=address_size,
-        num_answers=num_answers,
         ptx_signature=ptx_signature,
     )

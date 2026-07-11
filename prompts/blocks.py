@@ -1,33 +1,6 @@
 from __future__ import annotations
 
 
-def format_argument_list(parameters):
-    if not parameters:
-        return "None."
-
-    lines = []
-
-    for param in parameters:
-        annotation = str(param.annotation).lower()
-
-        is_constexpr = (
-            annotation == "constexpr"
-            or annotation.endswith(".constexpr")
-            or "triton.language.core.constexpr" in annotation
-            or ("triton.language" in annotation and "constexpr" in annotation)
-        )
-
-        ptx_status = (
-            "compile-time constexpr, omit from PTX signature; the operator default will be used"
-            if is_constexpr
-            else "runtime argument, include in PTX signature"
-        )
-
-        lines.append(f"- {param.name}: {ptx_status}")
-
-    return "\n".join(lines)
-
-
 def initial_task():
     return """
 # Triton to Fastest PTX Conversion
@@ -35,20 +8,6 @@ def initial_task():
 You are given a Triton kernel. Generate a compile-ready PTX kernels.
 The kernel must be the fastest implementation you can produce for the exact
 PTX version and target listed below.
-    """
-
-
-def follow_up_task():
-    return """
-# PTX Test-Time Scaling
-
-You are given candidate PTX answers for the same Triton kernel, along with
-evaluation results that show whether each candidate compiled, whether it was
-correct, and how fast it ran.
-
-Use that feedback to generate another improved PTX kernels. Each answer
-must be compile-ready, run without cuda illegal accesses, semantically equivalent to the Triton kernel, and
-target the exact PTX version and GPU target listed below. The operator defaults will be used for tl.constexpr values.
     """
 
 
@@ -176,7 +135,7 @@ def commenting_rules():
 """.strip()
 
 
-def performance_rules(target, version, spec):
+def performance_rules():
     return """
 ## Performance Rules
 
