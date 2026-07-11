@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 
-def load_candidate_record(path: Path) -> dict[str, Any]:
+def load_candidate_record(path):
     print("Loading the JSON")
 
     try:
@@ -23,7 +23,7 @@ def load_candidate_record(path: Path) -> dict[str, Any]:
     return data
 
 
-def extract_payload(record: dict[str, Any]) -> dict[str, Any]:
+def extract_payload(record):
     payload = record.get("payload")
 
     if isinstance(payload, dict):
@@ -37,7 +37,7 @@ def extract_payload(record: dict[str, Any]) -> dict[str, Any]:
     raise ValueError('Input JSON must contain a "payload" object or be a raw PTX payload.')
 
 
-def resolve_kernel_name(record: dict[str, Any], explicit_kernel: str | None) -> str:
+def resolve_kernel_name(record, explicit_kernel):
     kernel_name = explicit_kernel or record.get("kernel_name")
     if not isinstance(kernel_name, str) or not kernel_name.strip():
         raise ValueError(
@@ -47,9 +47,9 @@ def resolve_kernel_name(record: dict[str, Any], explicit_kernel: str | None) -> 
 
 
 def remeasure_candidate(
-    record: dict[str, Any],
+    record,
     *,
-    kernel_name: str | None = None,
+    kernel_name = None,
 ):
     from triton_ptx.evaluation import Payload, TritonPTXCandidateEvaluator
     from triton_ptx.kernels import resolve_kernel
@@ -62,7 +62,7 @@ def remeasure_candidate(
     return evaluator.evaluate(payload)
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args():
     parser = argparse.ArgumentParser(
         description=(
             "Re-run compile, correctness, and timing measurement for an archived "
@@ -86,7 +86,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def main() -> None:
+def main():
     args = parse_args()
     record = load_candidate_record(args.json_path)
     result = remeasure_candidate(

@@ -1,4 +1,3 @@
-"""Utilities for formatting evaluator results."""
 
 from __future__ import annotations
 
@@ -10,12 +9,11 @@ from triton_ptx import Payload
 from .response_format import PtxKernel
 
 
-def json_default(value: object) -> object:
-    """Return a JSON-safe representation for non-standard diagnostic objects."""
+def json_default(value):
     if hasattr(value, "detach") and hasattr(value, "numel"):
         tensor = value.detach()
         shape = list(tensor.shape)
-        summary: dict[str, object] = {
+        summary = {
             "type": value.__class__.__name__,
             "shape": shape,
             "dtype": str(tensor.dtype),
@@ -34,14 +32,12 @@ def json_default(value: object) -> object:
     return str(value)
 
 
-def candidate_from_evaluation(evaluation: Any) -> PtxKernel:
-    """Return a validated PTX candidate from an evaluator result."""
+def candidate_from_evaluation(evaluation):
     payload = Payload.from_input(evaluation.payload).to_launch_dict()
     return PtxKernel.model_validate(payload)
 
 
-def evaluation_summary(evaluation: Any, *, include_ptx: bool) -> str:
-    """Format a compact evaluator result summary for prompts and traces."""
+def evaluation_summary(evaluation, *, include_ptx):
     payload = candidate_from_evaluation(evaluation).model_dump(exclude_none=False)
     if not include_ptx:
         payload["ptx"] = "<omitted>"

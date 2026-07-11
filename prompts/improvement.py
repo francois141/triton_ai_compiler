@@ -6,11 +6,10 @@ from utils.evaluation import evaluation_summary
 
 
 def build_improvement_prompt(
-    base_prompt: str,
-    best_evaluation: Any,
-    recent_evaluations: list[Any],
-) -> str:
-    """Build a compact prompt asking for three targeted improvement ideas."""
+    base_prompt,
+    best_evaluation,
+    recent_evaluations,
+):
     recent_block = "\n\n".join(
         evaluation_summary(evaluation, include_ptx=False)
         for evaluation in recent_evaluations[-6:]
@@ -50,11 +49,10 @@ loops, local-memory accumulator arrays, or a different implementation strategy.
 
 
 def build_candidate_prompt(
-    base_prompt: str,
-    best_evaluation: Any,
-    idea: dict[str, str],
-) -> str:
-    """Build a prompt for one focused candidate derived from one idea."""
+    base_prompt,
+    best_evaluation,
+    idea,
+):
     return f"""{base_prompt}
 
 ## Current Best Verified Candidate
@@ -94,15 +92,14 @@ repaired candidate you tested so the outer loop can record diagnostics.
 
 
 def build_repair_prompt(
-    base_prompt: str,
-    best_evaluation: Any,
-    failed_evaluation: Any,
-    idea: dict[str, str],
+    base_prompt,
+    best_evaluation,
+    failed_evaluation,
+    idea,
     *,
-    repair_index: int,
-    max_repair_attempts: int,
-) -> str:
-    """Build a prompt that repairs one failed candidate in isolation."""
+    repair_index,
+    max_repair_attempts,
+):
     return f"""{base_prompt}
 
 ## Current Best Verified Candidate
@@ -140,13 +137,12 @@ return the closest tested repair so the outer loop can record its diagnostics.
 
 
 def build_initial_repair_prompt(
-    base_prompt: str,
-    failed_evaluation: Any,
+    base_prompt,
+    failed_evaluation,
     *,
-    repair_index: int,
-    max_repair_attempts: int,
-) -> str:
-    """Build a prompt that repairs the first generated candidate."""
+    repair_index,
+    max_repair_attempts,
+):
     return f"""{base_prompt}
 
 ## Failed Initial Candidate And Diagnostics

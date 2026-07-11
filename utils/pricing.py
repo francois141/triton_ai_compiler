@@ -7,7 +7,7 @@ from typing import Mapping
 
 PriceTable = Mapping[str, Mapping[str, float]]
 
-_PRICING_PER_1M_TOKENS: dict[str, dict[str, float]] = {
+_PRICING_PER_1M_TOKENS = {
     # Price estimates in USD per 1M tokens.
     # Keep these aligned with provider pricing pages.
     "gpt-5.6-sol": {
@@ -53,7 +53,7 @@ _PRICING_PER_1M_TOKENS: dict[str, dict[str, float]] = {
     },
 }
 
-PRICING_PER_1M_TOKENS: PriceTable = MappingProxyType(
+PRICING_PER_1M_TOKENS = MappingProxyType(
     {
         model: MappingProxyType(pricing)
         for model, pricing in _PRICING_PER_1M_TOKENS.items()
@@ -63,44 +63,19 @@ PRICING_PER_1M_TOKENS: PriceTable = MappingProxyType(
 
 @dataclass(frozen=True, slots=True)
 class TokenCounts:
-    """Token usage values used for provider cost estimates.
 
-    Args:
-        input_tokens: Total prompt or input tokens.
-        output_tokens: Total completion or output tokens.
-        cached_input_tokens: Input tokens served from cache.
-        cache_write_tokens: Input tokens written to cache.
-    """
-
-    input_tokens: int = 0
-    output_tokens: int = 0
-    cached_input_tokens: int = 0
-    cache_write_tokens: int = 0
+    input_tokens = 0
+    output_tokens = 0
+    cached_input_tokens = 0
+    cache_write_tokens = 0
 
 
-def get_pricing(model: str) -> Mapping[str, float] | None:
-    """Return the pricing row for a model.
-
-    Args:
-        model: Provider model identifier.
-
-    Returns:
-        Pricing in USD per 1M tokens, or None when the model is unknown.
-    """
+def get_pricing(model):
 
     return PRICING_PER_1M_TOKENS.get(model)
 
 
-def get_price(model: str, token_type: str) -> float | None:
-    """Return a single token price for a model.
-
-    Args:
-        model: Provider model identifier.
-        token_type: Token price type, such as input, cached_input, or output.
-
-    Returns:
-        Price in USD per 1M tokens, or None when absent.
-    """
+def get_price(model, token_type):
 
     pricing = get_pricing(model)
     if pricing is None:
@@ -108,16 +83,7 @@ def get_price(model: str, token_type: str) -> float | None:
     return pricing.get(token_type)
 
 
-def estimate_token_cost(model: str, token_counts: TokenCounts) -> float | None:
-    """Estimate token cost for a provider response.
-
-    Args:
-        model: Provider model identifier.
-        token_counts: Input, cached input, cache write, and output usage.
-
-    Returns:
-        Estimated USD cost, or None when pricing is unavailable.
-    """
+def estimate_token_cost(model, token_counts):
 
     pricing = get_pricing(model)
     if pricing is None:

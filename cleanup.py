@@ -10,15 +10,7 @@ DATABASE_DIR = ROOT_DIR / "database"
 OUTPUT_WINNER_PATTERN = "output_winner*.json"
 
 
-def delete_pushed_skills(client: OpenAI) -> int:
-    """Delete all skills currently pushed to the OpenAI account.
-
-    Args:
-        client: Authenticated OpenAI client.
-
-    Returns:
-        Number of deleted skills.
-    """
+def delete_pushed_skills(client):
     deleted_count = 0
     for skill in client.skills.list():
         print(
@@ -35,15 +27,7 @@ def delete_pushed_skills(client: OpenAI) -> int:
     return deleted_count
 
 
-def remove_tmp_folder(tmp_dir: Path = TMP_DIR) -> bool:
-    """Remove the temporary working directory when it exists.
-
-    Args:
-        tmp_dir: Path to the temporary directory.
-
-    Returns:
-        True if the directory was removed, otherwise False.
-    """
+def remove_tmp_folder(tmp_dir = TMP_DIR):
     if not tmp_dir.exists():
         return False
     if not tmp_dir.is_dir():
@@ -54,16 +38,8 @@ def remove_tmp_folder(tmp_dir: Path = TMP_DIR) -> bool:
 
 
 def remove_database_folders_without_winners(
-    database_dir: Path = DATABASE_DIR,
-) -> int:
-    """Remove database folders that do not contain output winner JSON files.
-
-    Args:
-        database_dir: Directory containing per-run database folders.
-
-    Returns:
-        Number of removed database folders.
-    """
+    database_dir = DATABASE_DIR,
+):
     if not database_dir.exists():
         return 0
     if not database_dir.is_dir():
@@ -83,8 +59,7 @@ def remove_database_folders_without_winners(
     return removed_count
 
 
-def main() -> None:
-    """Run all cleanup steps."""
+def main():
     client = OpenAI()
 
     deleted_skills = delete_pushed_skills(client)

@@ -51,9 +51,8 @@ RESPONSE_RETRY_ATTEMPTS = 6
 DEFAULT_REPAIR_ATTEMPTS = 4
 
 
-def _build_tools(skill_id: str | None) -> list[dict[str, Any]]:
-    """Build the Responses API tools for stateless optimization calls."""
-    tools: list[dict[str, Any]] = []#[{"type": "web_search"}]
+def _build_tools(skill_id):
+    tools = []#[{"type": "web_search"}]
     if skill_id is not None:
         tools.append(
             {
@@ -73,15 +72,7 @@ def _build_tools(skill_id: str | None) -> list[dict[str, Any]]:
     return tools
 
 
-def build_initial_prompt(kernel_name: str) -> str:
-    """Build the optimization prompt for a kernel.
-
-    Args:
-        kernel_name: Registered Triton PTX kernel class name.
-
-    Returns:
-        Complete initial optimization prompt.
-    """
+def build_initial_prompt(kernel_name):
     kernel_cls = resolve_kernel(kernel_name)
     version, target, address_size = get_ptx_system_config()
     signature = parse_ptx_signature(dump_kernel_ptx(kernel_cls()))
@@ -96,7 +87,7 @@ def build_initial_prompt(kernel_name: str) -> str:
     return f"{prompt}"
 
 
-def _write_trace(trace_path: Path | None, events: list[dict[str, Any]]) -> None:
+def _write_trace(trace_path, events):
     if trace_path is not None:
         trace_path.write_text(
             json.dumps(events, indent=2, default=json_default),
@@ -104,19 +95,7 @@ def _write_trace(trace_path: Path | None, events: list[dict[str, Any]]) -> None:
         )
 
 
-def _load_start_json(start_json: str | Path | None) -> PtxKernel | None:
-    """Load and validate an optional starting implementation.
-
-    Args:
-        start_json: Inline candidate JSON, a JSON file path, or ``None``.
-
-    Returns:
-        The validated starting candidate, or ``None`` when one was not supplied.
-
-    Raises:
-        OSError: If a supplied JSON file cannot be read.
-        ValueError: If the JSON does not contain a valid PTX candidate.
-    """
+def _load_start_json(start_json):
     if start_json is None:
         return None
 
@@ -142,20 +121,11 @@ def _load_start_json(start_json: str | Path | None) -> PtxKernel | None:
     return PtxKernel.model_validate(candidate_data)
 
 
-def _final_path(trace_path: Path) -> Path:
-    """Return the final-answer path corresponding to a trace path.
-
-    Args:
-        trace_path: Full response trace destination.
-
-    Returns:
-        Sibling path with ``_final`` appended to the trace stem.
-    """
+def _final_path(trace_path):
     return trace_path.with_name(f"{trace_path.stem}_final.json")
 
 
-def _create_response_with_retries(client: OpenAI, kwargs: dict[str, Any]) -> Any:
-    """Create a response, retrying transient skill lookup misses."""
+def _create_response_with_retries(client, kwargs):
     for attempt in range(RESPONSE_RETRY_ATTEMPTS):
         try:
             return client.responses.create(**kwargs)
@@ -167,15 +137,13 @@ def _create_response_with_retries(client: OpenAI, kwargs: dict[str, Any]) -> Any
     raise RuntimeError("Response retry loop ended unexpectedly.")
 
 
-def _get_field(value: Any, field_name: str) -> Any:
-    """Return a field from either an SDK object or a dictionary."""
+def _get_field(value, field_name):
     if isinstance(value, dict):
         return value.get(field_name)
     return getattr(value, field_name, None)
 
 
-def _format_tool_call(output_item: Any) -> str | None:
-    """Return a concise tool-call description for a Responses output item."""
+def _format_tool_call(output_item):
     item_type = _get_field(output_item, "type")
     if not isinstance(item_type, str) or not item_type.endswith("_call"):
         return None
@@ -197,8 +165,7 @@ def _format_tool_call(output_item: Any) -> str | None:
     return ", ".join(details)
 
 
-def _print_tool_calls(response: Any) -> None:
-    """Print each tool call reported in a Responses API response."""
+def _print_tool_calls(response):
     output_items = _get_field(response, "output")
     if output_items is None:
         return
@@ -209,8 +176,7 @@ def _print_tool_calls(response: Any) -> None:
             print(f"=== LLM called tool: {tool_call} ===", flush=True)
 
 
-def _message_output_text(output_item: Any) -> str | None:
-    """Return concatenated output text for one assistant message item."""
+def _message_output_text(output_item):
     if _get_field(output_item, "type") != "message":
         return None
 
@@ -230,12 +196,7 @@ def _message_output_text(output_item: Any) -> str | None:
     return "".join(text_parts)
 
 
-def _response_json_text(response: Any) -> str:
-    """Return the final structured JSON text from a Responses API response.
-
-    Raises:
-        ValueError: If the response has no message output text.
-    """
+def _response_json_text(response):
     output_items = _get_field(response, "output")
     if output_items is None:
         output_text = _get_field(response, "output_text")
@@ -257,22 +218,20 @@ def _response_json_text(response: Any) -> str:
     return fallback_text
 
 
-def _candidate_json(candidate: PtxKernel) -> str:
-    """Return canonical JSON for a PTX candidate."""
+def _candidate_json(candidate):
     return candidate.model_dump_json(exclude_none=False, indent=2)
 
 
 def _request_json(
-    client: OpenAI,
+    client,
     *,
-    model: str,
-    prompt: str,
-    response_format: dict[str, Any],
-    reasoning_effort: str | None,
-    tools: list[dict[str, Any]],
-) -> tuple[Any, float | None]:
-    """Send one compact Responses API request and log its cost."""
-    kwargs: dict[str, Any] = {
+    model,
+    prompt,
+    response_format,
+    reasoning_effort,
+    tools,
+):
+    kwargs = {
         "model": model,
         "instructions": system_prompt(),
         "input": [{"role": "user", "content": prompt}],
@@ -288,16 +247,15 @@ def _request_json(
 
 
 def _record_prompt(
-    responses: list[dict[str, Any]],
-    trace_path: Path | None,
+    responses,
+    trace_path,
     *,
-    prompt_name: str,
-    prompt: str,
-    round_index: int,
-    candidate_index: int | None = None,
-    idea: dict[str, str] | None = None,
-) -> None:
-    """Append an explicit prompt event to the trace."""
+    prompt_name,
+    prompt,
+    round_index,
+    candidate_index = None,
+    idea = None,
+):
     responses.append(
         {
             "type": "prompt",
@@ -312,16 +270,15 @@ def _record_prompt(
 
 
 def _evaluate_and_record(
-    evaluator: TritonPTXCandidateEvaluator,
-    candidate: PtxKernel,
-    responses: list[dict[str, Any]],
-    trace_path: Path | None,
+    evaluator,
+    candidate,
+    responses,
+    trace_path,
     *,
-    round_index: int,
-    candidate_index: int,
-    idea: dict[str, str] | None,
-) -> Any:
-    """Evaluate one candidate and append a trace record."""
+    round_index,
+    candidate_index,
+    idea,
+):
     evaluated_candidate = evaluator.evaluate(
         Payload.from_input(candidate.model_dump(exclude_none=False))
     )
@@ -345,8 +302,7 @@ def _evaluate_and_record(
     return evaluated_candidate
 
 
-def _should_repair_candidate(evaluation: Any) -> bool:
-    """Return whether a candidate failure should trigger an LLM repair attempt."""
+def _should_repair_candidate(evaluation):
     if evaluation.passed:
         return False
     if not evaluation.compiles:
@@ -357,22 +313,21 @@ def _should_repair_candidate(evaluation: Any) -> bool:
 
 
 def _generate_tested_candidate(
-    client: OpenAI,
-    evaluator: TritonPTXCandidateEvaluator,
-    responses: list[dict[str, Any]],
-    trace_path: Path | None,
+    client,
+    evaluator,
+    responses,
+    trace_path,
     *,
-    model: str,
-    optimization_prompt: str,
-    best_evaluation: Any,
-    idea: dict[str, str],
-    round_index: int,
-    candidate_index: int,
-    reasoning_effort: str | None,
-    tools: list[dict[str, Any]],
-    max_repair_attempts: int,
-) -> Any:
-    """Generate, evaluate, and minimally repair one idea before returning it."""
+    model,
+    optimization_prompt,
+    best_evaluation,
+    idea,
+    round_index,
+    candidate_index,
+    reasoning_effort,
+    tools,
+    max_repair_attempts,
+):
     candidate_prompt = build_candidate_prompt(
         optimization_prompt,
         best_evaluation,
@@ -480,19 +435,18 @@ def _generate_tested_candidate(
 
 
 def _repair_initial_candidate(
-    client: OpenAI,
-    evaluator: TritonPTXCandidateEvaluator,
-    responses: list[dict[str, Any]],
-    trace_path: Path | None,
+    client,
+    evaluator,
+    responses,
+    trace_path,
     *,
-    model: str,
-    optimization_prompt: str,
-    initial_evaluation: Any,
-    reasoning_effort: str | None,
-    tools: list[dict[str, Any]],
-    max_repair_attempts: int,
-) -> Any:
-    """Repair the initial candidate before the optimization rounds begin."""
+    model,
+    optimization_prompt,
+    initial_evaluation,
+    reasoning_effort,
+    tools,
+    max_repair_attempts,
+):
     best_attempt = initial_evaluation
     for repair_index in range(1, max_repair_attempts + 1):
         if not _should_repair_candidate(best_attempt):
@@ -556,33 +510,15 @@ def _repair_initial_candidate(
 
 
 def run_agent_loop(
-    kernel_name: str,
+    kernel_name,
     *,
-    model: str = "gpt-5.6-sol",
-    max_tool_rounds: int = 5,
-    max_repair_attempts: int = DEFAULT_REPAIR_ATTEMPTS,
-    reasoning_effort: str | None = "medium",
-    trace_path: Path | None = Path("trace.json"),
-    start_json: str | Path | None = None,
-) -> str:
-    """Optimize a kernel with compact explicit test-time scaling rounds.
-
-    Args:
-        kernel_name: Registered Triton PTX kernel class name.
-        model: OpenAI model identifier.
-        max_tool_rounds: Maximum improvement rounds. Each round evaluates three
-            targeted candidates.
-        max_repair_attempts: Maximum outer repair attempts per failed candidate.
-        reasoning_effort: Optional reasoning effort.
-        trace_path: Optional response trace destination.
-        start_json: Optional inline JSON or JSON file containing the implementation
-            from which optimization should continue.
-    Returns:
-        Final model response text.
-
-    Raises:
-        RuntimeError: If the model does not finish within the round limit.
-    """
+    model = "gpt-5.6-sol",
+    max_tool_rounds = 5,
+    max_repair_attempts = DEFAULT_REPAIR_ATTEMPTS,
+    reasoning_effort = "medium",
+    trace_path = Path("trace.json"),
+    start_json = None,
+):
     if max_repair_attempts < 0:
         raise ValueError("max_repair_attempts must be non-negative.")
 
@@ -597,11 +533,11 @@ def run_agent_loop(
         if starting_candidate is None
         else build_continuation_prompt(kernel_name)
     )
-    responses: list[dict[str, Any]] = []
-    recent_evaluations: list[Any] = []
+    responses = []
+    recent_evaluations = []
     wrote_daily_summary = False
 
-    def write_daily_summary() -> None:
+    def write_daily_summary():
         nonlocal wrote_daily_summary
         if not wrote_daily_summary:
             append_daily_cost_summary()
@@ -762,12 +698,7 @@ def run_agent_loop(
         write_daily_summary()
 
 
-def parse_args() -> argparse.Namespace:
-    """Parse command-line arguments.
-
-    Returns:
-        Parsed command-line namespace.
-    """
+def parse_args():
     parser = argparse.ArgumentParser(description="Optimize PTX with an OpenAI agent.")
     parser.add_argument("kernel", help="Kernel class name, for example AddKernel.")
     parser.add_argument("--model", default="gpt-5.5")
@@ -787,8 +718,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def main() -> None:
-    """Run the PTX optimization command."""
+def main():
     args = parse_args()
     print(
         run_agent_loop(

@@ -19,7 +19,7 @@ from .next import candidate_results_block
 from .skills import common_ptxas_issues_skill
 
 
-def repair_task(retry_index: int, max_retries: int) -> str:
+def repair_task(retry_index, max_retries):
     return """
 # PTX Isolated Candidate Repair
 
@@ -27,7 +27,7 @@ You are given one failed PTX candidate for a Triton kernel and you have to repai
 """.strip()
 
 
-def repair_rules() -> str:
+def repair_rules():
     return """
 ## Repair Rules
 
@@ -48,7 +48,7 @@ Only fix the PTXAS compilation errors while preserving:
 """.strip()
 
 
-def sanitizer_diagnostics_block(candidate: EvaluatedCandidate) -> str:
+def sanitizer_diagnostics_block(candidate):
     result = (
         orjson.dumps(
             candidate.sanitizer_report,
@@ -69,15 +69,15 @@ def sanitizer_diagnostics_block(candidate: EvaluatedCandidate) -> str:
 
 def prompt_builder(
     spec,
-    failed_candidate: EvaluatedCandidate,
+    failed_candidate,
     *,
-    retry_index: int,
-    max_retries: int,
-    version: str,
-    target: str,
-    address_size: int,
+    retry_index,
+    max_retries,
+    version,
+    target,
+    address_size,
     ptx_signature=None,
-) -> str:
+):
     sections = [
         repair_task(retry_index, max_retries),
         common_ptxas_issues_skill(),
@@ -104,16 +104,16 @@ def prompt_builder(
 
 
 def build_repair_prompt_for_operator(
-    failed_candidate: EvaluatedCandidate,
-    operator_cls: type[TritonPTXKernel],
+    failed_candidate,
+    operator_cls,
     *,
-    retry_index: int,
-    max_retries: int,
-    version: str,
-    target: str,
-    address_size: int,
+    retry_index,
+    max_retries,
+    version,
+    target,
+    address_size,
     ptx_signature=None,
-) -> str:
+):
     spec = extract_specification_from_operator(operator_cls)
     return prompt_builder(
         spec,

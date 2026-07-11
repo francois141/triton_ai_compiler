@@ -22,7 +22,7 @@ from .blocks import (
 from .skills import async_load_store_skill, common_ptxas_issues_skill
 
 
-def _format_metric(value: float) -> str:
+def _format_metric(value):
     if math.isinf(value):
         return "inf"
     if math.isnan(value):
@@ -30,7 +30,7 @@ def _format_metric(value: float) -> str:
     return f"{value:.6g}"
 
 
-def _format_extra_payload_keys(candidate: EvaluatedCandidate) -> str:
+def _format_extra_payload_keys(candidate):
     extra_payload_keys = {
         key: value
         for key, value in candidate.payload.items()
@@ -44,7 +44,7 @@ def _format_extra_payload_keys(candidate: EvaluatedCandidate) -> str:
     )
 
 
-def _format_launch_metadata(candidate: EvaluatedCandidate) -> str:
+def _format_launch_metadata(candidate):
     launch_metadata = {
         key: candidate.payload[key]
         for key in sorted(PTX_LAUNCH_KEYS)
@@ -56,7 +56,7 @@ def _format_launch_metadata(candidate: EvaluatedCandidate) -> str:
     return "\n".join(f"- {name}: {value!r}" for name, value in launch_metadata.items())
 
 
-def _candidate_block(candidate: EvaluatedCandidate, display_index: int) -> str:
+def _candidate_block(candidate, display_index):
     ptx_code = str(candidate.payload.get("ptx", "")).strip() or "<missing PTX payload>"
     diagnostics_block = ""
     if not candidate.correct:
@@ -106,7 +106,7 @@ PTX:
 """.strip()
 
 
-def candidate_results_block(candidates: list[EvaluatedCandidate]) -> str:
+def candidate_results_block(candidates):
     if not candidates:
         return "\n\n".join(
             [
@@ -126,7 +126,7 @@ def candidate_results_block(candidates: list[EvaluatedCandidate]) -> str:
     return "\n\n".join(sections)
 
 
-def follow_up_rules() -> str:
+def follow_up_rules():
     return """
 ## Follow-Up Rules
 
@@ -141,14 +141,14 @@ def follow_up_rules() -> str:
 
 def prompt_builder(
     spec,
-    candidates: list[EvaluatedCandidate],
+    candidates,
     *,
-    version: str,
-    target: str,
-    address_size: int,
-    num_answers: int = 5,
+    version,
+    target,
+    address_size,
+    num_answers = 5,
     ptx_signature=None,
-) -> str:
+):
     sections = [
         async_load_store_skill(),
         common_ptxas_issues_skill(),
@@ -175,13 +175,13 @@ def prompt_builder(
 
 
 def build_follow_up_prompt_for_operator(
-    candidates: list[EvaluatedCandidate] | None,
-    operator_cls: type[TritonPTXKernel],
+    candidates,
+    operator_cls,
     *,
-    version: str,
-    target: str,
-    address_size: int,
-    num_answers: int = 5,
+    version,
+    target,
+    address_size,
+    num_answers = 5,
     ptx_signature=None,
 ):
     spec = extract_specification_from_operator(operator_cls)

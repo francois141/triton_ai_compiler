@@ -8,13 +8,12 @@ from utils.response_format import PtxKernel
 class LLMEndpoint(ABC):
     @abstractmethod
     def generate_response(
-        self, prompt: str, *, num_answers: int | None = None
-    ) -> list[dict]:
-        """Generate a response from a prompt."""
+        self, prompt, *, num_answers = None
+    ):
         pass
 
 
-def parse_response_text(text: str) -> list[dict]:
+def parse_response_text(text):
     # Remove markdown fences/backticks if pasted from ChatGPT
     text = text.replace("```json", "").replace("```python", "")
     text = text.replace("```", "").strip()

@@ -9,16 +9,10 @@ from typing import Any, NamedTuple
 
 
 class WinnerRecord(NamedTuple):
-    kernel_name: str
-    run_dir: str
-    source_path: Path
-    round_index: int | None
-    speedup_vs_triton: float
-    triton_p50: float | None
-    p50: float | None
+    pass
 
 
-def finite_float(value: Any) -> float | None:
+def finite_float(value):
     try:
         value = float(value)
     except (TypeError, ValueError):
@@ -27,7 +21,7 @@ def finite_float(value: Any) -> float | None:
     return value if math.isfinite(value) else None
 
 
-def load_winner(path: Path) -> WinnerRecord | None:
+def load_winner(path):
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
@@ -57,8 +51,8 @@ def load_winner(path: Path) -> WinnerRecord | None:
     )
 
 
-def collect_best_winners(database_dir: Path) -> dict[str, WinnerRecord]:
-    best: dict[str, WinnerRecord] = {}
+def collect_best_winners(database_dir):
+    best = {}
 
     for path in sorted(database_dir.glob("*/output_winner_*.json")):
         record = load_winner(path)
@@ -72,7 +66,7 @@ def collect_best_winners(database_dir: Path) -> dict[str, WinnerRecord]:
     return best
 
 
-def print_table(best: dict[str, WinnerRecord]) -> None:
+def print_table(best):
     headers = ("Kernel", "Best Speedup", "Run", "Round", "Winner File")
 
     rows = [
@@ -95,7 +89,7 @@ def print_table(best: dict[str, WinnerRecord]) -> None:
         print("  ".join(str(value).ljust(widths[i]) for i, value in enumerate(row)))
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args():
     parser = argparse.ArgumentParser(
         description="Summarize the best valid PTX winner per kernel from the output database."
     )
@@ -108,7 +102,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def main() -> None:
+def main():
     args = parse_args()
 
     if not args.database_dir.is_dir():

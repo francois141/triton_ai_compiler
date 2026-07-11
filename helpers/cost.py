@@ -1,4 +1,3 @@
-"""Response cost estimation and cost-log helpers."""
 
 from __future__ import annotations
 
@@ -12,7 +11,7 @@ COST_LOG_PATH = Path(__file__).resolve().parent.parent / "costs.txt"
 WEB_SEARCH_COST_PER_CALL = 10.00 / 1_000
 
 
-def _get_nested_int(value: Any, *keys: str) -> int:
+def _get_nested_int(value, *keys):
     for key in keys:
         if value is None:
             return 0
@@ -24,18 +23,8 @@ def _get_nested_int(value: Any, *keys: str) -> int:
 
 
 def estimate_response_cost(
-    response: Any, model: str
-) -> tuple[float | None, dict[str, int]]:
-    """Estimate response cost and return the token/tool usage counts.
-
-    Args:
-        response: Provider response containing usage information.
-        model: Provider model identifier.
-
-    Returns:
-        A cost in USD, or ``None`` when pricing or usage is unavailable, and
-        the extracted usage counts.
-    """
+    response, model
+):
     usage = getattr(response, "usage", None)
     if usage is None:
         return None, {
@@ -83,8 +72,7 @@ def estimate_response_cost(
     return token_cost + web_search_calls * WEB_SEARCH_COST_PER_CALL, token_counts
 
 
-def read_daily_total(cost_log_path: Path, date_text: str) -> float:
-    """Read the total known cost for a date from a cost log."""
+def read_daily_total(cost_log_path, date_text):
     if not cost_log_path.exists():
         return 0.0
     total = 0.0
@@ -101,9 +89,8 @@ def read_daily_total(cost_log_path: Path, date_text: str) -> float:
 
 
 def append_cost_log(
-    *, model: str, response: Any, cost_log_path: Path = COST_LOG_PATH
-) -> float | None:
-    """Estimate a response cost and append it to the cost log."""
+    *, model, response, cost_log_path = COST_LOG_PATH
+):
     timestamp = datetime.now().astimezone()
     cost, token_counts = estimate_response_cost(response, model)
     daily_total = read_daily_total(cost_log_path, timestamp.date().isoformat())
@@ -124,9 +111,8 @@ def append_cost_log(
 
 
 def append_daily_cost_summary(
-    cost_log_path: Path = COST_LOG_PATH, *, label: str = "run_end"
-) -> None:
-    """Append the current day's accumulated cost to the cost log."""
+    cost_log_path = COST_LOG_PATH, *, label = "run_end"
+):
     timestamp = datetime.now().astimezone()
     daily_total = read_daily_total(cost_log_path, timestamp.date().isoformat())
     cost_log_path.parent.mkdir(parents=True, exist_ok=True)

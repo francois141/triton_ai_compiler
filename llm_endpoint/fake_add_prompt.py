@@ -138,13 +138,12 @@ ADD_KERNEL_PAYLOAD = {
 
 
 class FakeAddPrompt(LLMEndpoint):
-    """Deterministic fake endpoint for the AddKernel test-time-scaling path."""
 
-    def __init__(self, model: str | None = None, kernel_name: str = "AddKernel"):
+    def __init__(self, model = None, kernel_name = "AddKernel"):
         if kernel_name != "AddKernel":
             raise ValueError("fake_add only supports AddKernel")
         self.model = model
 
-    def generate_response(self, prompt: str, *, num_answers: int | None = None) -> list[dict]:
+    def generate_response(self, prompt, *, num_answers = None):
         count = 1 if num_answers is None else num_answers
         return [dict(ADD_KERNEL_PAYLOAD) for _ in range(count)]

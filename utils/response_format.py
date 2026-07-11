@@ -7,18 +7,16 @@ PositiveInteger = Annotated[int, Field(ge=1)]
 
 
 class PtxKernel(BaseModel):
-    """Represent a validated PTX kernel returned by an LLM."""
 
     model_config = ConfigDict(extra="forbid")
 
-    ptx: str = Field(min_length=1)
-    num_threads_x: PositiveInteger
-    num_threads_y: PositiveInteger = 1
-    num_threads_z: PositiveInteger = 1
+    ptx = Field(min_length=1)
+    num_threads_y = 1
+    num_threads_z = 1
 
     @field_validator("ptx")
     @classmethod
-    def validate_ptx(cls, value: str) -> str:
+    def validate_ptx(cls, value):
         if not value.strip():
             raise ValueError('"ptx" must contain non-whitespace PTX code.')
         return value

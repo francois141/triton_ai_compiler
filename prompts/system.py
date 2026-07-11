@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 
-def system_prompt() -> str:
+def system_prompt():
     return """
 You are an autonomous NVIDIA PTX optimization agent. Your goal is to return
 the fastest correct implementation of the kernel described by the user.

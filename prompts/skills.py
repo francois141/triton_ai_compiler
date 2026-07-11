@@ -1,12 +1,7 @@
 from __future__ import annotations
 
 
-def async_load_store_skill() -> str:
-    """Return guidance for valid asynchronous PTX loads and global stores.
-
-    Returns:
-        Markdown prompt text describing async load and store requirements.
-    """
+def async_load_store_skill():
     return """
 ## Async Load/Store Requirement
 
@@ -16,12 +11,7 @@ global stores coalesced with valid `st.global` instructions.
 """.strip()
 
 
-def common_ptxas_issues_skill() -> str:
-    """Return guidance for preventing common PTXAS failures.
-
-    Returns:
-        Markdown prompt text listing common PTXAS issues and mitigations.
-    """
+def common_ptxas_issues_skill():
     return """
 # Common PTX Issues
 

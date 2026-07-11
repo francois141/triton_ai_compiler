@@ -28,7 +28,7 @@ def format_argument_list(parameters):
     return "\n".join(lines)
 
 
-def initial_task() -> str:
+def initial_task():
     return """
 # Triton to Fastest PTX Conversion
 
@@ -38,7 +38,7 @@ PTX version and target listed below.
     """
 
 
-def follow_up_task() -> str:
+def follow_up_task():
     return """
 # PTX Test-Time Scaling
 
@@ -86,7 +86,7 @@ def constexpr_values_block(spec):
     )
 
 
-def launch_configuration_block() -> str:
+def launch_configuration_block():
     return "\n\n".join(
         [
             "## Launch Configuration",
@@ -95,7 +95,7 @@ def launch_configuration_block() -> str:
     )
 
 
-def _is_constexpr_annotation(annotation) -> bool:
+def _is_constexpr_annotation(annotation):
     annotation_text = str(annotation).lower()
     return (
         annotation_text == "constexpr"

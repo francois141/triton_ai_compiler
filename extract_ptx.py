@@ -8,7 +8,7 @@ from triton_ptx.helpers.triton import dump_kernel_ptx
 from triton_ptx.kernels import kernel_list
 
 
-def dump_and_save_ptx_kernel(kernel, output_dir: Path) -> Path:
+def dump_and_save_ptx_kernel(kernel, output_dir):
 
     kernel_name = kernel.__class__.__name__
     ptx = dump_kernel_ptx(kernel)
@@ -22,7 +22,7 @@ def dump_and_save_ptx_kernel(kernel, output_dir: Path) -> Path:
     return output_path
 
 
-def main(output_dir: str) -> None:
+def main(output_dir):
     if not is_gpu_available():
         raise RuntimeError("CUDA is required to compile and dump Triton PTX.")
 

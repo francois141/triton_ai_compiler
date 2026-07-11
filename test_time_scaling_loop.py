@@ -41,8 +41,7 @@ DEFAULT_CONFIG = {
 }
 
 
-def needs_compile_or_verification_retry(candidate: EvaluatedCandidate) -> bool:
-    """Return whether a failed candidate can benefit from an LLM repair."""
+def needs_compile_or_verification_retry(candidate):
     if not candidate.compiles:
         return True
 
@@ -66,14 +65,14 @@ def needs_compile_or_verification_retry(candidate: EvaluatedCandidate) -> bool:
     )
 
 
-def load_config(config_path: Path | str | None = None) -> DictConfig:
+def load_config(config_path = None):
     config = OmegaConf.create(DEFAULT_CONFIG)
     if config_path is not None:
         config = OmegaConf.merge(config, OmegaConf.load(config_path))
     return config
 
 
-def validate_config(config: DictConfig) -> None:
+def validate_config(config):
     if config.loop.rounds <= 0:
         raise ValueError("loop.rounds must be positive")
     if config.loop.k <= 0:
@@ -83,10 +82,10 @@ def validate_config(config: DictConfig) -> None:
 
 
 def run_test_time_scaling_loop(
-    kernel_name: str,
+    kernel_name,
     *,
-    config: DictConfig,
-) -> Path:
+    config,
+):
     config = OmegaConf.merge(OmegaConf.create(DEFAULT_CONFIG), config)
 
     kernel_cls = resolve_kernel(kernel_name)
@@ -248,7 +247,7 @@ def run_test_time_scaling_loop(
     return run_archive_root
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args():
     parser = argparse.ArgumentParser(
         description="Run a manual per-kernel PTX test-time scaling loop."
     )
@@ -261,7 +260,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def main() -> None:
+def main():
     args = parse_args()
     config = load_config(args.config)
     validate_config(config)
