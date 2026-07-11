@@ -19,7 +19,11 @@ if LOCAL_TRITON_PTX_ROOT.is_dir():
     sys.path.insert(0, str(LOCAL_TRITON_PTX_ROOT))
 
 from prompts import build_prompt_for_operator  # noqa: E402
-from llm_endpoint.base import PtxKernel  # noqa: E402
+from utils.response_format import (  # noqa: E402
+    IMPROVEMENT_PLAN_RESPONSE_FORMAT,
+    PTX_KERNEL_RESPONSE_FORMAT,
+    PtxKernel,
+)
 from triton_ptx import (  # noqa: E402
     Payload,
     TritonPTXCandidateEvaluator,
@@ -31,54 +35,7 @@ from triton_ptx import (  # noqa: E402
 from utils.pricing import TokenCounts, estimate_token_cost  # noqa: E402
 
 SYSTEM_PROMPT_PATH = Path(__file__).parent / "prompts" / "SYSTEM.md"
-PAYLOAD_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "ptx": {"type": "string", "minLength": 1},
-        "num_threads_x": {"type": "integer", "minimum": 1},
-        "num_threads_y": {
-            "anyOf": [{"type": "integer", "minimum": 1}, {"type": "null"}]
-        },
-        "num_threads_z": {
-            "anyOf": [{"type": "integer", "minimum": 1}, {"type": "null"}]
-        },
-    },
-    "required": ["ptx", "num_threads_x", "num_threads_y", "num_threads_z"],
-    "additionalProperties": False,
-}
-RESPONSE_FORMAT = {
-    "type": "json_schema",
-    "name": "ptx_kernel",
-    "strict": True,
-    "schema": PAYLOAD_SCHEMA,
-}
-IMPROVEMENT_PLAN_FORMAT = {
-    "type": "json_schema",
-    "name": "improvement_plan",
-    "strict": True,
-    "schema": {
-        "type": "object",
-        "properties": {
-            "improvements": {
-                "type": "array",
-                "minItems": 3,
-                "maxItems": 3,
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "name": {"type": "string", "minLength": 1},
-                        "rationale": {"type": "string", "minLength": 1},
-                        "instruction": {"type": "string", "minLength": 1},
-                    },
-                    "required": ["name", "rationale", "instruction"],
-                    "additionalProperties": False,
-                },
-            }
-        },
-        "required": ["improvements"],
-        "additionalProperties": False,
-    },
-}
+RESPONSE_FORMAT = PTX_KERNEL_RESPONSE_FORMAT
 COST_LOG_PATH = Path(__file__).resolve().parent / "costs.txt"
 DEFAULT_PTX_SKILL_ROOT = Path(__file__).resolve().parent / "ptx_skill"
 DEFAULT_PTX_SKILL_SUBDIR = "ptx_skill"
@@ -1147,7 +1104,7 @@ def run_agent_loop(
                 client,
                 model=model,
                 prompt=plan_prompt,
-                response_format=IMPROVEMENT_PLAN_FORMAT,
+                response_format=IMPROVEMENT_PLAN_RESPONSE_FORMAT,
                 reasoning_effort=reasoning_effort,
                 tools=tools,
             )

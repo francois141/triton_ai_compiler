@@ -1,4 +1,6 @@
-from .base import LLMEndpoint, PtxKernel
+from utils.response_format import PTX_KERNEL_JSON_SCHEMA, PtxKernel
+
+from .base import LLMEndpoint
 
 
 class GeminiPrompt(LLMEndpoint):
@@ -55,7 +57,7 @@ class GeminiPrompt(LLMEndpoint):
         config = self._types.GenerateContentConfig(
             candidate_count=1,
             response_mime_type="application/json",
-            response_json_schema=PtxKernel.model_json_schema(),
+            response_json_schema=PTX_KERNEL_JSON_SCHEMA,
         )
 
         for _ in range(requested):

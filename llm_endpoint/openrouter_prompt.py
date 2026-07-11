@@ -4,7 +4,9 @@ from openai import OpenAI
 
 from utils.pricing import TokenCounts, estimate_token_cost
 
-from .base import LLMEndpoint, PtxKernel
+from utils.response_format import PTX_KERNEL_JSON_SCHEMA, PtxKernel
+
+from .base import LLMEndpoint
 
 
 class OpenRouterPrompt(LLMEndpoint):
@@ -79,7 +81,7 @@ class OpenRouterPrompt(LLMEndpoint):
                 "json_schema": {
                     "name": "ptx_kernel",
                     "strict": True,
-                    "schema": PtxKernel.model_json_schema(),
+                    "schema": PTX_KERNEL_JSON_SCHEMA,
                 },
             },
         }

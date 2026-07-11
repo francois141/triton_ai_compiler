@@ -4,7 +4,9 @@ from openai import OpenAI
 
 from utils.pricing import TokenCounts, estimate_token_cost
 
-from .base import LLMEndpoint, PtxKernel
+from utils.response_format import PtxKernel
+
+from .base import LLMEndpoint
 
 
 class OpenAIPrompt(LLMEndpoint):

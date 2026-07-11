@@ -2,23 +2,7 @@ from abc import ABC, abstractmethod
 import ast
 import json
 
-from typing import Annotated
-
-from pydantic import BaseModel, ConfigDict, Field
-
-
-PositiveInteger = Annotated[int, Field(ge=1)]
-
-
-class PtxKernel(BaseModel):
-    """Represent a validated PTX kernel returned by an LLM."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    ptx: str
-    num_threads_x: PositiveInteger
-    num_threads_y: PositiveInteger | None = None
-    num_threads_z: PositiveInteger | None = None
+from utils.response_format import PtxKernel
 
 
 class LLMEndpoint(ABC):
