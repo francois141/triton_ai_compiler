@@ -1,6 +1,6 @@
 [submodule "triton_ptx"]
 	path = triton_ptx
 	url = https://github.com/francois141/triton_ptx
-[submodule "ptx_skill"]
-	path = ptx_skill
+[submodule "skills/ptx_skills"]
+	path = skills/ptx_skills
 	url = https://github.com/francois141/ptx_skill

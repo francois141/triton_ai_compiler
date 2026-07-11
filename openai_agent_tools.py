@@ -4,9 +4,7 @@ import argparse
 import atexit
 import json
 import sys
-import tempfile
 import time
-import zipfile
 from pathlib import Path
 from time import perf_counter
 from typing import Any
@@ -32,11 +30,10 @@ from triton_ptx import (  # noqa: E402
     resolve_kernel,
 )
 from helpers.cost import append_cost_log, append_daily_cost_summary  # noqa: E402
+from skills import load_ptx  # noqa: E402
 
 SYSTEM_PROMPT_PATH = Path(__file__).parent / "prompts" / "SYSTEM.md"
 RESPONSE_FORMAT = PTX_KERNEL_RESPONSE_FORMAT
-DEFAULT_PTX_SKILL_ROOT = Path(__file__).resolve().parent / "ptx_skill"
-DEFAULT_PTX_SKILL_SUBDIR = "ptx_skill"
 RESPONSE_RETRY_ATTEMPTS = 6
 DEFAULT_REPAIR_ATTEMPTS = 4
 ASYNC_LOAD_STORE_INSTRUCTION = """
@@ -138,44 +135,6 @@ def _write_trace(trace_path: Path | None, events: list[dict[str, Any]]) -> None:
             json.dumps(events, indent=2, default=_json_default),
             encoding="utf-8",
         )
-
-
-def _validate_skill_dir(skill_dir: Path) -> None:
-    """Validate that a directory is an OpenAI skill package."""
-    if not skill_dir.is_dir():
-        raise FileNotFoundError(f"Skill directory not found: {skill_dir}")
-    if not (skill_dir / "SKILL.md").is_file():
-        raise FileNotFoundError(f"Skill file not found: {skill_dir / 'SKILL.md'}")
-
-
-def _zip_skill_dir(skill_dir: Path, zip_path: Path) -> None:
-    """Create a skill ZIP preserving the package directory name."""
-    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as archive:
-        for file_path in skill_dir.rglob("*"):
-            if file_path.is_file() and ".git" not in file_path.parts:
-                archive.write(file_path, file_path.relative_to(skill_dir.parent))
-
-
-def _upload_skill(
-    client: OpenAI,
-    *,
-    skill_dir: Path | None,
-    skill_subdir: str,
-) -> str:
-    """Upload a submodule-backed or explicitly provided skill directory."""
-    with tempfile.TemporaryDirectory(prefix="openai_ptx_skill_") as temp_dir_text:
-        temp_dir = Path(temp_dir_text)
-        resolved_skill_dir = (
-            DEFAULT_PTX_SKILL_ROOT / skill_subdir if skill_dir is None else skill_dir
-        )
-
-        _validate_skill_dir(resolved_skill_dir)
-        zip_path = temp_dir / f"{resolved_skill_dir.name}.zip"
-        _zip_skill_dir(resolved_skill_dir, zip_path)
-
-        with zip_path.open("rb") as skill_file:
-            skill = client.skills.create(files=[skill_file])
-    return skill.id
 
 
 def _load_start_json(start_json: str | Path | None) -> PtxKernel | None:
@@ -842,9 +801,6 @@ def run_agent_loop(
     reasoning_effort: str | None = "medium",
     trace_path: Path | None = Path("trace.json"),
     start_json: str | Path | None = None,
-    use_ptx_skill: bool = True,
-    skill_dir: Path | None = None,
-    skill_subdir: str = DEFAULT_PTX_SKILL_SUBDIR,
 ) -> str:
     """Optimize a kernel with compact explicit test-time scaling rounds.
 
@@ -858,11 +814,6 @@ def run_agent_loop(
         trace_path: Optional response trace destination.
         start_json: Optional inline JSON or JSON file containing the implementation
             from which optimization should continue.
-        use_ptx_skill: Whether to upload and mount the PTX skill.
-        skill_dir: Optional local skill directory. When omitted, the skill is read
-            from the checked-out PTX skill submodule.
-        skill_subdir: Submodule-relative skill directory used as the skill package.
-
     Returns:
         Final model response text.
 
@@ -874,14 +825,8 @@ def run_agent_loop(
 
     evaluator = TritonPTXCandidateEvaluator(resolve_kernel(kernel_name))
     client = OpenAI()
-    skill_id = None
-    if use_ptx_skill:
-        skill_id = _upload_skill(
-            client,
-            skill_dir=skill_dir,
-            skill_subdir=skill_subdir,
-        )
-        print(f"=== Uploaded PTX skill {skill_id} ===", flush=True)
+    skill_id = load_ptx(client)
+    print(f"=== Uploaded PTX skill {skill_id} ===", flush=True)
     tools = _build_tools(skill_id)
     starting_candidate = _load_start_json(start_json)
     optimization_prompt = (

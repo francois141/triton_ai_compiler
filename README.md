@@ -29,9 +29,10 @@ python3 -m pytest triton_ptx/triton_ptx client
 #### Improve test time scaling loop
 
 By default, this command uploads the nested `ptx_skill/` package from the
-`ptx_skill` git submodule as an OpenAI skill, and mounts it on the agent's shell
-container. Initialize it with `git submodule update --init ptx_skill` after
-cloning this repo.
+`skills/ptx_skills` git submodule as an OpenAI skill, and mounts it on the
+agent's shell container. Initialize it with
+`git submodule update --init --recursive skills/ptx_skills` after cloning this
+repo.
 
 The complete response trace is written to `trace.json`, while the final
 candidate and its measured speedup are written beside it as `trace_final.json`.
@@ -103,7 +104,7 @@ loop:
 
 generator:
   provider: openai
-  model: gpt-5
+  model: gpt-5.6-sol
   options:
     reasoning_effort: medium
 
