@@ -4,28 +4,22 @@ import argparse
 import atexit
 import json
 import sys
-import time
 from pathlib import Path
 from time import perf_counter
-from typing import Any
 
-from openai import NotFoundError, OpenAI
+from openai import OpenAI
 
 LOCAL_TRITON_PTX_ROOT = Path(__file__).resolve().parent / "triton_ptx"
 if LOCAL_TRITON_PTX_ROOT.is_dir():
     sys.path.insert(0, str(LOCAL_TRITON_PTX_ROOT))
 
-from prompts import (  # noqa: E402
-    build_continuation_prompt,
-    build_prompt_for_operator,
-)
+from prompts import build_continuation_prompt  # noqa: E402
 from prompts.improvement import (  # noqa: E402
     build_candidate_prompt,
     build_improvement_prompt,
     build_initial_repair_prompt,
     build_repair_prompt,
 )
-from prompts.system import system_prompt  # noqa: E402
 from utils.response_format import (  # noqa: E402
     IMPROVEMENT_PLAN_RESPONSE_FORMAT,
     PTX_KERNEL_RESPONSE_FORMAT,
@@ -38,235 +32,28 @@ from utils.evaluation import (  # noqa: E402
 from triton_ptx import (  # noqa: E402
     Payload,
     TritonPTXCandidateEvaluator,
-    dump_kernel_ptx,
-    get_ptx_system_config,
-    parse_ptx_signature,
     resolve_kernel,
 )
-from helpers.cost import append_cost_log, append_daily_cost_summary  # noqa: E402
+from helpers.cost import append_daily_cost_summary  # noqa: E402
 from skills import load_ptx  # noqa: E402
+from helpers.response import request_json, response_json_text  # noqa: E402
+from helpers.setup import (  # noqa: E402
+    build_initial_prompt,
+    build_tools,
+    load_start_json,
+)
+from helpers.traces import (  # noqa: E402
+    final_path,
+    record_prompt,
+    write_trace,
+)
 
 
-RESPONSE_RETRY_ATTEMPTS = 6
 DEFAULT_REPAIR_ATTEMPTS = 4
-
-
-def _build_tools(skill_id):
-    tools = []#[{"type": "web_search"}]
-    if skill_id is not None:
-        tools.append(
-            {
-                "type": "shell",
-                "environment": {
-                    "type": "container_auto",
-                    "skills": [
-                        {
-                            "type": "skill_reference",
-                            "skill_id": skill_id,
-                            "version": "latest",
-                        }
-                    ],
-                },
-            }
-        )
-    return tools
-
-
-def build_initial_prompt(kernel_name):
-    kernel_cls = resolve_kernel(kernel_name)
-    version, target, address_size = get_ptx_system_config()
-    signature = parse_ptx_signature(dump_kernel_ptx(kernel_cls()))
-    prompt = build_prompt_for_operator(
-        kernel_cls,
-        num_answers=1,
-        version=version,
-        target=target,
-        address_size=address_size,
-        ptx_signature=signature,
-    )
-    return f"{prompt}"
-
-
-def _write_trace(trace_path, events):
-    if trace_path is not None:
-        trace_path.write_text(
-            json.dumps(events, indent=2, default=json_default),
-            encoding="utf-8",
-        )
-
-
-def _load_start_json(start_json):
-    if start_json is None:
-        return None
-
-    value = str(start_json)
-    serialized_candidate = (
-        value
-        if value.lstrip().startswith("{")
-        else Path(value).read_text(encoding="utf-8")
-    )
-    loaded_data = json.loads(serialized_candidate)
-    if not isinstance(loaded_data, dict):
-        raise ValueError("Starting candidate JSON must contain an object.")
-
-    candidate_data = loaded_data.get("payload", loaded_data)
-    if not isinstance(candidate_data, dict):
-        raise ValueError("Starting candidate payload must contain an object.")
-
-    candidate_data = {
-        key: value
-        for key, value in candidate_data.items()
-        if key in PtxKernel.model_fields
-    }
-    return PtxKernel.model_validate(candidate_data)
-
-
-def _final_path(trace_path):
-    return trace_path.with_name(f"{trace_path.stem}_final.json")
-
-
-def _create_response_with_retries(client, kwargs):
-    for attempt in range(RESPONSE_RETRY_ATTEMPTS):
-        try:
-            return client.responses.create(**kwargs)
-        except NotFoundError:
-            if attempt == RESPONSE_RETRY_ATTEMPTS - 1:
-                raise
-            time.sleep(2**attempt)
-
-    raise RuntimeError("Response retry loop ended unexpectedly.")
-
-
-def _get_field(value, field_name):
-    if isinstance(value, dict):
-        return value.get(field_name)
-    return getattr(value, field_name, None)
-
-
-def _format_tool_call(output_item):
-    item_type = _get_field(output_item, "type")
-    if not isinstance(item_type, str) or not item_type.endswith("_call"):
-        return None
-
-    tool_name = (
-        _get_field(output_item, "name")
-        or _get_field(output_item, "tool_name")
-        or _get_field(output_item, "server_label")
-        or item_type.removesuffix("_call")
-    )
-    call_id = _get_field(output_item, "call_id") or _get_field(output_item, "id")
-    status = _get_field(output_item, "status")
-
-    details = [f"tool={tool_name}"]
-    if call_id is not None:
-        details.append(f"id={call_id}")
-    if status is not None:
-        details.append(f"status={status}")
-    return ", ".join(details)
-
-
-def _print_tool_calls(response):
-    output_items = _get_field(response, "output")
-    if output_items is None:
-        return
-
-    for output_item in output_items:
-        tool_call = _format_tool_call(output_item)
-        if tool_call is not None:
-            print(f"=== LLM called tool: {tool_call} ===", flush=True)
-
-
-def _message_output_text(output_item):
-    if _get_field(output_item, "type") != "message":
-        return None
-
-    content_items = _get_field(output_item, "content")
-    if content_items is None:
-        return None
-
-    text_parts = [
-        text
-        for content_item in content_items
-        if _get_field(content_item, "type") == "output_text"
-        for text in [_get_field(content_item, "text")]
-        if isinstance(text, str)
-    ]
-    if not text_parts:
-        return None
-    return "".join(text_parts)
-
-
-def _response_json_text(response):
-    output_items = _get_field(response, "output")
-    if output_items is None:
-        output_text = _get_field(response, "output_text")
-        if isinstance(output_text, str) and output_text:
-            return output_text
-        raise ValueError("Response did not contain output text.")
-
-    fallback_text = None
-    for output_item in output_items:
-        output_text = _message_output_text(output_item)
-        if output_text is None:
-            continue
-        if _get_field(output_item, "phase") == "final_answer":
-            return output_text
-        fallback_text = output_text
-
-    if fallback_text is None:
-        raise ValueError("Response did not contain message output text.")
-    return fallback_text
 
 
 def _candidate_json(candidate):
     return candidate.model_dump_json(exclude_none=False, indent=2)
-
-
-def _request_json(
-    client,
-    *,
-    model,
-    prompt,
-    response_format,
-    reasoning_effort,
-    tools,
-):
-    kwargs = {
-        "model": model,
-        "instructions": system_prompt(),
-        "input": [{"role": "user", "content": prompt}],
-        "tools": tools,
-        "text": {"format": response_format},
-    }
-    if reasoning_effort is not None:
-        kwargs["reasoning"] = {"effort": reasoning_effort}
-
-    response = _create_response_with_retries(client, kwargs)
-    _print_tool_calls(response)
-    return response, append_cost_log(model=model, response=response)
-
-
-def _record_prompt(
-    responses,
-    trace_path,
-    *,
-    prompt_name,
-    prompt,
-    round_index,
-    candidate_index = None,
-    idea = None,
-):
-    responses.append(
-        {
-            "type": "prompt",
-            "prompt_name": prompt_name,
-            "round_index": round_index,
-            "candidate_index": candidate_index,
-            "idea": idea,
-            "prompt": prompt,
-        }
-    )
-    _write_trace(trace_path, responses)
 
 
 def _evaluate_and_record(
@@ -298,7 +85,7 @@ def _evaluate_and_record(
             "evaluation": json.loads(evaluated_candidate.to_json(indent=2)),
         }
     )
-    _write_trace(trace_path, responses)
+    write_trace(trace_path, responses)
     return evaluated_candidate
 
 
@@ -333,7 +120,7 @@ def _generate_tested_candidate(
         best_evaluation,
         idea,
     )
-    _record_prompt(
+    record_prompt(
         responses,
         trace_path,
         prompt_name="candidate",
@@ -342,7 +129,7 @@ def _generate_tested_candidate(
         candidate_index=candidate_index,
         idea=idea,
     )
-    response, _ = _request_json(
+    response, _ = request_json(
         client,
         model=model,
         prompt=candidate_prompt,
@@ -351,8 +138,8 @@ def _generate_tested_candidate(
         tools=tools,
     )
     responses.append(response.model_dump(mode="json"))
-    _write_trace(trace_path, responses)
-    candidate = PtxKernel.model_validate_json(_response_json_text(response))
+    write_trace(trace_path, responses)
+    candidate = PtxKernel.model_validate_json(response_json_text(response))
     print(
         "--- Generated candidate ---\n"
         f"{_candidate_json(candidate)}\n"
@@ -387,7 +174,7 @@ def _generate_tested_candidate(
             repair_index=repair_index,
             max_repair_attempts=max_repair_attempts,
         )
-        _record_prompt(
+        record_prompt(
             responses,
             trace_path,
             prompt_name="candidate_repair",
@@ -396,7 +183,7 @@ def _generate_tested_candidate(
             candidate_index=candidate_index,
             idea=idea,
         )
-        response, _ = _request_json(
+        response, _ = request_json(
             client,
             model=model,
             prompt=repair_prompt,
@@ -405,9 +192,9 @@ def _generate_tested_candidate(
             tools=tools,
         )
         responses.append(response.model_dump(mode="json"))
-        _write_trace(trace_path, responses)
+        write_trace(trace_path, responses)
         repaired_candidate = PtxKernel.model_validate_json(
-            _response_json_text(response)
+            response_json_text(response)
         )
         print(
             "--- Repaired candidate ---\n"
@@ -463,7 +250,7 @@ def _repair_initial_candidate(
             repair_index=repair_index,
             max_repair_attempts=max_repair_attempts,
         )
-        _record_prompt(
+        record_prompt(
             responses,
             trace_path,
             prompt_name="initial_candidate_repair",
@@ -471,7 +258,7 @@ def _repair_initial_candidate(
             round_index=0,
             candidate_index=0,
         )
-        response, _ = _request_json(
+        response, _ = request_json(
             client,
             model=model,
             prompt=repair_prompt,
@@ -480,9 +267,9 @@ def _repair_initial_candidate(
             tools=tools,
         )
         responses.append(response.model_dump(mode="json"))
-        _write_trace(trace_path, responses)
+        write_trace(trace_path, responses)
         repaired_candidate = PtxKernel.model_validate_json(
-            _response_json_text(response)
+            response_json_text(response)
         )
         print(
             "--- Repaired initial candidate ---\n"
@@ -526,8 +313,8 @@ def run_agent_loop(
     client = OpenAI()
     skill_id = load_ptx(client)
     print(f"=== Uploaded PTX skill {skill_id} ===", flush=True)
-    tools = _build_tools(skill_id)
-    starting_candidate = _load_start_json(start_json)
+    tools = build_tools(skill_id)
+    starting_candidate = load_start_json(start_json)
     optimization_prompt = (
         build_initial_prompt(kernel_name)
         if starting_candidate is None
@@ -551,14 +338,14 @@ def run_agent_loop(
                 "=== Generating initial candidate ===",
                 flush=True,
             )
-            _record_prompt(
+            record_prompt(
                 responses,
                 trace_path,
                 prompt_name="initial_candidate",
                 prompt=optimization_prompt,
                 round_index=0,
             )
-            response, _ = _request_json(
+            response, _ = request_json(
                 client,
                 model=model,
                 prompt=optimization_prompt,
@@ -567,9 +354,9 @@ def run_agent_loop(
                 tools=tools,
             )
             responses.append(response.model_dump(mode="json"))
-            _write_trace(trace_path, responses)
+            write_trace(trace_path, responses)
             starting_candidate = PtxKernel.model_validate_json(
-                _response_json_text(response)
+                response_json_text(response)
             )
 
         best_evaluation = _evaluate_and_record(
@@ -607,7 +394,7 @@ def run_agent_loop(
                 best_evaluation,
                 recent_evaluations,
             )
-            _record_prompt(
+            record_prompt(
                 responses,
                 trace_path,
                 prompt_name="improvement_plan",
@@ -615,7 +402,7 @@ def run_agent_loop(
                 round_index=round_index,
             )
             request_start = perf_counter()
-            response, cost = _request_json(
+            response, cost = request_json(
                 client,
                 model=model,
                 prompt=plan_prompt,
@@ -631,8 +418,8 @@ def run_agent_loop(
                 flush=True,
             )
             responses.append(response.model_dump(mode="json"))
-            _write_trace(trace_path, responses)
-            ideas = json.loads(_response_json_text(response))["improvements"]
+            write_trace(trace_path, responses)
+            ideas = json.loads(response_json_text(response))["improvements"]
             round_evaluations = []
 
             for candidate_index, idea in enumerate(ideas, start=1):
@@ -691,7 +478,7 @@ def run_agent_loop(
         final_payload["p50"] = best_evaluation.p50
         final_json = json.dumps(final_payload, indent=2, default=json_default)
         if trace_path is not None:
-            _final_path(trace_path).write_text(f"{final_json}\n", encoding="utf-8")
+            final_path(trace_path).write_text(f"{final_json}\n", encoding="utf-8")
         write_daily_summary()
         return final_json
     finally:
