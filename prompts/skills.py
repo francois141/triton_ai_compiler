@@ -7,71 +7,12 @@ def async_load_store_skill() -> str:
     Returns:
         Markdown prompt text describing async load and store requirements.
     """
-    return """"""
     return """
-# Async Load and Store Skills
+## Async Load/Store Requirement
 
-Use `cp.async` only for global-to-shared loads on `sm_89`. Use normal
-`st.global` instructions for global stores; PTX does not provide a matching
-asynchronous global-store operation on this target.
-
-When using:
-
-```ptx
-cp.async.ca.shared.global [dst], [src], N;
-```
-
-follow these requirements:
-
-- The global source address must be valid for the entire transfer. For a
-  16-byte copy, bytes `[src, src + 15]` must all be accessible; checking only
-  the first element is insufficient.
-- Handle boundary tiles with scalar predicated loads, 4-byte async copies, or
-  the zero-fill (`ignore-src` or `src-size`) variants. Never issue an async copy
-  from an invalid global address.
-- Keep the complete destination range inside the allocated shared-memory
-  region.
-- A 16-byte copy requires 16-byte alignment. For FP32 matrices, the base
-  pointer, row stride, and vectorized column offset must preserve that
-  alignment. Otherwise, use scalar loads or 4-byte copies.
-- Every thread that issues an async copy must execute the matching group
-  operations before any thread consumes the shared data:
-
-```ptx
-cp.async.commit_group;
-cp.async.wait_group 0;
-```
-
-Use the 16-byte path only when alignment and full-vector bounds are guaranteed.
-
-###`cvta.to` (Convert Address)
-
-The `cvta.to` instruction converts a **generic address** into an address belonging to a specific PTX memory space (`.global`, `.shared`, `.local`, or `.const`).
-
-```ptx
-cvta.to.global.u64  dst, src;
-cvta.to.shared.u64  dst, src;
-cvta.to.local.u64   dst, src;
-cvta.to.const.u64   dst, src;
-```
-
-- `dst`: destination register (typically `.u64`)
-- `src`: source generic address
-- `.global`, `.shared`, `.local`, `.const`: target memory space
-
-## Example
-
-```ptx
-.reg .u64 %rd1, %rd2;
-
-cvta.to.global.u64 %rd2, %rd1;
-ld.global.u32 %r1, [%rd2];
-```
-
-In particular, this is wrong
-
-.shared .align 16 .b8 smemA[16384];
-cvta.to.shared.u64 sA_base, smemA; // Not a generic pointer here
+Explicitly use async loads and stores where the PTX target supports them. Use
+asynchronous global-to-shared loads/staging whenever legal, and keep final
+global stores coalesced with valid `st.global` instructions.
 """.strip()
 
 

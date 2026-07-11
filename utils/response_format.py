@@ -1,6 +1,6 @@
 from typing import Annotated
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 PositiveInteger = Annotated[int, Field(ge=1)]
@@ -11,10 +11,17 @@ class PtxKernel(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    ptx: str
+    ptx: str = Field(min_length=1)
     num_threads_x: PositiveInteger
     num_threads_y: PositiveInteger = 1
     num_threads_z: PositiveInteger = 1
+
+    @field_validator("ptx")
+    @classmethod
+    def validate_ptx(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError('"ptx" must contain non-whitespace PTX code.')
+        return value
 
 
 PTX_KERNEL_JSON_SCHEMA = PtxKernel.model_json_schema()

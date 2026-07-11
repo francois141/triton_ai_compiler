@@ -15,7 +15,17 @@ LOCAL_TRITON_PTX_ROOT = Path(__file__).resolve().parent / "triton_ptx"
 if LOCAL_TRITON_PTX_ROOT.is_dir():
     sys.path.insert(0, str(LOCAL_TRITON_PTX_ROOT))
 
-from prompts import build_prompt_for_operator  # noqa: E402
+from prompts import (  # noqa: E402
+    build_continuation_prompt,
+    build_prompt_for_operator,
+)
+from prompts.improvement import (  # noqa: E402
+    build_candidate_prompt,
+    build_improvement_prompt,
+    build_initial_repair_prompt,
+    build_repair_prompt,
+)
+from prompts.system import system_prompt  # noqa: E402
 from utils.response_format import (  # noqa: E402
     IMPROVEMENT_PLAN_RESPONSE_FORMAT,
     PTX_KERNEL_RESPONSE_FORMAT,
@@ -23,7 +33,6 @@ from utils.response_format import (  # noqa: E402
 )
 from utils.evaluation import (  # noqa: E402
     candidate_from_evaluation,
-    evaluation_summary,
     json_default,
 )
 from triton_ptx import (  # noqa: E402
@@ -37,17 +46,11 @@ from triton_ptx import (  # noqa: E402
 from helpers.cost import append_cost_log, append_daily_cost_summary  # noqa: E402
 from skills import load_ptx  # noqa: E402
 
-SYSTEM_PROMPT_PATH = Path(__file__).parent / "prompts" / "SYSTEM.md"
-RESPONSE_FORMAT = PTX_KERNEL_RESPONSE_FORMAT
+
 RESPONSE_RETRY_ATTEMPTS = 6
 DEFAULT_REPAIR_ATTEMPTS = 4
-ASYNC_LOAD_STORE_INSTRUCTION = """
-## Async Load/Store Requirement
 
-Explicitly use async loads and stores where the PTX target supports them. Use
-asynchronous global-to-shared loads/staging whenever legal, and keep final
-global stores coalesced with valid `st.global` instructions.
-""".strip()
+
 def _build_tools(skill_id: str | None) -> list[dict[str, Any]]:
     """Build the Responses API tools for stateless optimization calls."""
     tools: list[dict[str, Any]] = []#[{"type": "web_search"}]
@@ -92,22 +95,6 @@ def build_initial_prompt(kernel_name: str) -> str:
     )
     return f"{prompt}"
 
-
-def build_continuation_prompt(kernel_name: str) -> str:
-    """Build the prompt prefix used when continuing from a starting candidate.
-
-    Args:
-        kernel_name: Registered Triton PTX kernel class name.
-
-    Returns:
-        Compact continuation prompt that avoids asking for an initial candidate.
-    """
-    return f"""Continue optimizing the verified PTX candidate for {kernel_name}.
-Do not restart from the initial kernel prompt or generate a fresh baseline.
-Use the current best verified candidate as the source of truth and only propose
-targeted changes that preserve the required PTX JSON response schema.
-
-{ASYNC_LOAD_STORE_INSTRUCTION}""".strip()
 
 def _write_trace(trace_path: Path | None, events: list[dict[str, Any]]) -> None:
     if trace_path is not None:
@@ -275,174 +262,6 @@ def _candidate_json(candidate: PtxKernel) -> str:
     return candidate.model_dump_json(exclude_none=False, indent=2)
 
 
-def _build_improvement_prompt(
-    base_prompt: str,
-    best_evaluation: Any,
-    recent_evaluations: list[Any],
-) -> str:
-    """Build a compact prompt asking for three targeted improvement ideas."""
-    recent_block = "\n\n".join(
-        evaluation_summary(evaluation, include_ptx=False)
-        for evaluation in recent_evaluations[-6:]
-    )
-    if not recent_block:
-        recent_block = "None yet."
-
-    return f"""{base_prompt}
-
-## Planning Override
-
-For this response only, do not generate PTX and ignore the output contract above.
-Return only the structured three-idea improvement plan requested below.
-
-## Current Best Verified Candidate
-
-{evaluation_summary(best_evaluation, include_ptx=True)}
-
-## Recent Candidate Outcomes
-
-{recent_block}
-
-## Planning Task
-
-First decide how to improve the current best kernel. Return exactly three
-specific, independent improvement ideas. Each idea must change one meaningful
-performance factor only, explain why it could help, and be concrete enough to
-generate one PTX candidate from it. Do not include PTX in this planning answer.
-
-Each idea must be a localized micro-change to the current best PTX, not a
-rewrite. The candidate must preserve every part of the kernel that is not
-directly required by the proposed improvement: tiling, micro-tile shape,
-unrolling structure, register accumulators, shared-memory staging, store
-pattern, predicates, and algorithm. Do not replace the kernel with generic
-loops, local-memory accumulator arrays, or a different implementation strategy.
-""".strip()
-
-
-def _build_candidate_prompt(
-    base_prompt: str,
-    best_evaluation: Any,
-    idea: dict[str, str],
-) -> str:
-    """Build a prompt for one focused candidate derived from one idea."""
-    return f"""{base_prompt}
-
-## Current Best Verified Candidate
-
-{evaluation_summary(best_evaluation, include_ptx=True)}
-
-## Single Improvement To Try
-
-Name: {idea["name"]}
-Rationale: {idea["rationale"]}
-Instruction: {idea["instruction"]}
-
-Generate exactly one PTX candidate by applying only this improvement to the
-current best. Preserve correctness and the required output schema.
-
-This must be a micro-edit of the current best PTX. Preserve its tiling strategy,
-micro-tile shape, manual unroll structure, register accumulators,
-shared-memory staging, synchronization strategy, predicate/store pattern,
-launch shape, and PTX signature unless the single improvement explicitly
-requires touching one of those items. Do not generate a simpler replacement:
-no generic scalar i/j/k loops, no local-memory accumulator arrays, no shorter
-basic implementation, and no clean-room rewrite. The output should be
-recognizably the same optimized PTX plus the requested improvement.
-
-If the idea is an addressing/layout tweak, such as shared-memory stride,
-padding, or skew, change only the relevant shared-memory allocation and address
-arithmetic. Leave the compute microkernel and stores intact. If the idea turns
-out not to apply, make the smallest useful related micro-change instead.
-
-Before returning the final JSON for this candidate, call the available
-`triton_ptx` tool to compile, verify, and benchmark your attempted improvement.
-If it fails compilation or correctness, repair the same attempted candidate
-using the diagnostics and call `triton_ptx` again. Return only the fastest
-verified version you actually tested. If no repair passes, return the closest
-repaired candidate you tested so the outer loop can record diagnostics.
-""".strip()
-
-
-def _build_repair_prompt(
-    base_prompt: str,
-    best_evaluation: Any,
-    failed_evaluation: Any,
-    idea: dict[str, str],
-    *,
-    repair_index: int,
-    max_repair_attempts: int,
-) -> str:
-    """Build a prompt that repairs one failed candidate in isolation."""
-    return f"""{base_prompt}
-
-## Current Best Verified Candidate
-
-{evaluation_summary(best_evaluation, include_ptx=True)}
-
-## Original Improvement Being Tried
-
-Name: {idea["name"]}
-Rationale: {idea["rationale"]}
-Instruction: {idea["instruction"]}
-
-## Failed Candidate And Diagnostics
-
-{evaluation_summary(failed_evaluation, include_ptx=True)}
-
-## Repair Task
-
-This is repair attempt {repair_index} of {max_repair_attempts}. Repair the
-failed candidate above, not the current best candidate from scratch.
-
-Make the smallest concrete change needed to fix the compile, verification, or
-runtime failure while preserving the original improvement idea. Keep the same
-PTX signature, launch metadata keys, tiling strategy, micro-tile shape,
-shared-memory staging, synchronization strategy, predicate/store pattern, and
-manual unroll structure unless the diagnostic proves one of those exact parts
-is the bug.
-
-Call the available `triton_ptx` tool before returning. If the repaired candidate
-still fails, use the new diagnostic to make one more minimal repair while
-remaining within this attempt. Return only a JSON candidate that you actually
-tested with the tool; prefer the fastest verified repair. If no repair passes,
-return the closest tested repair so the outer loop can record its diagnostics.
-""".strip()
-
-
-def _build_initial_repair_prompt(
-    base_prompt: str,
-    failed_evaluation: Any,
-    *,
-    repair_index: int,
-    max_repair_attempts: int,
-) -> str:
-    """Build a prompt that repairs the first generated candidate."""
-    return f"""{base_prompt}
-
-## Failed Initial Candidate And Diagnostics
-
-{evaluation_summary(failed_evaluation, include_ptx=True)}
-
-## Initial Candidate Repair Task
-
-This is initial candidate repair attempt {repair_index} of
-{max_repair_attempts}. Repair the failed candidate above rather than generating
-a fresh implementation from scratch.
-
-Make the smallest concrete change needed to fix the compile, verification, or
-runtime failure. Keep the same PTX signature, launch metadata keys, tiling
-strategy, micro-tile shape, shared-memory staging, synchronization strategy,
-predicate/store pattern, and manual unroll structure unless the diagnostic
-proves one of those exact parts is the bug.
-
-Call the available `triton_ptx` tool before returning. If the repaired candidate
-still fails, use the new diagnostic to make one more minimal repair while
-remaining within this attempt. Return only a JSON candidate that you actually
-tested with the tool. If no repair passes, return the closest tested repair so
-the outer loop can record its diagnostics.
-""".strip()
-
-
 def _request_json(
     client: OpenAI,
     *,
@@ -455,7 +274,7 @@ def _request_json(
     """Send one compact Responses API request and log its cost."""
     kwargs: dict[str, Any] = {
         "model": model,
-        "instructions": SYSTEM_PROMPT_PATH.read_text(encoding="utf-8"),
+        "instructions": system_prompt(),
         "input": [{"role": "user", "content": prompt}],
         "tools": tools,
         "text": {"format": response_format},
@@ -554,7 +373,7 @@ def _generate_tested_candidate(
     max_repair_attempts: int,
 ) -> Any:
     """Generate, evaluate, and minimally repair one idea before returning it."""
-    candidate_prompt = _build_candidate_prompt(
+    candidate_prompt = build_candidate_prompt(
         optimization_prompt,
         best_evaluation,
         idea,
@@ -572,7 +391,7 @@ def _generate_tested_candidate(
         client,
         model=model,
         prompt=candidate_prompt,
-        response_format=RESPONSE_FORMAT,
+        response_format=PTX_KERNEL_RESPONSE_FORMAT,
         reasoning_effort=reasoning_effort,
         tools=tools,
     )
@@ -605,7 +424,7 @@ def _generate_tested_candidate(
             f"{max_repair_attempts} ===",
             flush=True,
         )
-        repair_prompt = _build_repair_prompt(
+        repair_prompt = build_repair_prompt(
             optimization_prompt,
             best_evaluation,
             best_attempt,
@@ -626,7 +445,7 @@ def _generate_tested_candidate(
             client,
             model=model,
             prompt=repair_prompt,
-            response_format=RESPONSE_FORMAT,
+            response_format=PTX_KERNEL_RESPONSE_FORMAT,
             reasoning_effort=reasoning_effort,
             tools=tools,
         )
@@ -684,7 +503,7 @@ def _repair_initial_candidate(
             f"{repair_index}/{max_repair_attempts} ===",
             flush=True,
         )
-        repair_prompt = _build_initial_repair_prompt(
+        repair_prompt = build_initial_repair_prompt(
             optimization_prompt,
             best_attempt,
             repair_index=repair_index,
@@ -702,7 +521,7 @@ def _repair_initial_candidate(
             client,
             model=model,
             prompt=repair_prompt,
-            response_format=RESPONSE_FORMAT,
+            response_format=PTX_KERNEL_RESPONSE_FORMAT,
             reasoning_effort=reasoning_effort,
             tools=tools,
         )
@@ -807,7 +626,7 @@ def run_agent_loop(
                 client,
                 model=model,
                 prompt=optimization_prompt,
-                response_format=RESPONSE_FORMAT,
+                response_format=PTX_KERNEL_RESPONSE_FORMAT,
                 reasoning_effort=reasoning_effort,
                 tools=tools,
             )
@@ -847,7 +666,7 @@ def run_agent_loop(
                 "focused improvements ===",
                 flush=True,
             )
-            plan_prompt = _build_improvement_prompt(
+            plan_prompt = build_improvement_prompt(
                 optimization_prompt,
                 best_evaluation,
                 recent_evaluations,
@@ -952,7 +771,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Optimize PTX with an OpenAI agent.")
     parser.add_argument("kernel", help="Kernel class name, for example AddKernel.")
     parser.add_argument("--model", default="gpt-5.5")
-    parser.add_argument("--max-tool-rounds", type=int, default=5)
+    parser.add_argument("--max-tool-rounds", type=int, default=1)
     parser.add_argument(
         "--max-repair-attempts",
         type=int,
