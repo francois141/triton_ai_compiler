@@ -7,7 +7,6 @@ import sys
 import tempfile
 import time
 import zipfile
-from datetime import datetime
 from pathlib import Path
 from time import perf_counter
 from typing import Any
@@ -32,16 +31,14 @@ from triton_ptx import (  # noqa: E402
     parse_ptx_signature,
     resolve_kernel,
 )
-from utils.pricing import TokenCounts, estimate_token_cost  # noqa: E402
+from helpers.cost import append_cost_log, append_daily_cost_summary  # noqa: E402
 
 SYSTEM_PROMPT_PATH = Path(__file__).parent / "prompts" / "SYSTEM.md"
 RESPONSE_FORMAT = PTX_KERNEL_RESPONSE_FORMAT
-COST_LOG_PATH = Path(__file__).resolve().parent / "costs.txt"
 DEFAULT_PTX_SKILL_ROOT = Path(__file__).resolve().parent / "ptx_skill"
 DEFAULT_PTX_SKILL_SUBDIR = "ptx_skill"
 RESPONSE_RETRY_ATTEMPTS = 6
 DEFAULT_REPAIR_ATTEMPTS = 4
-WEB_SEARCH_COST_PER_CALL = 10.00 / 1_000
 ASYNC_LOAD_STORE_INSTRUCTION = """
 ## Async Load/Store Requirement
 
@@ -179,132 +176,6 @@ def _upload_skill(
         with zip_path.open("rb") as skill_file:
             skill = client.skills.create(files=[skill_file])
     return skill.id
-
-
-def _get_nested_int(value: Any, *keys: str) -> int:
-    for key in keys:
-        if value is None:
-            return 0
-        if isinstance(value, dict):
-            value = value.get(key)
-        else:
-            value = getattr(value, key, None)
-    return int(value or 0)
-
-
-def _estimate_response_cost(
-    response: Any, model: str
-) -> tuple[float | None, dict[str, int]]:
-    usage = getattr(response, "usage", None)
-    if usage is None:
-        return None, {
-            "input_tokens": 0,
-            "cached_input_tokens": 0,
-            "cache_write_tokens": 0,
-            "output_tokens": 0,
-            "web_search_calls": 0,
-        }
-
-    input_tokens = _get_nested_int(usage, "input_tokens") or _get_nested_int(
-        usage, "prompt_tokens"
-    )
-    output_tokens = _get_nested_int(usage, "output_tokens") or _get_nested_int(
-        usage, "completion_tokens"
-    )
-    cached_input_tokens = _get_nested_int(
-        usage, "input_tokens_details", "cached_tokens"
-    ) or _get_nested_int(usage, "prompt_tokens_details", "cached_tokens")
-    cache_write_tokens = _get_nested_int(
-        usage, "input_tokens_details", "cache_write_tokens"
-    ) or _get_nested_int(usage, "prompt_tokens_details", "cache_write_tokens")
-    tool_usage = getattr(response, "tool_usage", None)
-    web_search_calls = _get_nested_int(
-        tool_usage, "web_search", "num_requests"
-    ) or _get_nested_int(tool_usage, "web_search", "requests")
-    token_counts = {
-        "input_tokens": input_tokens,
-        "cached_input_tokens": cached_input_tokens,
-        "cache_write_tokens": cache_write_tokens,
-        "output_tokens": output_tokens,
-        "web_search_calls": web_search_calls,
-    }
-
-    token_cost = estimate_token_cost(
-        model,
-        TokenCounts(
-            input_tokens=input_tokens,
-            output_tokens=output_tokens,
-            cached_input_tokens=cached_input_tokens,
-            cache_write_tokens=cache_write_tokens,
-        ),
-    )
-    if token_cost is None:
-        return None, token_counts
-
-    tool_cost = web_search_calls * WEB_SEARCH_COST_PER_CALL
-    return token_cost + tool_cost, token_counts
-
-
-def _read_daily_total(cost_log_path: Path, date_text: str) -> float:
-    if not cost_log_path.exists():
-        return 0.0
-
-    total = 0.0
-    with cost_log_path.open(encoding="utf-8") as cost_log:
-        for line in cost_log:
-            if not line.startswith(f"{date_text}T") or " cost_usd=" not in line:
-                continue
-            cost_text = line.split(" cost_usd=", maxsplit=1)[1].split()[0]
-            try:
-                total += float(cost_text)
-            except ValueError:
-                continue
-    return total
-
-
-def _append_cost_log(
-    *,
-    model: str,
-    response: Any,
-    cost_log_path: Path = COST_LOG_PATH,
-) -> float | None:
-    timestamp = datetime.now().astimezone()
-    date_text = timestamp.date().isoformat()
-    cost, token_counts = _estimate_response_cost(response, model)
-    daily_total = _read_daily_total(cost_log_path, date_text) + (cost or 0.0)
-    cost_log_path.parent.mkdir(parents=True, exist_ok=True)
-
-    if cost is None:
-        cost_text = "unavailable"
-    else:
-        cost_text = f"{cost:.8f}"
-
-    with cost_log_path.open("a", encoding="utf-8") as cost_log:
-        cost_log.write(
-            f"{timestamp.isoformat()} model={model} "
-            f"input_tokens={token_counts['input_tokens']} "
-            f"cached_input_tokens={token_counts['cached_input_tokens']} "
-            f"cache_write_tokens={token_counts['cache_write_tokens']} "
-            f"output_tokens={token_counts['output_tokens']} "
-            f"web_search_calls={token_counts['web_search_calls']} "
-            f"cost_usd={cost_text} daily_total_usd={daily_total:.8f}\n"
-        )
-    return cost
-
-
-def _append_daily_cost_summary(
-    cost_log_path: Path = COST_LOG_PATH,
-    *,
-    label: str = "run_end",
-) -> None:
-    timestamp = datetime.now().astimezone()
-    date_text = timestamp.date().isoformat()
-    daily_total = _read_daily_total(cost_log_path, date_text)
-    cost_log_path.parent.mkdir(parents=True, exist_ok=True)
-    with cost_log_path.open("a", encoding="utf-8") as cost_log:
-        cost_log.write(
-            f"{timestamp.isoformat()} {label} daily_total_usd={daily_total:.8f}\n"
-        )
 
 
 def _load_start_json(start_json: str | Path | None) -> PtxKernel | None:
@@ -691,7 +562,7 @@ def _request_json(
 
     response = _create_response_with_retries(client, kwargs)
     _print_tool_calls(response)
-    return response, _append_cost_log(model=model, response=response)
+    return response, append_cost_log(model=model, response=response)
 
 
 def _record_prompt(
@@ -1025,7 +896,7 @@ def run_agent_loop(
     def write_daily_summary() -> None:
         nonlocal wrote_daily_summary
         if not wrote_daily_summary:
-            _append_daily_cost_summary()
+            append_daily_cost_summary()
             wrote_daily_summary = True
 
     atexit.register(write_daily_summary)

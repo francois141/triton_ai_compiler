@@ -1,0 +1,137 @@
+"""Response cost estimation and cost-log helpers."""
+
+from __future__ import annotations
+
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+from utils.pricing import TokenCounts, estimate_token_cost
+
+COST_LOG_PATH = Path(__file__).resolve().parent.parent / "costs.txt"
+WEB_SEARCH_COST_PER_CALL = 10.00 / 1_000
+
+
+def _get_nested_int(value: Any, *keys: str) -> int:
+    for key in keys:
+        if value is None:
+            return 0
+        if isinstance(value, dict):
+            value = value.get(key)
+        else:
+            value = getattr(value, key, None)
+    return int(value or 0)
+
+
+def estimate_response_cost(
+    response: Any, model: str
+) -> tuple[float | None, dict[str, int]]:
+    """Estimate response cost and return the token/tool usage counts.
+
+    Args:
+        response: Provider response containing usage information.
+        model: Provider model identifier.
+
+    Returns:
+        A cost in USD, or ``None`` when pricing or usage is unavailable, and
+        the extracted usage counts.
+    """
+    usage = getattr(response, "usage", None)
+    if usage is None:
+        return None, {
+            "input_tokens": 0,
+            "cached_input_tokens": 0,
+            "cache_write_tokens": 0,
+            "output_tokens": 0,
+            "web_search_calls": 0,
+        }
+
+    input_tokens = _get_nested_int(usage, "input_tokens") or _get_nested_int(
+        usage, "prompt_tokens"
+    )
+    output_tokens = _get_nested_int(usage, "output_tokens") or _get_nested_int(
+        usage, "completion_tokens"
+    )
+    cached_input_tokens = _get_nested_int(
+        usage, "input_tokens_details", "cached_tokens"
+    ) or _get_nested_int(usage, "prompt_tokens_details", "cached_tokens")
+    cache_write_tokens = _get_nested_int(
+        usage, "input_tokens_details", "cache_write_tokens"
+    ) or _get_nested_int(usage, "prompt_tokens_details", "cache_write_tokens")
+    tool_usage = getattr(response, "tool_usage", None)
+    web_search_calls = _get_nested_int(
+        tool_usage, "web_search", "num_requests"
+    ) or _get_nested_int(tool_usage, "web_search", "requests")
+    token_counts = {
+        "input_tokens": input_tokens,
+        "cached_input_tokens": cached_input_tokens,
+        "cache_write_tokens": cache_write_tokens,
+        "output_tokens": output_tokens,
+        "web_search_calls": web_search_calls,
+    }
+    token_cost = estimate_token_cost(
+        model,
+        TokenCounts(
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cached_input_tokens=cached_input_tokens,
+            cache_write_tokens=cache_write_tokens,
+        ),
+    )
+    if token_cost is None:
+        return None, token_counts
+    return token_cost + web_search_calls * WEB_SEARCH_COST_PER_CALL, token_counts
+
+
+def read_daily_total(cost_log_path: Path, date_text: str) -> float:
+    """Read the total known cost for a date from a cost log."""
+    if not cost_log_path.exists():
+        return 0.0
+    total = 0.0
+    with cost_log_path.open(encoding="utf-8") as cost_log:
+        for line in cost_log:
+            if not line.startswith(f"{date_text}T") or " cost_usd=" not in line:
+                continue
+            cost_text = line.split(" cost_usd=", maxsplit=1)[1].split()[0]
+            try:
+                total += float(cost_text)
+            except ValueError:
+                continue
+    return total
+
+
+def append_cost_log(
+    *, model: str, response: Any, cost_log_path: Path = COST_LOG_PATH
+) -> float | None:
+    """Estimate a response cost and append it to the cost log."""
+    timestamp = datetime.now().astimezone()
+    cost, token_counts = estimate_response_cost(response, model)
+    daily_total = read_daily_total(cost_log_path, timestamp.date().isoformat())
+    daily_total += cost or 0.0
+    cost_log_path.parent.mkdir(parents=True, exist_ok=True)
+    cost_text = "unavailable" if cost is None else f"{cost:.8f}"
+    with cost_log_path.open("a", encoding="utf-8") as cost_log:
+        cost_log.write(
+            f"{timestamp.isoformat()} model={model} "
+            f"input_tokens={token_counts['input_tokens']} "
+            f"cached_input_tokens={token_counts['cached_input_tokens']} "
+            f"cache_write_tokens={token_counts['cache_write_tokens']} "
+            f"output_tokens={token_counts['output_tokens']} "
+            f"web_search_calls={token_counts['web_search_calls']} "
+            f"cost_usd={cost_text} daily_total_usd={daily_total:.8f}\n"
+        )
+    return cost
+
+
+def append_daily_cost_summary(
+    cost_log_path: Path = COST_LOG_PATH, *, label: str = "run_end"
+) -> None:
+    """Append the current day's accumulated cost to the cost log."""
+    timestamp = datetime.now().astimezone()
+    daily_total = read_daily_total(cost_log_path, timestamp.date().isoformat())
+    cost_log_path.parent.mkdir(parents=True, exist_ok=True)
+    with cost_log_path.open("a", encoding="utf-8") as cost_log:
+        cost_log.write(
+            f"{timestamp.isoformat()} {label} "
+            f"daily_total_usd={daily_total:.8f}\n"
+        )
