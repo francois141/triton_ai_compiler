@@ -5,7 +5,7 @@ import argparse
 import json
 import math
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import NamedTuple
 
 
 class WinnerRecord(NamedTuple):

@@ -2,12 +2,10 @@ from __future__ import annotations
 
 import math
 
-from triton_ptx.evaluation import EvaluatedCandidate
 from triton_ptx.helpers.kernels import (
     PTX_LAUNCH_KEYS,
     extract_specification_from_operator,
 )
-from triton_ptx.kernels.base import TritonPTXKernel
 from .blocks import (
     commenting_rules,
     correctness_rules,

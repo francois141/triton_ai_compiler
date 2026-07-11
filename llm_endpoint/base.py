@@ -2,7 +2,6 @@ from abc import ABC, abstractmethod
 import ast
 import json
 
-from utils.response_format import PtxKernel
 
 
 class LLMEndpoint(ABC):

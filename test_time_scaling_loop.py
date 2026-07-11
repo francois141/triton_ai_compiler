@@ -5,7 +5,7 @@ import json
 from datetime import datetime
 from pathlib import Path
 
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import OmegaConf
 
 from llm_endpoint import create_llm_endpoint
 from prompts import (
@@ -15,7 +15,6 @@ from prompts import (
 )
 from storage import JsonDatasetWriter, ensure_safe_folder_name
 from triton_ptx.evaluation import (
-    EvaluatedCandidate,
     Payload,
     TritonPTXCandidateEvaluator,
 )
