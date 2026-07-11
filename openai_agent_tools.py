@@ -40,7 +40,7 @@ COST_LOG_PATH = Path(__file__).resolve().parent / "costs.txt"
 DEFAULT_PTX_SKILL_ROOT = Path(__file__).resolve().parent / "ptx_skill"
 DEFAULT_PTX_SKILL_SUBDIR = "ptx_skill"
 RESPONSE_RETRY_ATTEMPTS = 6
-DEFAULT_REPAIR_ATTEMPTS = 2
+DEFAULT_REPAIR_ATTEMPTS = 4
 WEB_SEARCH_COST_PER_CALL = 10.00 / 1_000
 ASYNC_LOAD_STORE_INSTRUCTION = """
 ## Async Load/Store Requirement
@@ -91,7 +91,7 @@ def build_initial_prompt(kernel_name: str) -> str:
         address_size=address_size,
         ptx_signature=signature,
     )
-    return f"{prompt}\n\n{ASYNC_LOAD_STORE_INSTRUCTION}"
+    return f"{prompt}"
 
 
 def build_continuation_prompt(kernel_name: str) -> str:
@@ -965,8 +965,8 @@ def _repair_initial_candidate(
 def run_agent_loop(
     kernel_name: str,
     *,
-    model: str = "gpt-5",
-    max_tool_rounds: int = 3,
+    model: str = "gpt-5.6-sol",
+    max_tool_rounds: int = 5,
     max_repair_attempts: int = DEFAULT_REPAIR_ATTEMPTS,
     reasoning_effort: str | None = "medium",
     trace_path: Path | None = Path("trace.json"),
