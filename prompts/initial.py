@@ -36,10 +36,10 @@ def prompt_builder(
   continuing with extra speculative edits.
 """.strip()
     sections = [
-        async_load_store_skill(),
+        #async_load_store_skill(),
         common_ptxas_issues_skill(),
         initial_task().strip(),
-        iterative_optimization_section,
+        #iterative_optimization_section,
         constexpr_values_block(spec),
         launch_configuration_block(),
         signature_template(

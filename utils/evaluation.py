@@ -2,8 +2,6 @@
 from __future__ import annotations
 
 import json
-from typing import Any
-
 from triton_ptx import Payload
 
 from .response_format import PtxKernel

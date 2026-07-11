@@ -10,9 +10,10 @@ class PtxKernel(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    ptx = Field(min_length=1)
-    num_threads_y = 1
-    num_threads_z = 1
+    ptx: str = Field(min_length=1)
+    num_threads_x: PositiveInteger
+    num_threads_y: PositiveInteger = 1
+    num_threads_z: PositiveInteger = 1
 
     @field_validator("ptx")
     @classmethod

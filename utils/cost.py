@@ -3,9 +3,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
-from typing import Any
-
-from utils.pricing import TokenCounts, estimate_token_cost
+from .pricing import TokenCounts, estimate_token_cost
 
 COST_LOG_PATH = Path(__file__).resolve().parent.parent / "costs.txt"
 WEB_SEARCH_COST_PER_CALL = 10.00 / 1_000

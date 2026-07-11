@@ -2,7 +2,7 @@ import time
 
 from openai import NotFoundError
 
-from helpers.cost import append_cost_log
+from .cost import append_cost_log
 from prompts.system import system_prompt
 
 

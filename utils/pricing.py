@@ -64,10 +64,10 @@ PRICING_PER_1M_TOKENS = MappingProxyType(
 @dataclass(frozen=True, slots=True)
 class TokenCounts:
 
-    input_tokens = 0
-    output_tokens = 0
-    cached_input_tokens = 0
-    cache_write_tokens = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cached_input_tokens: int = 0
+    cache_write_tokens: int = 0
 
 
 def get_pricing(model):

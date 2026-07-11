@@ -34,14 +34,17 @@ agent's shell container. Initialize it with
 `git submodule update --init --recursive skills/ptx_skills` after cloning this
 repo.
 
-The complete response trace is written to `trace.json`, while the final
-candidate and its measured speedup are written beside it as `trace_final.json`.
+Each run creates a `date-time_kernel_model_reasoning` folder under
+`output_traces/`. It contains the complete event log, every prompt, each
+generated improvement plan, and paired JSON/PTX artifacts for every generated
+candidate. Artifact names include the iteration, try, and measured speedup
+versus Triton.
 To continue optimizing an existing candidate, pass either its file or inline
 JSON:
 
 ```bash
 python3 -m openai_agent_tools MatrixMultiplicationKernel \
-  --start-json trace_final.json
+  --start-json output_traces/folder/final_speedup_vs_triton_*.json
 ```
 
 #### Naive test time scaling loop

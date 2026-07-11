@@ -14,3 +14,5 @@ __pycache__/
 /triton_generated_ptx/
 costs.txt
 /agent_traces/
+/output/
+/output_traces/

@@ -34,16 +34,18 @@ from triton_ptx import (  # noqa: E402
     TritonPTXCandidateEvaluator,
     resolve_kernel,
 )
-from helpers.cost import append_daily_cost_summary  # noqa: E402
+from utils.cost import append_daily_cost_summary  # noqa: E402
 from skills import load_ptx  # noqa: E402
-from helpers.response import request_json, response_json_text  # noqa: E402
-from helpers.setup import (  # noqa: E402
+from utils.response import request_json, response_json_text  # noqa: E402
+from utils.setup import (  # noqa: E402
     build_initial_prompt,
     build_tools,
     load_start_json,
 )
-from helpers.traces import (  # noqa: E402
-    final_path,
+from utils.traces import (  # noqa: E402
+    create_trace_directory,
+    record_generated_candidate,
+    record_generated_json,
     record_prompt,
     write_trace,
 )
@@ -65,6 +67,8 @@ def _evaluate_and_record(
     round_index,
     candidate_index,
     idea,
+    prompt_name,
+    attempt_index,
 ):
     evaluated_candidate = evaluator.evaluate(
         Payload.from_input(candidate.model_dump(exclude_none=False))
@@ -84,6 +88,15 @@ def _evaluate_and_record(
             "idea": idea,
             "evaluation": json.loads(evaluated_candidate.to_json(indent=2)),
         }
+    )
+    record_generated_candidate(
+        trace_path,
+        candidate,
+        evaluated_candidate,
+        prompt_name=prompt_name,
+        round_index=round_index,
+        attempt_index=attempt_index,
+        candidate_index=candidate_index,
     )
     write_trace(trace_path, responses)
     return evaluated_candidate
@@ -128,6 +141,7 @@ def _generate_tested_candidate(
         round_index=round_index,
         candidate_index=candidate_index,
         idea=idea,
+        speedup_vs_triton=best_evaluation.speedup_vs_triton,
     )
     response, _ = request_json(
         client,
@@ -154,6 +168,8 @@ def _generate_tested_candidate(
         round_index=round_index,
         candidate_index=candidate_index,
         idea=idea,
+        prompt_name="candidate",
+        attempt_index=0,
     )
 
     for repair_index in range(1, max_repair_attempts + 1):
@@ -180,8 +196,10 @@ def _generate_tested_candidate(
             prompt_name="candidate_repair",
             prompt=repair_prompt,
             round_index=round_index,
+            attempt_index=repair_index,
             candidate_index=candidate_index,
             idea=idea,
+            speedup_vs_triton=best_attempt.speedup_vs_triton,
         )
         response, _ = request_json(
             client,
@@ -193,9 +211,7 @@ def _generate_tested_candidate(
         )
         responses.append(response.model_dump(mode="json"))
         write_trace(trace_path, responses)
-        repaired_candidate = PtxKernel.model_validate_json(
-            response_json_text(response)
-        )
+        repaired_candidate = PtxKernel.model_validate_json(response_json_text(response))
         print(
             "--- Repaired candidate ---\n"
             f"{_candidate_json(repaired_candidate)}\n"
@@ -210,6 +226,8 @@ def _generate_tested_candidate(
             round_index=round_index,
             candidate_index=candidate_index,
             idea=idea,
+            prompt_name="candidate_repair",
+            attempt_index=repair_index,
         )
         if repaired_evaluation.passed and (
             not best_attempt.passed or repaired_evaluation.p50 < best_attempt.p50
@@ -256,7 +274,9 @@ def _repair_initial_candidate(
             prompt_name="initial_candidate_repair",
             prompt=repair_prompt,
             round_index=0,
+            attempt_index=repair_index,
             candidate_index=0,
+            speedup_vs_triton=best_attempt.speedup_vs_triton,
         )
         response, _ = request_json(
             client,
@@ -268,9 +288,7 @@ def _repair_initial_candidate(
         )
         responses.append(response.model_dump(mode="json"))
         write_trace(trace_path, responses)
-        repaired_candidate = PtxKernel.model_validate_json(
-            response_json_text(response)
-        )
+        repaired_candidate = PtxKernel.model_validate_json(response_json_text(response))
         print(
             "--- Repaired initial candidate ---\n"
             f"{_candidate_json(repaired_candidate)}\n"
@@ -285,6 +303,8 @@ def _repair_initial_candidate(
             round_index=0,
             candidate_index=0,
             idea=None,
+            prompt_name="initial_candidate_repair",
+            attempt_index=repair_index,
         )
         if repaired_evaluation.passed and (
             not best_attempt.passed or repaired_evaluation.p50 < best_attempt.p50
@@ -299,15 +319,23 @@ def _repair_initial_candidate(
 def run_agent_loop(
     kernel_name,
     *,
-    model = "gpt-5.6-sol",
-    max_tool_rounds = 5,
-    max_repair_attempts = DEFAULT_REPAIR_ATTEMPTS,
-    reasoning_effort = "medium",
-    trace_path = Path("trace.json"),
-    start_json = None,
+    model="gpt-5.6-sol",
+    max_tool_rounds=5,
+    max_repair_attempts=DEFAULT_REPAIR_ATTEMPTS,
+    reasoning_effort="medium",
+    trace_path=Path("output_traces"),
+    start_json=None,
 ):
     if max_repair_attempts < 0:
         raise ValueError("max_repair_attempts must be non-negative.")
+
+    trace_path = create_trace_directory(
+        trace_path,
+        kernel_name,
+        model,
+        reasoning_effort,
+    )
+    print(f"=== Writing trace artifacts to {trace_path} ===", flush=True)
 
     evaluator = TritonPTXCandidateEvaluator(resolve_kernel(kernel_name))
     client = OpenAI()
@@ -344,6 +372,7 @@ def run_agent_loop(
                 prompt_name="initial_candidate",
                 prompt=optimization_prompt,
                 round_index=0,
+                speedup_vs_triton=None,
             )
             response, _ = request_json(
                 client,
@@ -367,6 +396,8 @@ def run_agent_loop(
             round_index=0,
             candidate_index=0,
             idea=None,
+            prompt_name="initial_candidate",
+            attempt_index=0,
         )
         best_evaluation = _repair_initial_candidate(
             client,
@@ -400,6 +431,7 @@ def run_agent_loop(
                 prompt_name="improvement_plan",
                 prompt=plan_prompt,
                 round_index=round_index,
+                speedup_vs_triton=best_evaluation.speedup_vs_triton,
             )
             request_start = perf_counter()
             response, cost = request_json(
@@ -420,6 +452,14 @@ def run_agent_loop(
             responses.append(response.model_dump(mode="json"))
             write_trace(trace_path, responses)
             ideas = json.loads(response_json_text(response))["improvements"]
+            record_generated_json(
+                trace_path,
+                {"improvements": ideas},
+                prompt_name="improvement_plan",
+                round_index=round_index,
+                attempt_index=0,
+                speedup_vs_triton=best_evaluation.speedup_vs_triton,
+            )
             round_evaluations = []
 
             for candidate_index, idea in enumerate(ideas, start=1):
@@ -477,8 +517,11 @@ def run_agent_loop(
         final_payload["speedup"] = best_evaluation.speedup_vs_triton
         final_payload["p50"] = best_evaluation.p50
         final_json = json.dumps(final_payload, indent=2, default=json_default)
-        if trace_path is not None:
-            final_path(trace_path).write_text(f"{final_json}\n", encoding="utf-8")
+        final_speedup = best_evaluation.speedup_vs_triton
+        (trace_path / f"final_speedup_vs_triton_{final_speedup:.4f}x.json").write_text(
+            f"{final_json}\n",
+            encoding="utf-8",
+        )
         write_daily_summary()
         return final_json
     finally:
@@ -488,8 +531,8 @@ def run_agent_loop(
 def parse_args():
     parser = argparse.ArgumentParser(description="Optimize PTX with an OpenAI agent.")
     parser.add_argument("kernel", help="Kernel class name, for example AddKernel.")
-    parser.add_argument("--model", default="gpt-5.5")
-    parser.add_argument("--max-tool-rounds", type=int, default=1)
+    parser.add_argument("--model", default="gpt-5.6-sol", help="OpenAI model to use for optimization.")
+    parser.add_argument("--max-tool-rounds", type=int, default=8)
     parser.add_argument(
         "--max-repair-attempts",
         type=int,
@@ -497,7 +540,12 @@ def parse_args():
         help="Maximum outer LLM repair attempts per failed candidate.",
     )
     parser.add_argument("--reasoning-effort", default="medium")
-    parser.add_argument("--trace-path", type=Path, default=Path("trace.json"))
+    parser.add_argument(
+        "--trace-path",
+        type=Path,
+        default=Path("output_traces"),
+        help="Directory where a dated per-kernel trace folder is created.",
+    )
     parser.add_argument(
         "--start-json",
         help="Inline candidate JSON or path to a candidate JSON file.",
