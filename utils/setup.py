@@ -37,7 +37,6 @@ def build_initial_prompt(kernel_name):
     signature = parse_ptx_signature(dump_kernel_ptx(kernel_cls()))
     return build_prompt_for_operator(
         kernel_cls,
-        num_answers=1,
         version=version,
         target=target,
         address_size=address_size,

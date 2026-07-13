@@ -1,16 +1,5 @@
 from __future__ import annotations
 
-
-def async_load_store_skill():
-    return """
-## Async Load/Store Requirement
-
-Explicitly use async loads and stores where the PTX target supports them. Use
-asynchronous global-to-shared loads/staging whenever legal, and keep final
-global stores coalesced with valid `st.global` instructions.
-""".strip()
-
-
 def common_ptxas_issues_skill():
     return """
 # Common PTX Issues

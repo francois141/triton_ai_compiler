@@ -4,10 +4,33 @@ from __future__ import annotations
 from utils.evaluation import evaluation_summary
 
 
+KERNEL_CATEGORIES = {
+    "gemm": {
+        "name_markers": ("gemm", "matmul", "matrixmultiplication"),
+        "planning_requirements": (
+            "Use asynchronous global-to-shared data movement when the target "
+            "supports it.",
+            "Schedule asynchronous transfers early enough to overlap them with "
+            "independent computation; do not leave them serialized.",
+        ),
+    },
+}
+
+
+def _category_requirements(kernel_name):
+    normalized_name = kernel_name.lower()
+    requirements = []
+    for category in KERNEL_CATEGORIES.values():
+        if any(marker in normalized_name for marker in category["name_markers"]):
+            requirements.extend(category["planning_requirements"])
+    return requirements
+
+
 def build_improvement_prompt(
     base_prompt,
     best_evaluation,
     recent_evaluations,
+    kernel_name,
 ):
     recent_block = "\n\n".join(
         evaluation_summary(evaluation, include_ptx=False)
@@ -44,6 +67,10 @@ directly required by the proposed improvement: tiling, micro-tile shape,
 unrolling structure, register accumulators, shared-memory staging, store
 pattern, predicates, and algorithm. Do not replace the kernel with generic
 loops, local-memory accumulator arrays, or a different implementation strategy.
+
+## Applicable Kernel-Category Requirements
+
+{_category_requirements(kernel_name)}
 """.strip()
 
 

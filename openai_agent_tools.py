@@ -3,55 +3,46 @@ from __future__ import annotations
 import argparse
 import atexit
 import json
-import sys
 from pathlib import Path
 from time import perf_counter
 
 from openai import OpenAI
 
-LOCAL_TRITON_PTX_ROOT = Path(__file__).resolve().parent / "triton_ptx"
-if LOCAL_TRITON_PTX_ROOT.is_dir():
-    sys.path.insert(0, str(LOCAL_TRITON_PTX_ROOT))
-
-from prompts import build_continuation_prompt  # noqa: E402
-from prompts.improvement import (  # noqa: E402
+from prompts.improvement import (
     build_candidate_prompt,
     build_improvement_prompt,
     build_initial_repair_prompt,
     build_repair_prompt,
 )
-from utils.response_format import (  # noqa: E402
+from utils.response_format import (
     IMPROVEMENT_PLAN_RESPONSE_FORMAT,
     PTX_KERNEL_RESPONSE_FORMAT,
     PtxKernel,
 )
-from utils.evaluation import (  # noqa: E402
+from utils.evaluation import (
     candidate_from_evaluation,
     json_default,
 )
-from triton_ptx import (  # noqa: E402
+from triton_ptx import (
     Payload,
     TritonPTXCandidateEvaluator,
     resolve_kernel,
 )
-from utils.cost import append_daily_cost_summary  # noqa: E402
-from skills import load_ptx  # noqa: E402
-from utils.response import request_json, response_json_text  # noqa: E402
-from utils.setup import (  # noqa: E402
+from utils.cost import append_daily_cost_summary
+from skills import load_ptx
+from utils.response import request_json, response_json_text
+from utils.setup import (
     build_initial_prompt,
     build_tools,
     load_start_json,
 )
-from utils.traces import (  # noqa: E402
+from utils.traces import (
     create_trace_directory,
     record_generated_candidate,
     record_generated_json,
     record_prompt,
     write_trace,
 )
-
-
-DEFAULT_REPAIR_ATTEMPTS = 4
 
 
 def _candidate_json(candidate):
@@ -119,7 +110,7 @@ def _generate_tested_candidate(
     trace_path,
     *,
     model,
-    optimization_prompt,
+    base_prompt,
     best_evaluation,
     idea,
     round_index,
@@ -129,7 +120,7 @@ def _generate_tested_candidate(
     max_repair_attempts,
 ):
     candidate_prompt = build_candidate_prompt(
-        optimization_prompt,
+        base_prompt,
         best_evaluation,
         idea,
     )
@@ -183,7 +174,7 @@ def _generate_tested_candidate(
             flush=True,
         )
         repair_prompt = build_repair_prompt(
-            optimization_prompt,
+            base_prompt,
             best_evaluation,
             best_attempt,
             idea,
@@ -246,7 +237,7 @@ def _repair_initial_candidate(
     trace_path,
     *,
     model,
-    optimization_prompt,
+    base_prompt,
     initial_evaluation,
     reasoning_effort,
     tools,
@@ -263,7 +254,7 @@ def _repair_initial_candidate(
             flush=True,
         )
         repair_prompt = build_initial_repair_prompt(
-            optimization_prompt,
+            base_prompt,
             best_attempt,
             repair_index=repair_index,
             max_repair_attempts=max_repair_attempts,
@@ -319,11 +310,11 @@ def _repair_initial_candidate(
 def run_agent_loop(
     kernel_name,
     *,
-    model="gpt-5.6-sol",
-    max_tool_rounds=5,
-    max_repair_attempts=DEFAULT_REPAIR_ATTEMPTS,
-    reasoning_effort="medium",
-    trace_path=Path("output_traces"),
+    model,
+    max_tool_rounds,
+    max_repair_attempts,
+    reasoning_effort,
+    trace_path,
     start_json=None,
 ):
     if max_repair_attempts < 0:
@@ -343,11 +334,7 @@ def run_agent_loop(
     print(f"=== Uploaded PTX skill {skill_id} ===", flush=True)
     tools = build_tools(skill_id)
     starting_candidate = load_start_json(start_json)
-    optimization_prompt = (
-        build_initial_prompt(kernel_name)
-        if starting_candidate is None
-        else build_continuation_prompt(kernel_name)
-    )
+    base_prompt = build_initial_prompt(kernel_name)
     responses = []
     recent_evaluations = []
     wrote_daily_summary = False
@@ -370,14 +357,14 @@ def run_agent_loop(
                 responses,
                 trace_path,
                 prompt_name="initial_candidate",
-                prompt=optimization_prompt,
+                prompt=base_prompt,
                 round_index=0,
                 speedup_vs_triton=None,
             )
             response, _ = request_json(
                 client,
                 model=model,
-                prompt=optimization_prompt,
+                prompt=base_prompt,
                 response_format=PTX_KERNEL_RESPONSE_FORMAT,
                 reasoning_effort=reasoning_effort,
                 tools=tools,
@@ -405,7 +392,7 @@ def run_agent_loop(
             responses,
             trace_path,
             model=model,
-            optimization_prompt=optimization_prompt,
+            base_prompt=base_prompt,
             initial_evaluation=best_evaluation,
             reasoning_effort=reasoning_effort,
             tools=tools,
@@ -421,9 +408,10 @@ def run_agent_loop(
                 flush=True,
             )
             plan_prompt = build_improvement_prompt(
-                optimization_prompt,
+                base_prompt,
                 best_evaluation,
                 recent_evaluations,
+                kernel_name,
             )
             record_prompt(
                 responses,
@@ -474,7 +462,7 @@ def run_agent_loop(
                     responses,
                     trace_path,
                     model=model,
-                    optimization_prompt=optimization_prompt,
+                    base_prompt=base_prompt,
                     best_evaluation=best_evaluation,
                     idea=idea,
                     round_index=round_index,
@@ -531,12 +519,14 @@ def run_agent_loop(
 def parse_args():
     parser = argparse.ArgumentParser(description="Optimize PTX with an OpenAI agent.")
     parser.add_argument("kernel", help="Kernel class name, for example AddKernel.")
-    parser.add_argument("--model", default="gpt-5.6-sol", help="OpenAI model to use for optimization.")
+    parser.add_argument(
+        "--model", default="gpt-5.6-sol", help="OpenAI model to use for optimization."
+    )
     parser.add_argument("--max-tool-rounds", type=int, default=8)
     parser.add_argument(
         "--max-repair-attempts",
         type=int,
-        default=DEFAULT_REPAIR_ATTEMPTS,
+        default=4,
         help="Maximum outer LLM repair attempts per failed candidate.",
     )
     parser.add_argument("--reasoning-effort", default="medium")

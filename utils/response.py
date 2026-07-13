@@ -3,7 +3,7 @@ import time
 from openai import NotFoundError
 
 from .cost import append_cost_log
-from prompts.system import system_prompt
+from prompts.blocks import system_prompt
 
 
 RESPONSE_RETRY_ATTEMPTS = 6
