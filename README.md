@@ -21,6 +21,12 @@ uv pip install numpy
 The agent uploads the bundled PTX skill before each run. Ensure the
 `skills/ptx_skills` submodule is initialized as part of the command above.
 
+## Test installation
+
+```bash
+python smoke_run.py
+```
+
 ## Optimize a kernel
 
 ```bash
