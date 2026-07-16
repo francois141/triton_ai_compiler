@@ -404,7 +404,7 @@ def run_agent_loop(
         for round_index in range(1, max_tool_rounds + 1):
             print(
                 f"=== TTS round {round_index}/{max_tool_rounds}: planning three "
-                "focused improvements ===",
+                "ordered improvements ===",
                 flush=True,
             )
             plan_prompt = build_improvement_prompt(
@@ -448,7 +448,7 @@ def run_agent_loop(
                 attempt_index=0,
                 speedup_vs_triton=best_evaluation.speedup_vs_triton,
             )
-            round_evaluations = []
+            round_base = best_evaluation
 
             for candidate_index, idea in enumerate(ideas, start=1):
                 print(
@@ -463,7 +463,7 @@ def run_agent_loop(
                     trace_path,
                     model=model,
                     base_prompt=base_prompt,
-                    best_evaluation=best_evaluation,
+                    best_evaluation=round_base,
                     idea=idea,
                     round_index=round_index,
                     candidate_index=candidate_index,
@@ -472,31 +472,31 @@ def run_agent_loop(
                     max_repair_attempts=max_repair_attempts,
                 )
                 recent_evaluations.append(evaluated_candidate)
-                round_evaluations.append(evaluated_candidate)
+                if (
+                    evaluated_candidate.passed
+                    and evaluated_candidate.p50 < round_base.p50
+                ):
+                    round_base = evaluated_candidate
+                    print(
+                        f"=== TTS round {round_index}: accepted candidate "
+                        f"{candidate_index}/3 as the base for remaining ideas; "
+                        f"p50={round_base.p50}, speedup="
+                        f"{round_base.speedup_vs_triton} ===",
+                        flush=True,
+                    )
 
-            passed_evaluations = [
-                evaluation for evaluation in round_evaluations if evaluation.passed
-            ]
-            if passed_evaluations:
-                round_best = min(passed_evaluations, key=lambda result: result.p50)
-                if round_best.p50 < best_evaluation.p50:
-                    best_evaluation = round_best
-                    print(
-                        f"=== TTS round {round_index}: new best p50="
-                        f"{best_evaluation.p50}, speedup="
-                        f"{best_evaluation.speedup_vs_triton} ===",
-                        flush=True,
-                    )
-                else:
-                    print(
-                        f"=== TTS round {round_index}: no faster verified "
-                        "candidate found ===",
-                        flush=True,
-                    )
-            else:
+            if round_base is best_evaluation:
                 print(
-                    f"=== TTS round {round_index}: no candidate passed "
-                    "verification ===",
+                    f"=== TTS round {round_index}: no faster verified "
+                    "candidate found ===",
+                    flush=True,
+                )
+            else:
+                best_evaluation = round_base
+                print(
+                    f"=== TTS round {round_index}: new best p50="
+                    f"{best_evaluation.p50}, speedup="
+                    f"{best_evaluation.speedup_vs_triton} ===",
                     flush=True,
                 )
 
@@ -522,7 +522,7 @@ def parse_args():
     parser.add_argument(
         "--model", default="gpt-5.6-sol", help="OpenAI model to use for optimization."
     )
-    parser.add_argument("--max-tool-rounds", type=int, default=8)
+    parser.add_argument("--max-tool-rounds", type=int, default=3)
     parser.add_argument(
         "--max-repair-attempts",
         type=int,
