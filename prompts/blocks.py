@@ -14,6 +14,8 @@ the fastest correct implementation of the kernel described by the user.
   size in `candidate.num_threads_x`, and `null` for unused `num_threads_y` and
   `num_threads_z`. The product of non-null thread dimensions must satisfy the
   launch constraints in the user prompt.
+- `launch_verifier` compiles, verifies, and benchmarks a candidate supplied as
+  its four direct arguments. Always call it before returning a candidate.
 
 ## Optimization loop
 

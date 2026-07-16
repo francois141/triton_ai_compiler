@@ -23,14 +23,10 @@ from utils.evaluation import (
     candidate_from_evaluation,
     json_default,
 )
-from triton_ptx import (
-    Payload,
-    TritonPTXCandidateEvaluator,
-    resolve_kernel,
-)
+from triton_ptx import Payload
 from utils.cost import append_daily_cost_summary
 from skills import load_ptx
-from utils.response import request_json, response_json_text
+from utils.response import request_json, response_json_text, verifier_for_kernel
 from utils.setup import (
     build_initial_prompt,
     build_tools,
@@ -110,6 +106,7 @@ def _generate_tested_candidate(
     trace_path,
     *,
     model,
+    kernel_name,
     base_prompt,
     best_evaluation,
     idea,
@@ -141,6 +138,7 @@ def _generate_tested_candidate(
         response_format=PTX_KERNEL_RESPONSE_FORMAT,
         reasoning_effort=reasoning_effort,
         tools=tools,
+        kernel_name=kernel_name,
     )
     responses.append(response.model_dump(mode="json"))
     write_trace(trace_path, responses)
@@ -199,6 +197,7 @@ def _generate_tested_candidate(
             response_format=PTX_KERNEL_RESPONSE_FORMAT,
             reasoning_effort=reasoning_effort,
             tools=tools,
+            kernel_name=kernel_name,
         )
         responses.append(response.model_dump(mode="json"))
         write_trace(trace_path, responses)
@@ -237,6 +236,7 @@ def _repair_initial_candidate(
     trace_path,
     *,
     model,
+    kernel_name,
     base_prompt,
     initial_evaluation,
     reasoning_effort,
@@ -276,6 +276,7 @@ def _repair_initial_candidate(
             response_format=PTX_KERNEL_RESPONSE_FORMAT,
             reasoning_effort=reasoning_effort,
             tools=tools,
+            kernel_name=kernel_name,
         )
         responses.append(response.model_dump(mode="json"))
         write_trace(trace_path, responses)
@@ -328,11 +329,12 @@ def run_agent_loop(
     )
     print(f"=== Writing trace artifacts to {trace_path} ===", flush=True)
 
-    evaluator = TritonPTXCandidateEvaluator(resolve_kernel(kernel_name))
+    evaluator = verifier_for_kernel(kernel_name)
     client = OpenAI()
     skill_id = load_ptx(client)
     print(f"=== Uploaded PTX skill {skill_id} ===", flush=True)
     tools = build_tools(skill_id)
+
     starting_candidate = load_start_json(start_json)
     base_prompt = build_initial_prompt(kernel_name)
     responses = []
@@ -368,6 +370,7 @@ def run_agent_loop(
                 response_format=PTX_KERNEL_RESPONSE_FORMAT,
                 reasoning_effort=reasoning_effort,
                 tools=tools,
+                kernel_name=kernel_name,
             )
             responses.append(response.model_dump(mode="json"))
             write_trace(trace_path, responses)
@@ -392,6 +395,7 @@ def run_agent_loop(
             responses,
             trace_path,
             model=model,
+            kernel_name=kernel_name,
             base_prompt=base_prompt,
             initial_evaluation=best_evaluation,
             reasoning_effort=reasoning_effort,
@@ -429,6 +433,7 @@ def run_agent_loop(
                 response_format=IMPROVEMENT_PLAN_RESPONSE_FORMAT,
                 reasoning_effort=reasoning_effort,
                 tools=tools,
+                kernel_name=kernel_name,
             )
             request_duration = perf_counter() - request_start
             cost_message = "cost unavailable" if cost is None else f"cost ${cost:.6f}"
@@ -462,6 +467,7 @@ def run_agent_loop(
                     responses,
                     trace_path,
                     model=model,
+                    kernel_name=kernel_name,
                     base_prompt=base_prompt,
                     best_evaluation=round_base,
                     idea=idea,
@@ -520,9 +526,9 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Optimize PTX with an OpenAI agent.")
     parser.add_argument("kernel", help="Kernel class name, for example AddKernel.")
     parser.add_argument(
-        "--model", default="gpt-5.6-sol", help="OpenAI model to use for optimization."
+        "--model", default="gpt-5.6-terra", help="OpenAI model to use for optimization."
     )
-    parser.add_argument("--max-tool-rounds", type=int, default=3)
+    parser.add_argument("--max-tool-rounds", type=int, default=2)
     parser.add_argument(
         "--max-repair-attempts",
         type=int,

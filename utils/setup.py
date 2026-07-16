@@ -12,23 +12,50 @@ from utils.response_format import PtxKernel
 
 
 def build_tools(skill_id):
-    if skill_id is None:
-        return []
-    return [
+    tools = [
         {
-            "type": "shell",
-            "environment": {
-                "type": "container_auto",
-                "skills": [
-                    {
-                        "type": "skill_reference",
-                        "skill_id": skill_id,
-                        "version": "latest",
-                    }
+            "type": "function",
+            "name": "launch_verifier",
+            "description": (
+                "Compile, verify, and benchmark a PTX candidate. Use this "
+                "before returning any candidate."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "ptx": {"type": "string", "minLength": 1},
+                    "num_threads_x": {"type": "integer", "minimum": 1},
+                    "num_threads_y": {"type": "integer", "minimum": 1},
+                    "num_threads_z": {"type": "integer", "minimum": 1},
+                },
+                "required": [
+                    "ptx",
+                    "num_threads_x",
+                    "num_threads_y",
+                    "num_threads_z",
                 ],
+                "additionalProperties": False,
             },
+            "strict": True,
         }
     ]
+    if skill_id is not None:
+        tools.append(
+            {
+                "type": "shell",
+                "environment": {
+                    "type": "container_auto",
+                    "skills": [
+                        {
+                            "type": "skill_reference",
+                            "skill_id": skill_id,
+                            "version": "latest",
+                        }
+                    ],
+                },
+            }
+        )
+    return tools
 
 
 def build_initial_prompt(kernel_name):

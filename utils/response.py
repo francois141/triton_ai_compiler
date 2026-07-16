@@ -1,12 +1,20 @@
+import json
 import time
+from functools import cache
 
 from openai import NotFoundError
+from triton_ptx import Payload, TritonPTXCandidateEvaluator, resolve_kernel
 
 from .cost import append_cost_log
 from prompts.blocks import system_prompt
 
 
 RESPONSE_RETRY_ATTEMPTS = 6
+
+
+@cache
+def verifier_for_kernel(kernel_name):
+    return TritonPTXCandidateEvaluator(resolve_kernel(kernel_name))
 
 
 def _get_field(value, field_name):
@@ -83,7 +91,17 @@ def response_json_text(response):
     return fallback_text
 
 
-def request_json(client, *, model, prompt, response_format, reasoning_effort, tools):
+def request_json(
+    client,
+    *,
+    model,
+    prompt,
+    response_format,
+    reasoning_effort,
+    tools,
+    kernel_name,
+):
+    verifier = verifier_for_kernel(kernel_name)
     kwargs = {
         "model": model,
         "instructions": system_prompt(),
@@ -94,16 +112,54 @@ def request_json(client, *, model, prompt, response_format, reasoning_effort, to
     if reasoning_effort is not None:
         kwargs["reasoning"] = {"effort": reasoning_effort}
 
-    for attempt in range(RESPONSE_RETRY_ATTEMPTS):
-        try:
-            response = client.responses.create(**kwargs)
-            break
-        except NotFoundError:
-            if attempt == RESPONSE_RETRY_ATTEMPTS - 1:
-                raise
-            time.sleep(2**attempt)
-    else:
-        raise RuntimeError("Response retry loop ended unexpectedly.")
+    total_cost = None
+    while True:
+        for attempt in range(RESPONSE_RETRY_ATTEMPTS):
+            try:
+                response = client.responses.create(**kwargs)
+                break
+            except NotFoundError:
+                if attempt == RESPONSE_RETRY_ATTEMPTS - 1:
+                    raise
+                time.sleep(2**attempt)
 
-    print_tool_calls(response)
-    return response, append_cost_log(model=model, response=response)
+        print_tool_calls(response)
+        cost = append_cost_log(model=model, response=response)
+        if cost is not None:
+            total_cost = (total_cost or 0) + cost
+
+        function_calls = [
+            item
+            for item in (_get_field(response, "output") or [])
+            if _get_field(item, "type") == "function_call"
+        ]
+        if not function_calls:
+            return response, total_cost
+
+        tool_outputs = []
+        for function_call in function_calls:
+            if _get_field(function_call, "name") != "launch_verifier":
+                raise RuntimeError(
+                    f"Unsupported function call: {_get_field(function_call, 'name')}"
+                )
+            arguments = json.loads(_get_field(function_call, "arguments"))
+            evaluation = verifier.evaluate(Payload.from_input(arguments))
+            if hasattr(evaluation, "to_json"):
+                evaluation = evaluation.to_json(indent=2)
+            tool_outputs.append(
+                {
+                    "type": "function_call_output",
+                    "call_id": _get_field(function_call, "call_id"),
+                    "output": evaluation,
+                }
+            )
+
+        kwargs = {
+            "model": model,
+            "previous_response_id": _get_field(response, "id"),
+            "input": tool_outputs,
+            "tools": tools,
+            "text": {"format": response_format},
+        }
+        if reasoning_effort is not None:
+            kwargs["reasoning"] = {"effort": reasoning_effort}
