@@ -56,7 +56,7 @@ def load_start_json(start_json):
     loaded_data = json.loads(serialized_candidate)
     if not isinstance(loaded_data, dict):
         raise ValueError("Starting candidate JSON must contain an object.")
-    candidate_data = loaded_data.get("payload", loaded_data)
+    candidate_data = loaded_data.get("payload", loaded_data.get("candidate", loaded_data))
     if not isinstance(candidate_data, dict):
         raise ValueError("Starting candidate payload must contain an object.")
     candidate_data = {
