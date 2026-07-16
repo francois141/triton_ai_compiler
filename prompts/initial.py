@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from triton_ptx.helpers.kernels import extract_specification_from_operator
 from .blocks import (
     commenting_rules,
     correctness_rules,
@@ -15,49 +14,25 @@ from .blocks import (
 from .skills import common_ptxas_issues_skill
 
 
-def prompt_builder(
-    spec,
-    *,
-    version,
-    target,
-    address_size,
-    ptx_signature=None,
-):
+def build_prompt_for_kernel(data):
+    system = data["system"]
     sections = [
         common_ptxas_issues_skill(),
         initial_task().strip(),
-        constexpr_values_block(spec),
+        constexpr_values_block(data),
         launch_configuration_block(),
         signature_template(
-            spec.parameters,
-            version=version,
-            target=target,
-            address_size=address_size,
-            kernel_name=spec.kernel_name,
-            ptx_signature=ptx_signature,
+            data["parameters"],
+            version=system["version"],
+            target=system["target"],
+            address_size=system["address_size"],
+            kernel_name=data["kernel_name"],
+            ptx_signature=data["ptx_signature"],
         ),
         correctness_rules(),
         commenting_rules(),
         performance_rules(),
-        triton_kernel_block(spec.source),
-        output_contract(spec),
+        triton_kernel_block(data["source"]),
+        output_contract(data),
     ]
     return "\n\n".join(sections)
-
-
-def build_prompt_for_operator(
-    operator,
-    *,
-    version,
-    target,
-    address_size,
-    ptx_signature=None,
-):
-    spec = extract_specification_from_operator(operator)
-    return prompt_builder(
-        spec,
-        version=version,
-        target=target,
-        address_size=address_size,
-        ptx_signature=ptx_signature,
-    )

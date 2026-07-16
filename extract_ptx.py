@@ -3,20 +3,16 @@ import argparse
 from pathlib import Path
 
 
-from triton_ptx.helpers.environment import is_gpu_available
-from triton_ptx.helpers.triton import dump_kernel_ptx
-from triton_ptx.kernels import kernel_list
+from triton_api import dump_kernel_ptx, is_gpu_available, list_kernels
 
 
-def dump_and_save_ptx_kernel(kernel, output_dir):
-
-    kernel_name = kernel.__class__.__name__
-    ptx = dump_kernel_ptx(kernel)
+def dump_and_save_ptx_kernel(kernel_id, output_dir):
+    ptx = dump_kernel_ptx(kernel_id)
 
     if not ptx:
-        raise RuntimeError(f"Triton did not produce PTX for {kernel_name}")
+        raise RuntimeError(f"Triton did not produce PTX for {kernel_id}")
 
-    output_path = output_dir / f"{kernel_name}.ptx"
+    output_path = output_dir / f"{kernel_id}.ptx"
     output_path.write_text(ptx)
 
     return output_path
@@ -31,18 +27,15 @@ def main(output_dir):
 
     failed_kernels = []
 
-    for op in kernel_list:
-        kernel = op()
-        kernel_name = kernel.__class__.__name__
-
-        print(f"Compiling {kernel_name}")
+    for kernel_id in list_kernels():
+        print(f"Compiling {kernel_id}")
 
         try:
-            output_path = dump_and_save_ptx_kernel(kernel, output_dir)
+            output_path = dump_and_save_ptx_kernel(kernel_id, output_dir)
             print(f"Dumped PTX to {output_path}")
         except Exception as exc:
-            print(f"Failed to dump PTX for {kernel_name}: {exc}")
-            failed_kernels.append(kernel_name)
+            print(f"Failed to dump PTX for {kernel_id}: {exc}")
+            failed_kernels.append(kernel_id)
 
     if failed_kernels:
         print("\nFailed kernels:")

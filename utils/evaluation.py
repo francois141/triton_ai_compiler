@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-from triton_ptx import Payload
 
 from .response_format import PtxKernel
 
@@ -31,8 +30,7 @@ def json_default(value):
 
 
 def candidate_from_evaluation(evaluation):
-    payload = Payload.from_input(evaluation.payload).to_launch_dict()
-    return PtxKernel.model_validate(payload)
+    return PtxKernel.model_validate(evaluation.payload)
 
 
 def evaluation_summary(evaluation, *, include_ptx):

@@ -1,23 +1,22 @@
-from triton_ptx import Payload, TritonPTXCandidateEvaluator
-from triton_ptx.helpers.triton import dump_kernel_ptx
-from triton_ptx.kernels import AddKernel
+from triton_api import dump_kernel_ptx, evaluate_candidate, get_kernel_data
+
 
 def main():
+    kernel_id = "AddKernel"
     try:
-        kernel = AddKernel()
-        ptx = dump_kernel_ptx(kernel)
+        ptx = dump_kernel_ptx(kernel_id)
         if not ptx:
-            raise RuntimeError("Triton did not produce PTX for AddKernel.")
+            raise RuntimeError(f"Triton did not produce PTX for {kernel_id}.")
 
-        report = TritonPTXCandidateEvaluator(AddKernel).evaluate(
-            Payload.from_input(
-                {
-                    "ptx": ptx,
-                    "threads_x": kernel.num_warps * 32,
-                }
-            )
+        num_warps = get_kernel_data(kernel_id)["num_warps"]
+        report = evaluate_candidate(
+            kernel_id,
+            {
+                "ptx": ptx,
+                "num_threads_x": num_warps * 32,
+            },
         )
-    except Exception as exc:
+    except Exception:
         print("Failure")
         return 1
 

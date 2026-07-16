@@ -1,20 +1,15 @@
 import json
 import time
-from functools import cache
 
 from openai import NotFoundError
-from triton_ptx import Payload, TritonPTXCandidateEvaluator, resolve_kernel
+
+from triton_api import evaluate_candidate
 
 from .cost import append_cost_log
 from prompts.blocks import system_prompt
 
 
 RESPONSE_RETRY_ATTEMPTS = 6
-
-
-@cache
-def verifier_for_kernel(kernel_name):
-    return TritonPTXCandidateEvaluator(resolve_kernel(kernel_name))
 
 
 def _get_field(value, field_name):
@@ -101,7 +96,6 @@ def request_json(
     tools,
     kernel_name,
 ):
-    verifier = verifier_for_kernel(kernel_name)
     kwargs = {
         "model": model,
         "instructions": system_prompt(),
@@ -143,14 +137,14 @@ def request_json(
                     f"Unsupported function call: {_get_field(function_call, 'name')}"
                 )
             arguments = json.loads(_get_field(function_call, "arguments"))
-            evaluation = verifier.evaluate(Payload.from_input(arguments))
-            if hasattr(evaluation, "to_json"):
-                evaluation = evaluation.to_json(indent=2)
+            evaluation = evaluate_candidate(kernel_name, arguments)
             tool_outputs.append(
                 {
                     "type": "function_call_output",
                     "call_id": _get_field(function_call, "call_id"),
-                    "output": evaluation,
+                    "output": json.dumps(
+                        evaluation.to_dict(), indent=2, ensure_ascii=False
+                    ),
                 }
             )
 

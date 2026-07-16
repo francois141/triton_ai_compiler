@@ -23,10 +23,10 @@ from utils.evaluation import (
     candidate_from_evaluation,
     json_default,
 )
-from triton_ptx import Payload
+from triton_api import evaluate_candidate
 from utils.cost import append_daily_cost_summary
 from skills import load_ptx
-from utils.response import request_json, response_json_text, verifier_for_kernel
+from utils.response import request_json, response_json_text
 from utils.setup import (
     build_initial_prompt,
     build_tools,
@@ -46,7 +46,7 @@ def _candidate_json(candidate):
 
 
 def _evaluate_and_record(
-    evaluator,
+    kernel_name,
     candidate,
     responses,
     trace_path,
@@ -57,8 +57,8 @@ def _evaluate_and_record(
     prompt_name,
     attempt_index,
 ):
-    evaluated_candidate = evaluator.evaluate(
-        Payload.from_input(candidate.model_dump(exclude_none=False))
+    evaluated_candidate = evaluate_candidate(
+        kernel_name, candidate.model_dump(exclude_none=False)
     )
     print(
         f"Candidate result: compiles={evaluated_candidate.compiles}, "
@@ -73,7 +73,7 @@ def _evaluate_and_record(
             "round_index": round_index,
             "candidate_index": candidate_index,
             "idea": idea,
-            "evaluation": json.loads(evaluated_candidate.to_json(indent=2)),
+            "evaluation": evaluated_candidate.to_dict(),
         }
     )
     record_generated_candidate(
@@ -101,7 +101,6 @@ def _should_repair_candidate(evaluation):
 
 def _generate_tested_candidate(
     client,
-    evaluator,
     responses,
     trace_path,
     *,
@@ -150,7 +149,7 @@ def _generate_tested_candidate(
         flush=True,
     )
     best_attempt = _evaluate_and_record(
-        evaluator,
+        kernel_name,
         candidate,
         responses,
         trace_path,
@@ -209,7 +208,7 @@ def _generate_tested_candidate(
             flush=True,
         )
         repaired_evaluation = _evaluate_and_record(
-            evaluator,
+            kernel_name,
             repaired_candidate,
             responses,
             trace_path,
@@ -231,7 +230,6 @@ def _generate_tested_candidate(
 
 def _repair_initial_candidate(
     client,
-    evaluator,
     responses,
     trace_path,
     *,
@@ -288,7 +286,7 @@ def _repair_initial_candidate(
             flush=True,
         )
         repaired_evaluation = _evaluate_and_record(
-            evaluator,
+            kernel_name,
             repaired_candidate,
             responses,
             trace_path,
@@ -329,7 +327,6 @@ def run_agent_loop(
     )
     print(f"=== Writing trace artifacts to {trace_path} ===", flush=True)
 
-    evaluator = verifier_for_kernel(kernel_name)
     client = OpenAI()
     skill_id = load_ptx(client)
     print(f"=== Uploaded PTX skill {skill_id} ===", flush=True)
@@ -379,7 +376,7 @@ def run_agent_loop(
             )
 
         best_evaluation = _evaluate_and_record(
-            evaluator,
+            kernel_name,
             starting_candidate,
             responses,
             trace_path,
@@ -391,7 +388,6 @@ def run_agent_loop(
         )
         best_evaluation = _repair_initial_candidate(
             client,
-            evaluator,
             responses,
             trace_path,
             model=model,
@@ -463,7 +459,6 @@ def run_agent_loop(
                 )
                 evaluated_candidate = _generate_tested_candidate(
                     client,
-                    evaluator,
                     responses,
                     trace_path,
                     model=model,

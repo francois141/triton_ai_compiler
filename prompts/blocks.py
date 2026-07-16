@@ -86,7 +86,9 @@ PTX version and target listed below.
 
 def constexpr_values_block(spec):
     constexpr_params = [
-        param for param in spec.parameters if _is_constexpr_annotation(param.annotation)
+        param
+        for param in spec["parameters"]
+        if _is_constexpr_annotation(param["annotation"])
     ]
     if not constexpr_params:
         return "\n\n".join(
@@ -96,12 +98,14 @@ def constexpr_values_block(spec):
             ]
         )
 
+    constexpr_values = spec["constexpr_values"]
     lines = []
     for param in constexpr_params:
-        if param.name in spec.constexpr_values:
-            lines.append(f"- {param.name}: {spec.constexpr_values[param.name]!r}")
+        name = param["name"]
+        if name in constexpr_values:
+            lines.append(f"- {name}: {constexpr_values[name]!r}")
         else:
-            lines.append(f"- {param.name}: unavailable from operator constexpr_values")
+            lines.append(f"- {name}: unavailable from operator constexpr_values")
 
     return "\n\n".join(
         [
@@ -147,15 +151,17 @@ def signature_template(
     ptx_signature=None,
 ):
     runtime_params = [
-        param for param in parameters if not _is_constexpr_annotation(param.annotation)
+        param
+        for param in parameters
+        if not _is_constexpr_annotation(param["annotation"])
     ]
 
     lines = []
     for index, param in enumerate(runtime_params):
         ptx_type = (
-            ptx_signature[index].ptx_type if ptx_signature is not None else ".u64"
+            ptx_signature[index]["ptx_type"] if ptx_signature is not None else ".u64"
         )
-        lines.append(f"    .param {ptx_type} {param.name},")
+        lines.append(f"    .param {ptx_type} {param['name']},")
 
     lines.append("    .param .u64 dummy_ptr1,")
     lines.append("    .param .u64 dummy_ptr2")

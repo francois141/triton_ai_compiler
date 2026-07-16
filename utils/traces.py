@@ -127,7 +127,7 @@ def record_generated_candidate(
         "candidate_index": candidate_index,
         "prompt_name": prompt_name,
         "candidate": json.loads(candidate_json),
-        "evaluation": json.loads(evaluation.to_json(indent=2)),
+        "evaluation": evaluation.to_dict(),
     }
     (trace_path / f"{artifact_stem}.json").write_text(
         json.dumps(payload, indent=2, default=json_default),

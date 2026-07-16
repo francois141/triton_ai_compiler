@@ -1,13 +1,8 @@
 import json
 from pathlib import Path
 
-from prompts import build_prompt_for_operator
-from triton_ptx import (
-    dump_kernel_ptx,
-    get_ptx_system_config,
-    parse_ptx_signature,
-    resolve_kernel,
-)
+from prompts import build_prompt_for_kernel
+from triton_api import get_kernel_data
 from utils.response_format import PtxKernel
 
 
@@ -59,16 +54,7 @@ def build_tools(skill_id):
 
 
 def build_initial_prompt(kernel_name):
-    kernel_cls = resolve_kernel(kernel_name)
-    version, target, address_size = get_ptx_system_config()
-    signature = parse_ptx_signature(dump_kernel_ptx(kernel_cls()))
-    return build_prompt_for_operator(
-        kernel_cls,
-        version=version,
-        target=target,
-        address_size=address_size,
-        ptx_signature=signature,
-    )
+    return build_prompt_for_kernel(get_kernel_data(kernel_name))
 
 
 def load_start_json(start_json):

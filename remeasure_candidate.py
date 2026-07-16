@@ -50,15 +50,10 @@ def remeasure_candidate(
     *,
     kernel_name = None,
 ):
-    from triton_ptx.evaluation import Payload, TritonPTXCandidateEvaluator
-    from triton_ptx.kernels import resolve_kernel
+    from triton_api import evaluate_candidate
 
     resolved_kernel_name = resolve_kernel_name(record, kernel_name)
-    kernel_cls = resolve_kernel(resolved_kernel_name)
-    payload = Payload.from_input(extract_payload(record))
-
-    evaluator = TritonPTXCandidateEvaluator(kernel_cls)
-    return evaluator.evaluate(payload)
+    return evaluate_candidate(resolved_kernel_name, extract_payload(record))
 
 
 def parse_args():
@@ -92,7 +87,7 @@ def main():
         record,
         kernel_name=args.kernel,
     )
-    output = result.to_json()
+    output = json.dumps(result.to_dict(), indent=2, ensure_ascii=False)
 
     if args.output is not None:
         args.output.parent.mkdir(parents=True, exist_ok=True)
