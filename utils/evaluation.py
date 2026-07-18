@@ -56,6 +56,8 @@ def evaluation_summary(evaluation, *, include_ptx):
             evaluation.ncu_report,
             default=json_default,
         )[-4000:]
+    if evaluation.sanitizer_report:
+        fields["sanitizer_report"] = evaluation.sanitizer_report
     if evaluation.compile_error:
         fields["compile_error"] = evaluation.compile_error[-2000:]
     if evaluation.timing_error:
