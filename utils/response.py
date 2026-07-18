@@ -114,14 +114,22 @@ def request_json(
 
     total_cost = None
     while True:
-        for attempt in range(RESPONSE_RETRY_ATTEMPTS):
+        for retry_index in range(RESPONSE_RETRY_ATTEMPTS):
             try:
                 response = client.responses.create(**kwargs)
                 break
-            except NotFoundError:
-                if attempt == RESPONSE_RETRY_ATTEMPTS - 1:
+            except NotFoundError as error:
+                if "Skill version" not in str(error):
                     raise
-                time.sleep(2**attempt)
+                if retry_index == RESPONSE_RETRY_ATTEMPTS - 1:
+                    raise
+                delay_seconds = 2**retry_index
+                print(
+                    "=== Uploaded skill version is not available yet; retrying "
+                    f"in {delay_seconds}s ===",
+                    flush=True,
+                )
+                time.sleep(delay_seconds)
 
         print_tool_calls(response)
         cost = append_cost_log(model=model, response=response)

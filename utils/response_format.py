@@ -23,6 +23,14 @@ class PtxKernel(BaseModel):
         return value
 
 
+class FailureAnalysis(BaseModel):
+
+    model_config = ConfigDict(extra="forbid")
+
+    root_cause: str = Field(min_length=1)
+    repair_instruction: str = Field(min_length=1)
+
+
 PTX_KERNEL_JSON_SCHEMA = PtxKernel.model_json_schema()
 PTX_KERNEL_JSON_SCHEMA["required"] = list(
     PTX_KERNEL_JSON_SCHEMA["properties"]
@@ -33,6 +41,13 @@ PTX_KERNEL_RESPONSE_FORMAT = {
     "name": "ptx_kernel",
     "strict": True,
     "schema": PTX_KERNEL_JSON_SCHEMA,
+}
+
+FAILURE_ANALYSIS_RESPONSE_FORMAT = {
+    "type": "json_schema",
+    "name": "failure_analysis",
+    "strict": True,
+    "schema": FailureAnalysis.model_json_schema(),
 }
 
 IMPROVEMENT_PLAN_RESPONSE_FORMAT = {

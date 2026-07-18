@@ -172,7 +172,6 @@ Use this exact entry template shape and fill the body with your PTX:
 - Any argument name containing `_ptr` should be treated as a pointer to float32 data.
 
 
-
 ```ptx
 .version {version}
 .target {target}

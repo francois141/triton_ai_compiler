@@ -10,13 +10,16 @@ from openai import OpenAI
 
 from prompts.improvement import (
     build_candidate_prompt,
+    build_failure_analysis_prompt,
     build_improvement_prompt,
     build_initial_repair_prompt,
     build_repair_prompt,
 )
 from utils.response_format import (
+    FAILURE_ANALYSIS_RESPONSE_FORMAT,
     IMPROVEMENT_PLAN_RESPONSE_FORMAT,
     PTX_KERNEL_RESPONSE_FORMAT,
+    FailureAnalysis,
     PtxKernel,
 )
 from utils.evaluation import (
@@ -171,11 +174,44 @@ def _generate_tested_candidate(
             f"{max_repair_attempts} ===",
             flush=True,
         )
+        analysis_prompt = build_failure_analysis_prompt(
+            base_prompt,
+            best_attempt,
+            repair_index=repair_index,
+            max_repair_attempts=max_repair_attempts,
+            idea=idea,
+        )
+        record_prompt(
+            responses,
+            trace_path,
+            prompt_name="candidate_failure_analysis",
+            prompt=analysis_prompt,
+            round_index=round_index,
+            attempt_index=repair_index,
+            candidate_index=candidate_index,
+            idea=idea,
+            speedup_vs_triton=best_attempt.speedup_vs_triton,
+        )
+        analysis_response, _ = request_json(
+            client,
+            model=model,
+            prompt=analysis_prompt,
+            response_format=FAILURE_ANALYSIS_RESPONSE_FORMAT,
+            reasoning_effort=reasoning_effort,
+            tools=tools,
+            kernel_name=kernel_name,
+        )
+        responses.append(analysis_response.model_dump(mode="json"))
+        write_trace(trace_path, responses)
+        failure_analysis = FailureAnalysis.model_validate_json(
+            response_json_text(analysis_response)
+        ).model_dump()
         repair_prompt = build_repair_prompt(
             base_prompt,
             best_evaluation,
             best_attempt,
             idea,
+            failure_analysis,
             repair_index=repair_index,
             max_repair_attempts=max_repair_attempts,
         )
@@ -253,9 +289,40 @@ def _repair_initial_candidate(
             f"{repair_index}/{max_repair_attempts} ===",
             flush=True,
         )
+        analysis_prompt = build_failure_analysis_prompt(
+            base_prompt,
+            best_attempt,
+            repair_index=repair_index,
+            max_repair_attempts=max_repair_attempts,
+        )
+        record_prompt(
+            responses,
+            trace_path,
+            prompt_name="initial_candidate_failure_analysis",
+            prompt=analysis_prompt,
+            round_index=0,
+            attempt_index=repair_index,
+            candidate_index=0,
+            speedup_vs_triton=best_attempt.speedup_vs_triton,
+        )
+        analysis_response, _ = request_json(
+            client,
+            model=model,
+            prompt=analysis_prompt,
+            response_format=FAILURE_ANALYSIS_RESPONSE_FORMAT,
+            reasoning_effort=reasoning_effort,
+            tools=tools,
+            kernel_name=kernel_name,
+        )
+        responses.append(analysis_response.model_dump(mode="json"))
+        write_trace(trace_path, responses)
+        failure_analysis = FailureAnalysis.model_validate_json(
+            response_json_text(analysis_response)
+        ).model_dump()
         repair_prompt = build_initial_repair_prompt(
             base_prompt,
             best_attempt,
+            failure_analysis,
             repair_index=repair_index,
             max_repair_attempts=max_repair_attempts,
         )
@@ -526,13 +593,13 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Optimize PTX with an OpenAI agent.")
     parser.add_argument("kernel", help="Kernel class name, for example AddKernel.")
     parser.add_argument(
-        "--model", default="gpt-5.6-terra", help="OpenAI model to use for optimization."
+        "--model", default="gpt-5.6-sol", help="OpenAI model to use for optimization."
     )
-    parser.add_argument("--max-tool-rounds", type=int, default=2)
+    parser.add_argument("--max-tool-rounds", type=int, default=5)
     parser.add_argument(
         "--max-repair-attempts",
         type=int,
-        default=4,
+        default=10,
         help="Maximum outer LLM repair attempts per failed candidate.",
     )
     parser.add_argument("--reasoning-effort", default="medium")

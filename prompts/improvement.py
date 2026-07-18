@@ -56,17 +56,23 @@ Return only the structured three-idea improvement plan requested below.
 
 ## Planning Task
 
-First decide how to improve the current best kernel. Return exactly three
-specific, independent improvement ideas. Each idea must change one meaningful
-performance factor only, explain why it could help, and be concrete enough to
-generate one PTX candidate from it. Do not include PTX in this planning answer.
+First decide how to improve the current best kernel. Return exactly three specific, 
+ordered improvement ideas. Each idea must change one meaningful performance factor only, 
+explain why it could help, and be concrete enough to generate one PTX candidate from it. 
+Ideas two and three must be compatible with the preceding ideas: when an earlier candidate 
+is verified faster, its PTX is used as the base for the next idea.
+Do not include PTX in this planning answer.
 
-Each idea must be a localized micro-change to the current best PTX, not a
-rewrite. The candidate must preserve every part of the kernel that is not
-directly required by the proposed improvement: tiling, micro-tile shape,
-unrolling structure, register accumulators, shared-memory staging, store
-pattern, predicates, and algorithm. Do not replace the kernel with generic
-loops, local-memory accumulator arrays, or a different implementation strategy.
+An idea be a localized micro-change to the current best PTX and preserve every 
+part of the kernel that is not directly required by the proposed improvement: 
+tiling, micro-tile shape, unrolling structure, register accumulators, shared-memory staging, 
+store pattern, predicates, and algorithm. Do not replace the kernel with generic loops or 
+local-memory accumulator arrays.
+
+The improvement ideas may also explore newer hardware features supported by the target architecture, 
+including asynchronous copies, ldmatrix, Tensor Cores, mma.sync, or other relevant instructions, 
+when the model determines that they could improve performance. 
+Such an idea may include the minimum structural changes required to use the selected hardware feature correctly.
 
 ## Applicable Kernel-Category Requirements
 
@@ -82,8 +88,8 @@ def build_candidate_prompt(
     return f"""{base_prompt}
 
 ## Current Best Verified Candidate
-
 {evaluation_summary(best_evaluation, include_ptx=True)}
+
 
 ## Single Improvement To Try
 
@@ -122,6 +128,7 @@ def build_repair_prompt(
     best_evaluation,
     failed_evaluation,
     idea,
+    failure_analysis,
     *,
     repair_index,
     max_repair_attempts,
@@ -142,21 +149,29 @@ Instruction: {idea["instruction"]}
 
 {evaluation_summary(failed_evaluation, include_ptx=True)}
 
+## Failure Analysis And Required Fix
+
+Root cause: {failure_analysis["root_cause"]}
+Required repair: {failure_analysis["repair_instruction"]}
+
 ## Repair Task
 
 This is repair attempt {repair_index} of {max_repair_attempts}. Repair the
 failed candidate above, not the current best candidate from scratch.
 
 Make the smallest concrete change needed to fix the compile, verification, or
-runtime failure while preserving the original improvement idea. Keep the same
-PTX signature, launch metadata keys, tiling strategy, micro-tile shape,
+runtime failure described above while preserving the original improvement idea.
+Keep the same PTX signature, launch metadata keys, tiling strategy, micro-tile
+shape,
 shared-memory staging, synchronization strategy, predicate/store pattern, and
 manual unroll structure unless the diagnostic proves one of those exact parts
 is the bug.
 
-Call the available `triton_ptx` tool before returning. If the repaired candidate
-still fails, use the new diagnostic to make one more minimal repair while
-remaining within this attempt. Return only a JSON candidate that you actually
+You have access to the `triton_ptx` tool: use it to investigate if the failure
+analysis or diagnostics leave anything uncertain, and always use it to test the
+repair before returning. If the repaired candidate still fails, use the new
+diagnostic to make one more minimal repair while remaining within this attempt.
+Return only a JSON candidate that you actually
 tested with the tool; prefer the fastest verified repair. If no repair passes,
 return the closest tested repair so the outer loop can record its diagnostics.
 """.strip()
@@ -165,6 +180,7 @@ return the closest tested repair so the outer loop can record its diagnostics.
 def build_initial_repair_prompt(
     base_prompt,
     failed_evaluation,
+    failure_analysis,
     *,
     repair_index,
     max_repair_attempts,
@@ -175,6 +191,11 @@ def build_initial_repair_prompt(
 
 {evaluation_summary(failed_evaluation, include_ptx=True)}
 
+## Failure Analysis And Required Fix
+
+Root cause: {failure_analysis["root_cause"]}
+Required repair: {failure_analysis["repair_instruction"]}
+
 ## Initial Candidate Repair Task
 
 This is initial candidate repair attempt {repair_index} of
@@ -182,14 +203,57 @@ This is initial candidate repair attempt {repair_index} of
 a fresh implementation from scratch.
 
 Make the smallest concrete change needed to fix the compile, verification, or
-runtime failure. Keep the same PTX signature, launch metadata keys, tiling
-strategy, micro-tile shape, shared-memory staging, synchronization strategy,
+runtime failure described above. Keep the same PTX signature, launch metadata
+keys, tiling strategy, micro-tile shape, shared-memory staging, synchronization
+strategy,
 predicate/store pattern, and manual unroll structure unless the diagnostic
 proves one of those exact parts is the bug.
 
-Call the available `triton_ptx` tool before returning. If the repaired candidate
-still fails, use the new diagnostic to make one more minimal repair while
-remaining within this attempt. Return only a JSON candidate that you actually
+You have access to the `triton_ptx` tool: use it to investigate if the failure
+analysis or diagnostics leave anything uncertain, and always use it to test the
+repair before returning. If the repaired candidate still fails, use the new
+diagnostic to make one more minimal repair while remaining within this attempt.
+Return only a JSON candidate that you actually
 tested with the tool. If no repair passes, return the closest tested repair so
 the outer loop can record its diagnostics.
+""".strip()
+
+
+def build_failure_analysis_prompt(
+    base_prompt,
+    failed_evaluation,
+    *,
+    repair_index,
+    max_repair_attempts,
+    idea=None,
+):
+    improvement_context = ""
+    if idea is not None:
+        improvement_context = f"""
+## Original Improvement Being Tried
+
+Name: {idea["name"]}
+Rationale: {idea["rationale"]}
+Instruction: {idea["instruction"]}
+"""
+
+    return f"""{base_prompt}
+
+## Failed Candidate And Complete Diagnostics
+
+{evaluation_summary(failed_evaluation, include_ptx=True)}
+{improvement_context}
+## Failure Analysis Task
+
+This is analysis for repair attempt {repair_index} of {max_repair_attempts}.
+Identify the specific defect in the failed PTX candidate, using the complete
+sanitizer diagnostics and candidate PTX above. Return a concise root cause and
+a single, concrete repair instruction. Do not propose a rewrite or a generic
+debugging checklist. Preserve the candidate's tiling, micro-tile shape,
+shared-memory staging, synchronization strategy, predicates, stores, and
+manual unroll structure unless the diagnostics establish that one is faulty.
+
+You have access to the `triton_ptx` tool. Use it when the provided evidence is
+insufficient to determine the precise defect; otherwise, do not generate a
+candidate in this analysis response.
 """.strip()
