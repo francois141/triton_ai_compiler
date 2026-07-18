@@ -8,6 +8,7 @@ from pathlib import Path
 from openai import OpenAI
 
 PTX_SKILL_DIR = Path(__file__).resolve().parent / "ptx_skills" / "ptx_skill"
+PTX_SKILL_NAME = "ptx"
 
 
 def _validate_skill_dir(skill_dir):
@@ -24,9 +25,28 @@ def _zip_skill_dir(skill_dir, zip_path):
                 archive.write(file_path, file_path.relative_to(skill_dir.parent))
 
 
+def _find_existing_skill(client):
+    after = None
+
+    while True:
+        page = client.skills.list(after=after, limit=100, order="desc")
+        for skill in page.data:
+            if skill.name == PTX_SKILL_NAME:
+                return skill
+        if not page.has_more:
+            return None
+        if page.last_id is None:
+            raise RuntimeError("Skill listing reported more results without a cursor.")
+        after = page.last_id
+
+
 def load_ptx(client = None):
     openai_client = OpenAI() if client is None else client
     _validate_skill_dir(PTX_SKILL_DIR)
+
+    existing_skill = _find_existing_skill(openai_client)
+    if existing_skill is not None:
+        return existing_skill.id
 
     with tempfile.TemporaryDirectory(prefix="openai_ptx_skill_") as temp_dir:
         zip_path = Path(temp_dir) / f"{PTX_SKILL_DIR.name}.zip"
