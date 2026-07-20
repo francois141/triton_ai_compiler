@@ -1,0 +1,14 @@
+{
+  "providers": {
+    "epfl": {
+      "baseUrl": "https://inference.rcp.epfl.ch",
+      "api": "openai-completions",
+      "apiKey": "$EPFL_API_KEY",
+      "models": [
+        { "id": "moonshotai/Kimi-K2.7-Code", "maxTokens": 131072 },
+        { "id": "swiss-ai/Apertus-70B-Instruct-2509", "maxTokens": 131072 },
+        { "id": "Qwen/Qwen3.6-35B-A3B", "maxTokens": 131072 }
+      ]
+    }
+  }
+}
