@@ -31,7 +31,7 @@ import {
   WORKSPACE_DIR,
 } from "./tool.js";
 import { makeSpawnSubagentTool } from "./subagent.js";
-import { BLUE, CYAN, GRAY, MAGENTA, RED, RESET, YELLOW } from "./tui.js";
+import { GRAY, MAGENTA, RED, RESET, renderSessionOutput } from "./tui.js";
 
 const SYSTEM_PROMPT =
   "You are an expert GPU engineer optimizing a single Triton kernel at the " +
@@ -185,117 +185,9 @@ export async function runAgentOnKernel(kernelId) {
     sessionManager,
   });
 
-  // TUI-style streaming: render reasoning (grey) and answer text (cyan) live,
-  // with clean transitions between reasoning, text, and tool calls.
-  let streamMode = null; // "text" | "thinking" | null
-  let lastStopReason = null;
-
-  session.subscribe((event) => {
-    switch (event.type) {
-      case "message_update": {
-        const ev = event.assistantMessageEvent;
-        if (ev.type === "thinking_start" || ev.type === "thinking_delta") {
-          if (streamMode !== "thinking") {
-            process.stdout.write(`\n${GRAY}[thinking] `);
-            streamMode = "thinking";
-          }
-          if (ev.type === "thinking_delta") process.stdout.write(ev.delta);
-        } else if (ev.type === "text_start" || ev.type === "text_delta") {
-          if (streamMode !== "text") {
-            process.stdout.write(`\n${CYAN}`);
-            streamMode = "text";
-          }
-          if (ev.type === "text_delta") process.stdout.write(ev.delta);
-        } else if (ev.type === "text_end" || ev.type === "thinking_end") {
-          process.stdout.write(RESET);
-          streamMode = null;
-        }
-        break;
-      }
-      case "tool_execution_start": {
-        process.stdout.write(RESET);
-        const args = event.args || {};
-        let summary;
-        if (event.toolName === "submit_ptx") {
-          const ptxLen = typeof args.ptx === "string" ? `${args.ptx.length} chars` : "?";
-          summary = `submit_ptx(ptx: ${ptxLen}, num_threads_x: ${args.num_threads_x})`;
-        } else if (event.toolName === "spawn_subagent") {
-          const instr = typeof args.instructions === "string" ? args.instructions : "";
-          const preview = instr.replace(/\s+/g, " ").slice(0, 80);
-          summary = `spawn_subagent(${preview}${instr.length > 80 ? "…" : ""})`;
-        } else {
-          // Read-only tools (read/ls/grep/find): show the most useful arg.
-          const detail = args.pattern ?? args.path ?? "";
-          summary = `${event.toolName}(${detail})`;
-        }
-        console.log(`\n${BLUE}[call]${RESET} ${GRAY}${summary}${RESET}`);
-        streamMode = null;
-        break;
-      }
-      case "turn_end": {
-        // Report why each turn ended, so a run that stops without submitting is
-        // diagnosable. stopReason "length" means the model hit its output-token
-        // cap (maxTokens) mid-generation, likely before calling submit_ptx.
-        const msg = event.message || {};
-        const usage = msg.usage;
-        lastStopReason = msg.stopReason ?? null;
-        process.stdout.write(RESET);
-        const usageStr = usage
-          ? `${usage.output} out` +
-            (usage.reasoning != null ? ` (${usage.reasoning} reasoning)` : "") +
-            `, ${usage.input} in`
-          : "usage n/a";
-        console.log(
-          `\n${GRAY}[info] stop=${lastStopReason} | ${usageStr}${RESET}`,
-        );
-        if (lastStopReason === "length") {
-          console.log(
-            `${RED}[warning]${RESET} ${GRAY}Turn hit the model output-token limit ` +
-              `(maxTokens) mid-generation, so it may have stopped before calling ` +
-              `submit_ptx. Raise the model's maxTokens or lower thinkingLevel.${RESET}`,
-          );
-        }
-        streamMode = null;
-        break;
-      }
-      case "compaction_start": {
-        // Pi auto-compacts when context passes contextWindow - reserveTokens
-        // (reason "threshold") or after a context-overflow response (reason
-        // "overflow"); "manual" is an explicit session.compact(). It summarizes
-        // older turns and keeps the recent ~keepRecentTokens verbatim.
-        process.stdout.write(RESET);
-        console.log(
-          `\n${YELLOW}[compact]${RESET} ${GRAY}start (${event.reason})...${RESET}`,
-        );
-        streamMode = null;
-        break;
-      }
-      case "compaction_end": {
-        process.stdout.write(RESET);
-        const { reason, result, aborted, willRetry, errorMessage } = event;
-        if (errorMessage) {
-          console.log(
-            `${RED}[compact]${RESET} ${GRAY}failed (${reason}): ${errorMessage}${RESET}`,
-          );
-        } else if (aborted) {
-          console.log(`${YELLOW}[compact]${RESET} ${GRAY}aborted (${reason})${RESET}`);
-        } else {
-          const before = result?.tokensBefore;
-          const after = result?.estimatedTokensAfter;
-          const delta =
-            before != null && after != null
-              ? `${before} -> ~${after} tokens`
-              : "tokens n/a";
-          const retryNote = willRetry ? ", retrying turn" : "";
-          console.log(
-            `${YELLOW}[compact]${RESET} ${GRAY}done (${reason}): ${delta}${retryNote}${RESET}`,
-          );
-        }
-        streamMode = null;
-        break;
-      }
-    }
-  });
+  // TUI-style streaming: render reasoning (grey), answer text (cyan), tool
+  // calls, and compaction notices live. Shared with subagents via render.js.
+  const { getLastStopReason } = renderSessionOutput(session);
 
   try {
     // prompt() resolves only after the full run (all turns + tool calls) ends.
@@ -308,7 +200,7 @@ export async function runAgentOnKernel(kernelId) {
     tracker.bestSpeedup > 0 ? tracker.bestSpeedup.toFixed(3) + "x" : "none";
   console.log(`\n${GRAY}Done. Best passing speedup vs Triton: ${best}.${RESET}`);
   console.log(`${MAGENTA}Session saved to: ${sessionManager.getSessionFile()}${RESET}`);
-  if (lastStopReason === "length") {
+  if (getLastStopReason() === "length") {
     console.log(
       `${RED}Note:${RESET} ${GRAY}the run ended on a truncated turn (output-token ` +
         `limit), not because the model chose to stop.${RESET}`,

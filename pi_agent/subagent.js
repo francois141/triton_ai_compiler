@@ -27,7 +27,7 @@ import {
   TRITON_SOURCE_FILE,
   WORKSPACE_DIR,
 } from "./tool.js";
-import { MAGENTA, RED, RESET } from "./tui.js";
+import { MAGENTA, RED, RESET, renderSessionOutput } from "./tui.js";
 
 const SUBAGENT_SYSTEM_PROMPT =
   "You are a subagent spawned by a lead GPU-optimization agent to complete one " +
@@ -128,6 +128,10 @@ export function makeSpawnSubagentTool({
         console.log(`${RED}[subagent ${id}] ${message}${RESET}`);
         return { content: [{ type: "text", text: message }], details: { error: message } };
       }
+
+      // Stream the subagent's reasoning and tool calls the same way the lead
+      // agent does, labelled so nested output is distinguishable in the log.
+      renderSessionOutput(child, { label: `[subagent ${id}]` });
 
       try {
         await child.prompt(params.instructions);
