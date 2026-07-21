@@ -158,8 +158,70 @@ function saveBestKernel(kernelId, ptx, speedup, sessionId) {
 
 // --- submit_ptx tool ---
 
+/**
+ * Return a copy of `result` without the server-echoed PTX (`payload.ptx`). The
+ * PTX is already in context from the tool call, so echoing it back in the
+ * response just wastes tokens.
+ */
+function stripEchoedPtx(result) {
+  if (!result || typeof result !== "object" || !result.payload) return result;
+  const { ptx: _ptx, ...payloadRest } = result.payload;
+  return { ...result, payload: payloadRest };
+}
+
+/**
+ * Write the submitted PTX (`ptxFile`) and the trimmed result (`resultFile`) to
+ * the workspace so the agent can read them back later. Returns a note describing
+ * where they landed (or the failure). Best-effort: never throws.
+ */
+function saveKernelArtifacts(ptxFile, resultFile, ptx, trimmedResult) {
+  try {
+    fs.writeFileSync(path.join(WORKSPACE_DIR, ptxFile), ptx);
+    fs.writeFileSync(
+      path.join(WORKSPACE_DIR, resultFile),
+      JSON.stringify(trimmedResult, null, 2),
+    );
+    return (
+      `Saved the submitted PTX to \`${ptxFile}\` and the full result to ` +
+      `\`${resultFile}\` in your workspace. Read either back with the read tool if needed.`
+    );
+  } catch (err) {
+    return `(Could not save kernel artifacts: ${err.message})`;
+  }
+}
+
+/** Matches the per-session kernel artifacts (kernel-<id>.ptx, kernel-result-<id>.json). */
+const KERNEL_ARTIFACT_RE = /^kernel-\d+\.ptx$|^kernel-result-\d+\.json$/;
+
+/**
+ * Delete leftover kernel-<id>.ptx / kernel-result-<id>.json from a previous run
+ * so each session starts clean (the submit counter restarts at 0). Returns the
+ * number removed. Best-effort: never throws.
+ */
+export function cleanKernelArtifacts() {
+  let removed = 0;
+  let entries;
+  try {
+    entries = fs.readdirSync(WORKSPACE_DIR);
+  } catch {
+    return removed;
+  }
+  for (const name of entries) {
+    if (!KERNEL_ARTIFACT_RE.test(name)) continue;
+    try {
+      fs.rmSync(path.join(WORKSPACE_DIR, name));
+      removed++;
+    } catch {
+      // best-effort: ignore files we cannot remove
+    }
+  }
+  return removed;
+}
+
 /** Build the single submit_ptx tool bound to a kernel id and session id. */
 export function makeSubmitPtxTool(kernelId, tracker, sessionId) {
+  // Per-session, monotonically increasing id for the saved kernel artifacts.
+  let submitCount = 0;
   return defineTool({
     name: "submit_ptx",
     label: "Submit PTX",
@@ -218,8 +280,20 @@ export function makeSubmitPtxTool(kernelId, tracker, sessionId) {
         }
       }
 
+      // Trim the echoed PTX out of the response, and persist both the PTX and
+      // the full (trimmed) result to the workspace under a per-session id so the
+      // agent can read them back if needed.
+      const id = submitCount++;
+      const trimmed = stripEchoedPtx(result);
+      const saveNote = saveKernelArtifacts(
+        `kernel-${id}.ptx`,
+        `kernel-result-${id}.json`,
+        params.ptx,
+        trimmed,
+      );
+
       const tag = result.passed ? `${GREEN}[ok]${RESET}` : `${RED}[fail]${RESET}`;
-      const text = JSON.stringify(result, null, 2);
+      const text = `${JSON.stringify(trimmed, null, 2)}\n\n${saveNote}`;
       console.log(`${tag} ${GRAY}${text}${RESET}`);
 
       return {

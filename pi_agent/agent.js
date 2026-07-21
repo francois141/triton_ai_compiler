@@ -21,6 +21,7 @@ import {
 
 import { dumpKernelPtx, getKernelData } from "./triton_api.js";
 import {
+  cleanKernelArtifacts,
   makeSubmitPtxTool,
   makeWorkspaceJail,
   READ_ONLY_TOOL_NAMES,
@@ -87,6 +88,13 @@ async function buildContextMessage(kernelId) {
 async function main() {
   const kernelId = process.argv[2] || "AddKernel";
   console.log(`Optimizing kernel ${JSON.stringify(kernelId)} with the Pi SDK`);
+
+  // Clear kernel-<id>.ptx / kernel-result-<id>.json from any previous run so
+  // this session's submit counter starts from a clean workspace.
+  const cleaned = cleanKernelArtifacts();
+  if (cleaned > 0) {
+    console.log(`${GRAY}Cleared ${cleaned} kernel artifact(s) from a previous run.${RESET}`);
+  }
 
   const contextMessage = await buildContextMessage(kernelId);
   const tracker = { bestSpeedup: 0 };
