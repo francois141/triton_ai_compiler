@@ -1,0 +1,253 @@
+.version 9.3
+.target sm_80
+.address_size 64
+
+.visible .entry kernel(
+	.param .u64 .ptr .global .align 1 kernel_param_0,
+	.param .u64 .ptr .global .align 1 kernel_param_1,
+	.param .u64 .ptr .global .align 1 kernel_param_2,
+	.param .u64 .ptr .global .align 1 kernel_param_3,
+	.param .u64 .ptr .global .align 1 kernel_param_4,
+	.param .u32 kernel_param_5,
+	.param .u32 kernel_param_6,
+	.param .u32 kernel_param_7,
+	.param .u32 kernel_param_8,
+	.param .u32 kernel_param_9,
+	.param .u64 .ptr .global .align 1 kernel_param_10,
+	.param .u64 .ptr .global .align 1 kernel_param_11
+)
+.reqntid 128
+{
+	.reg .pred 	%p_mask, %p_loop, %p_hv0, %p_wv0, %p_pv0, %p_hv1, %p_wv1, %p_pv1, %p_hv2, %p_wv2, %p_pv2, %p_hv3, %p_wv3, %p_pv3, %p_tanh_small, %p_tanh_sat, %p_tmp;
+	.reg .b32 	%r_tid, %r_bid, %r_block, %r_off, %r_total, %r_ih, %r_iw, %r_oh, %r_ow, %r_tmp, %r_tmp2, %r_nh, %r_nw, %r_dh, %r_dw, %r_sh, %r_sw, %r_ph, %r_pw, %r_kh, %r_kw, %r_out_x, %r_out_y, %r_out_c, %r_batch, %r_in_c, %r_imsize, %r_imsize4, %r_acc, %r_cb, %r_bias, %r_res, %r_x0, %r_x1, %r_x2, %r_x3, %r_w0, %r_w1, %r_w2, %r_w3, %r_t0, %r_t1, %r_t2, %r_t3, %r_t4, %r_t5, %r_t6, %r_t7, %r_t8, %r_t9, %r_xoff0, %r_xoff1, %r_xoff2, %r_xoff3, %r_woff0, %r_woff1, %r_woff2, %r_woff3;
+	.reg .b64 	%rd_x, %rd_w, %rd_cb, %rd_b, %rd_o, %rd_xbase, %rd_wbase, %rd_xstride, %rd_xa0, %rd_xa1, %rd_xa2, %rd_xa3, %rd_wa0, %rd_wa1, %rd_wa2, %rd_wa3, %rd_tmp64, %rd_cbaddr, %rd_baddr, %rd_oaddr;
+
+	// Load parameters
+	ld.param.u64 	%rd_x, [kernel_param_0];
+	ld.param.u64 	%rd_w, [kernel_param_1];
+	ld.param.u64 	%rd_cb, [kernel_param_2];
+	ld.param.u64 	%rd_b, [kernel_param_3];
+	ld.param.u64 	%rd_o, [kernel_param_4];
+	ld.param.u32 	%r_total, [kernel_param_5];
+	ld.param.u32 	%r_ih, [kernel_param_6];
+	ld.param.u32 	%r_iw, [kernel_param_7];
+	ld.param.u32 	%r_oh, [kernel_param_8];
+	ld.param.u32 	%r_ow, [kernel_param_9];
+
+	// Linear thread offset
+	mov.u32 	%r_bid, %ctaid.x;
+	shl.b32 	%r_block, %r_bid, 7;
+	mov.u32 	%r_tid, %tid.x;
+	add.u32 	%r_off, %r_block, %r_tid;
+
+	// Mask out-of-bounds threads
+	setp.lt.u32 	%p_mask, %r_off, %r_total;
+	@!%p_mask bra 	END;
+
+	// Decode output coordinates (out_x, out_y, out_c, batch)
+	div.u32 	%r_tmp, %r_off, %r_ow;
+	rem.u32 	%r_out_x, %r_off, %r_ow;
+	div.u32 	%r_tmp2, %r_tmp, %r_oh;
+	rem.u32 	%r_out_y, %r_tmp, %r_oh;
+	div.u32 	%r_batch, %r_tmp2, 32;
+	rem.u32 	%r_out_c, %r_tmp2, 32;
+
+	// Start positions for the transposed convolution (PADDING=1)
+	add.u32 	%r_sh, %r_out_y, 1;
+	add.u32 	%r_sw, %r_out_x, 1;
+	and.b32 	%r_ph, %r_sh, 1;
+	and.b32 	%r_pw, %r_sw, 1;
+
+	// Input base address for in_c = 0
+	mul.lo.u32 	%r_imsize, %r_ih, %r_iw;
+	shl.b32 	%r_imsize4, %r_imsize, 2;
+	mul.lo.u32 	%r_tmp, %r_batch, 32;
+	mul.wide.u32 	%rd_xbase, %r_tmp, %r_imsize4;
+	add.u64 	%rd_xbase, %rd_xbase, %rd_x;
+	cvt.u64.u32 	%rd_xstride, %r_imsize4;
+
+	// Weight base address for out_c
+	mad.wide.u32 	%rd_wbase, %r_out_c, 64, %rd_w;
+
+	// ----- Slot 0: kh = ph, kw = pw -----
+	mov.u32 	%r_kh, %r_ph;
+	mov.u32 	%r_kw, %r_pw;
+	sub.s32 	%r_nh, %r_sh, %r_kh;
+	sub.s32 	%r_nw, %r_sw, %r_kw;
+	shr.s32 	%r_dh, %r_nh, 1;
+	shr.s32 	%r_dw, %r_nw, 1;
+	setp.ge.s32 	%p_hv0, %r_nh, 0;
+	setp.lt.u32 	%p_tmp, %r_dh, %r_ih;
+	and.pred 	%p_hv0, %p_hv0, %p_tmp;
+	setp.ge.s32 	%p_wv0, %r_nw, 0;
+	setp.lt.u32 	%p_tmp, %r_dw, %r_iw;
+	and.pred 	%p_wv0, %p_wv0, %p_tmp;
+	and.pred 	%p_pv0, %p_hv0, %p_wv0;
+	mul.lo.u32 	%r_xoff0, %r_dh, %r_iw;
+	add.u32 	%r_xoff0, %r_xoff0, %r_dw;
+	shl.b32 	%r_xoff0, %r_xoff0, 2;
+	cvt.u64.u32 	%rd_xa0, %r_xoff0;
+	add.u64 	%rd_xa0, %rd_xa0, %rd_xbase;
+	shl.b32 	%r_tmp, %r_kh, 2;
+	add.u32 	%r_tmp, %r_tmp, %r_kw;
+	shl.b32 	%r_woff0, %r_tmp, 2;
+	cvt.u64.u32 	%rd_wa0, %r_woff0;
+	add.u64 	%rd_wa0, %rd_wa0, %rd_wbase;
+
+	// ----- Slot 1: kh = ph, kw = pw + 2 -----
+	mov.u32 	%r_kh, %r_ph;
+	add.u32 	%r_kw, %r_pw, 2;
+	sub.s32 	%r_nh, %r_sh, %r_kh;
+	sub.s32 	%r_nw, %r_sw, %r_kw;
+	shr.s32 	%r_dh, %r_nh, 1;
+	shr.s32 	%r_dw, %r_nw, 1;
+	setp.ge.s32 	%p_hv1, %r_nh, 0;
+	setp.lt.u32 	%p_tmp, %r_dh, %r_ih;
+	and.pred 	%p_hv1, %p_hv1, %p_tmp;
+	setp.ge.s32 	%p_wv1, %r_nw, 0;
+	setp.lt.u32 	%p_tmp, %r_dw, %r_iw;
+	and.pred 	%p_wv1, %p_wv1, %p_tmp;
+	and.pred 	%p_pv1, %p_hv1, %p_wv1;
+	mul.lo.u32 	%r_xoff1, %r_dh, %r_iw;
+	add.u32 	%r_xoff1, %r_xoff1, %r_dw;
+	shl.b32 	%r_xoff1, %r_xoff1, 2;
+	cvt.u64.u32 	%rd_xa1, %r_xoff1;
+	add.u64 	%rd_xa1, %rd_xa1, %rd_xbase;
+	shl.b32 	%r_tmp, %r_kh, 2;
+	add.u32 	%r_tmp, %r_tmp, %r_kw;
+	shl.b32 	%r_woff1, %r_tmp, 2;
+	cvt.u64.u32 	%rd_wa1, %r_woff1;
+	add.u64 	%rd_wa1, %rd_wa1, %rd_wbase;
+
+	// ----- Slot 2: kh = ph + 2, kw = pw -----
+	add.u32 	%r_kh, %r_ph, 2;
+	mov.u32 	%r_kw, %r_pw;
+	sub.s32 	%r_nh, %r_sh, %r_kh;
+	sub.s32 	%r_nw, %r_sw, %r_kw;
+	shr.s32 	%r_dh, %r_nh, 1;
+	shr.s32 	%r_dw, %r_nw, 1;
+	setp.ge.s32 	%p_hv2, %r_nh, 0;
+	setp.lt.u32 	%p_tmp, %r_dh, %r_ih;
+	and.pred 	%p_hv2, %p_hv2, %p_tmp;
+	setp.ge.s32 	%p_wv2, %r_nw, 0;
+	setp.lt.u32 	%p_tmp, %r_dw, %r_iw;
+	and.pred 	%p_wv2, %p_wv2, %p_tmp;
+	and.pred 	%p_pv2, %p_hv2, %p_wv2;
+	mul.lo.u32 	%r_xoff2, %r_dh, %r_iw;
+	add.u32 	%r_xoff2, %r_xoff2, %r_dw;
+	shl.b32 	%r_xoff2, %r_xoff2, 2;
+	cvt.u64.u32 	%rd_xa2, %r_xoff2;
+	add.u64 	%rd_xa2, %rd_xa2, %rd_xbase;
+	shl.b32 	%r_tmp, %r_kh, 2;
+	add.u32 	%r_tmp, %r_tmp, %r_kw;
+	shl.b32 	%r_woff2, %r_tmp, 2;
+	cvt.u64.u32 	%rd_wa2, %r_woff2;
+	add.u64 	%rd_wa2, %rd_wa2, %rd_wbase;
+
+	// ----- Slot 3: kh = ph + 2, kw = pw + 2 -----
+	add.u32 	%r_kh, %r_ph, 2;
+	add.u32 	%r_kw, %r_pw, 2;
+	sub.s32 	%r_nh, %r_sh, %r_kh;
+	sub.s32 	%r_nw, %r_sw, %r_kw;
+	shr.s32 	%r_dh, %r_nh, 1;
+	shr.s32 	%r_dw, %r_nw, 1;
+	setp.ge.s32 	%p_hv3, %r_nh, 0;
+	setp.lt.u32 	%p_tmp, %r_dh, %r_ih;
+	and.pred 	%p_hv3, %p_hv3, %p_tmp;
+	setp.ge.s32 	%p_wv3, %r_nw, 0;
+	setp.lt.u32 	%p_tmp, %r_dw, %r_iw;
+	and.pred 	%p_wv3, %p_wv3, %p_tmp;
+	and.pred 	%p_pv3, %p_hv3, %p_wv3;
+	mul.lo.u32 	%r_xoff3, %r_dh, %r_iw;
+	add.u32 	%r_xoff3, %r_xoff3, %r_dw;
+	shl.b32 	%r_xoff3, %r_xoff3, 2;
+	cvt.u64.u32 	%rd_xa3, %r_xoff3;
+	add.u64 	%rd_xa3, %rd_xa3, %rd_xbase;
+	shl.b32 	%r_tmp, %r_kh, 2;
+	add.u32 	%r_tmp, %r_tmp, %r_kw;
+	shl.b32 	%r_woff3, %r_tmp, 2;
+	cvt.u64.u32 	%rd_wa3, %r_woff3;
+	add.u64 	%rd_wa3, %rd_wa3, %rd_wbase;
+
+	// Accumulate over input channels
+	mov.u32 	%r_in_c, 0;
+	mov.b32 	%r_acc, 0f00000000;
+LOOP:
+	@%p_pv0 ld.global.b32 	%r_x0, [%rd_xa0];
+	@%p_pv0 ld.global.b32 	%r_w0, [%rd_wa0];
+	@%p_pv0 fma.rn.f32 	%r_acc, %r_x0, %r_w0, %r_acc;
+
+	@%p_pv1 ld.global.b32 	%r_x1, [%rd_xa1];
+	@%p_pv1 ld.global.b32 	%r_w1, [%rd_wa1];
+	@%p_pv1 fma.rn.f32 	%r_acc, %r_x1, %r_w1, %r_acc;
+
+	@%p_pv2 ld.global.b32 	%r_x2, [%rd_xa2];
+	@%p_pv2 ld.global.b32 	%r_w2, [%rd_wa2];
+	@%p_pv2 fma.rn.f32 	%r_acc, %r_x2, %r_w2, %r_acc;
+
+	@%p_pv3 ld.global.b32 	%r_x3, [%rd_xa3];
+	@%p_pv3 ld.global.b32 	%r_w3, [%rd_wa3];
+	@%p_pv3 fma.rn.f32 	%r_acc, %r_x3, %r_w3, %r_acc;
+
+	add.u64 	%rd_xa0, %rd_xa0, %rd_xstride;
+	add.u64 	%rd_xa1, %rd_xa1, %rd_xstride;
+	add.u64 	%rd_xa2, %rd_xa2, %rd_xstride;
+	add.u64 	%rd_xa3, %rd_xa3, %rd_xstride;
+	add.u64 	%rd_wa0, %rd_wa0, 2048;
+	add.u64 	%rd_wa1, %rd_wa1, 2048;
+	add.u64 	%rd_wa2, %rd_wa2, 2048;
+	add.u64 	%rd_wa3, %rd_wa3, 2048;
+
+	add.u32 	%r_in_c, %r_in_c, 1;
+	setp.lt.u32 	%p_loop, %r_in_c, 32;
+	@%p_loop bra 	LOOP;
+
+	// Add conv_bias, subtract bias
+	mad.wide.u32 	%rd_cbaddr, %r_out_c, 4, %rd_cb;
+	ld.global.b32 	%r_cb, [%rd_cbaddr];
+	add.f32 	%r_acc, %r_acc, %r_cb;
+
+	mad.wide.u32 	%rd_baddr, %r_out_c, 4, %rd_b;
+	ld.global.b32 	%r_bias, [%rd_baddr];
+	sub.f32 	%r_acc, %r_acc, %r_bias;
+
+	// tanh(acc)
+	abs.ftz.f32 	%r_t0, %r_acc;
+	setp.ltu.f32 	%p_tanh_small, %r_t0, 0f3F19999A;
+	@%p_tanh_small bra 	TANH_SMALL;
+	bra.uni 	TANH_LARGE;
+
+TANH_SMALL:
+	mul.f32 	%r_t1, %r_acc, %r_acc;
+	mov.b32 	%r_t2, 0fBD563CAE;
+	mov.b32 	%r_t3, 0f3C80F082;
+	fma.rn.ftz.f32 	%r_t4, %r_t3, %r_t1, %r_t2;
+	mov.b32 	%r_t5, 0f3E085941;
+	fma.rn.ftz.f32 	%r_t6, %r_t4, %r_t1, %r_t5;
+	mov.b32 	%r_t7, 0fBEAAA9ED;
+	fma.rn.ftz.f32 	%r_t8, %r_t6, %r_t1, %r_t7;
+	mov.b32 	%r_t9, 0f00000000;
+	fma.rn.ftz.f32 	%r_t2, %r_t8, %r_t1, %r_t9;
+	fma.rn.ftz.f32 	%r_res, %r_t2, %r_acc, %r_acc;
+	bra.uni 	TANH_END;
+
+TANH_LARGE:
+	mul.f32 	%r_t1, %r_t0, 0f4038AA3B;
+	ex2.approx.ftz.f32 	%r_t2, %r_t1;
+	add.f32 	%r_t3, %r_t2, 0f3F800000;
+	rcp.approx.ftz.f32 	%r_t4, %r_t3;
+	mov.b32 	%r_t5, 0f3F800000;
+	mov.b32 	%r_t6, 0fC0000000;
+	fma.rn.ftz.f32 	%r_t7, %r_t4, %r_t6, %r_t5;
+	setp.ge.f32 	%p_tanh_sat, %r_t0, 0f41102CB4;
+	selp.f32 	%r_t8, 0f3F800000, %r_t7, %p_tanh_sat;
+	and.b32 	%r_t9, %r_acc, -2147483648;
+	or.b32 	%r_res, %r_t9, %r_t8;
+
+TANH_END:
+	mad.wide.u32 	%rd_oaddr, %r_off, 4, %rd_o;
+	st.global.b32 	[%rd_oaddr], %r_res;
+
+END:
+	ret;
+}
