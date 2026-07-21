@@ -17,25 +17,17 @@ import {
   getAgentDir,
   ModelRuntime,
   SessionManager,
-  defineTool,
 } from "@earendil-works/pi-coding-agent";
-import { Type } from "typebox";
 
+import { dumpKernelPtx, getKernelData } from "./triton_api.js";
 import {
-  dumpKernelPtx,
-  evaluateCandidate,
-  getKernelData,
-  TritonApiError,
-} from "./triton_api.js";
-
-// --- Colors ---
-
-const RESET = "\x1b[0m";
-const BLUE = "\x1b[34m";
-const GREEN = "\x1b[32m";
-const RED = "\x1b[31m";
-const GRAY = "\x1b[90m";
-const CYAN = "\x1b[36m";
+  makeSubmitPtxTool,
+  makeWorkspaceJail,
+  READ_ONLY_TOOL_NAMES,
+  SKILL_DIRS,
+  WORKSPACE_DIR,
+} from "./tool.js";
+import { BLUE, CYAN, GRAY, RED, RESET } from "./tui.js";
 
 const SYSTEM_PROMPT =
   "You are an expert GPU engineer optimizing a single Triton kernel at the " +
@@ -49,7 +41,9 @@ const SYSTEM_PROMPT =
   "the result, fix errors, and keep trying to improve the speedup while " +
   "staying correct. Only correct (passing) candidates count. When you are " +
   "satisfied that you cannot improve further, stop and summarize your best " +
-  "result.";
+  "result." +
+  "You can use your tools to read the PTX documentation, provided as a skill." +
+  "Your tools can only access data in the `agent_workspace`.";
 
 // --- Environment context ---
 
@@ -88,66 +82,6 @@ async function buildContextMessage(kernelId) {
   );
 }
 
-// --- Tool ---
-
-/** Build the single submit_ptx tool bound to a kernel id. */
-function makeSubmitPtxTool(kernelId, tracker) {
-  return defineTool({
-    name: "submit_ptx",
-    label: "Submit PTX",
-    description:
-      "Compile, verify, and benchmark a PTX candidate for the kernel. " +
-      "Returns whether it compiled, whether it is correct, its p50 latency, " +
-      "and its speedup versus the Triton baseline.",
-    parameters: Type.Object({
-      ptx: Type.String({
-        description: "The full PTX module source for the candidate.",
-      }),
-      num_threads_x: Type.Integer({
-        description: "Number of threads per block along x (required).",
-      }),
-      num_threads_y: Type.Optional(
-        Type.Integer({ description: "Number of threads per block along y (optional)." }),
-      ),
-      num_threads_z: Type.Optional(
-        Type.Integer({ description: "Number of threads per block along z (optional)." }),
-      ),
-    }),
-    execute: async (_toolCallId, params) => {
-      // The "[call]" marker is rendered from the tool_execution_start event so
-      // streaming stays in one place; here we only evaluate and report results.
-      let result;
-      try {
-        result = await evaluateCandidate(kernelId, params);
-      } catch (err) {
-        // Surface environment/transport errors back to the model as text.
-        const message =
-          err instanceof TritonApiError
-            ? `Evaluation failed (HTTP ${err.status}): ${err.message}`
-            : `Evaluation failed: ${err.message}`;
-        console.log(`${RED}[error]${RESET} ${GRAY}${message}${RESET}`);
-        return {
-          content: [{ type: "text", text: JSON.stringify({ error: message }, null, 2) }],
-          details: { error: message },
-        };
-      }
-
-      if (result.passed && result.speedup_vs_triton > tracker.bestSpeedup) {
-        tracker.bestSpeedup = result.speedup_vs_triton;
-      }
-
-      const tag = result.passed ? `${GREEN}[ok]${RESET}` : `${RED}[fail]${RESET}`;
-      const text = JSON.stringify(result, null, 2);
-      console.log(`${tag} ${GRAY}${text}${RESET}`);
-
-      return {
-        content: [{ type: "text", text }],
-        details: {},
-      };
-    },
-  });
-}
-
 // --- Agent ---
 
 async function main() {
@@ -159,11 +93,19 @@ async function main() {
   const submitPtx = makeSubmitPtxTool(kernelId, tracker);
 
   const loader = new DefaultResourceLoader({
-    cwd: process.cwd(),
+    // Run tools out of the workspace so relative paths resolve there and the
+    // read-only tools default to it; the jail below blocks anything outside it.
+    cwd: WORKSPACE_DIR,
     agentDir: getAgentDir(),
     systemPromptOverride: () => SYSTEM_PROMPT,
     // Avoid appending any APPEND_SYSTEM.md discovered from disk.
     appendSystemPromptOverride: () => [],
+    // Advertise the bundled skills (name + description) to the model. Pi appends
+    // the skills section to our custom system prompt because the read tool is
+    // enabled; the model then reads SKILL.md on demand via the read-only tools.
+    additionalSkillPaths: SKILL_DIRS,
+    // Confine the built-in read-only tools to WORKSPACE_DIR (skills live there).
+    extensionFactories: [makeWorkspaceJail()],
   });
   await loader.reload();
 
@@ -178,10 +120,11 @@ async function main() {
   });
 
   const { session } = await createAgentSession({
+    cwd: WORKSPACE_DIR,
     customTools: [submitPtx],
-    // Restrict to only our tool -- no built-in read/bash/edit, matching the
-    // single-tool design of the baseline agent.
-    tools: ["submit_ptx"],
+    // Enable submit_ptx plus the built-in read-only tools (read/ls/grep/find),
+    // which the workspace jail confines to WORKSPACE_DIR. No write/edit/bash.
+    tools: ["submit_ptx", ...READ_ONLY_TOOL_NAMES],
     // Stream reasoning too, the way the Pi TUI does (ignored by models that do
     // not support thinking). Adjust with model selection later.
     thinkingLevel: "medium",
@@ -220,11 +163,16 @@ async function main() {
       case "tool_execution_start": {
         process.stdout.write(RESET);
         const args = event.args || {};
-        const ptxLen = typeof args.ptx === "string" ? `${args.ptx.length} chars` : "?";
-        console.log(
-          `\n${BLUE}[call]${RESET} ${GRAY}submit_ptx(ptx: ${ptxLen}, ` +
-            `num_threads_x: ${args.num_threads_x})${RESET}`,
-        );
+        let summary;
+        if (event.toolName === "submit_ptx") {
+          const ptxLen = typeof args.ptx === "string" ? `${args.ptx.length} chars` : "?";
+          summary = `submit_ptx(ptx: ${ptxLen}, num_threads_x: ${args.num_threads_x})`;
+        } else {
+          // Read-only tools (read/ls/grep/find): show the most useful arg.
+          const detail = args.pattern ?? args.path ?? "";
+          summary = `${event.toolName}(${detail})`;
+        }
+        console.log(`\n${BLUE}[call]${RESET} ${GRAY}${summary}${RESET}`);
         streamMode = null;
         break;
       }
