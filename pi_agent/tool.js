@@ -37,6 +37,19 @@ export const WORKSPACE_DIR = (() => {
   return fs.realpathSync(dir);
 })();
 
+/** Filename (in WORKSPACE_DIR) where the kernel's Triton source is saved. */
+export const TRITON_SOURCE_FILE = "triton_source.py";
+
+/**
+ * Save the kernel's original Triton source into the workspace so the agent and
+ * its subagents (which do not share the parent's context) can read it. Returns
+ * the filename. Overwrites any previous run's copy.
+ */
+export function saveTritonSource(source) {
+  fs.writeFileSync(path.join(WORKSPACE_DIR, TRITON_SOURCE_FILE), source);
+  return TRITON_SOURCE_FILE;
+}
+
 /**
  * Skill directories, each containing a SKILL.md. They live INSIDE WORKSPACE_DIR
  * (copied there from their source, e.g. the `ptx_skills` submodule) so the jail

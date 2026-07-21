@@ -24,6 +24,7 @@ import {
   makeWorkspaceJail,
   READ_ONLY_TOOL_NAMES,
   SKILL_DIRS,
+  TRITON_SOURCE_FILE,
   WORKSPACE_DIR,
 } from "./tool.js";
 import { MAGENTA, RED, RESET } from "./tui.js";
@@ -34,10 +35,12 @@ const SUBAGENT_SYSTEM_PROMPT =
   "PTX compilation error. You work in the same workspace as the lead agent: " +
   "read files with read/ls/grep/find (confined to the workspace, which includes " +
   "the PTX ISA reference skill), and compile/verify/benchmark PTX candidates " +
-  "with submit_ptx. Follow the instructions you are given, use your tools to do " +
-  "the work, and finish with a single concise final message containing exactly " +
-  "the result the lead agent needs -- no filler. Your intermediate steps are " +
-  "hidden from the lead agent; only your final message is returned.";
+  "with submit_ptx. The kernel's original Triton source is saved at " +
+  `\`${TRITON_SOURCE_FILE}\` in the workspace. Follow the instructions you are ` +
+  "given, use your tools to do the work, and finish with a single concise final " +
+  "message containing exactly the result the lead agent needs -- no filler. Your " +
+  "intermediate steps are hidden from the lead agent; only your final message is " +
+  "returned.";
 
 // Cap the returned answer so a runaway subagent cannot flood the parent context.
 const MAX_ANSWER_BYTES = 200 * 1024;

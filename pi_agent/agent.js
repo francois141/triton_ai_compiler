@@ -25,7 +25,9 @@ import {
   makeSubmitPtxTool,
   makeWorkspaceJail,
   READ_ONLY_TOOL_NAMES,
+  saveTritonSource,
   SKILL_DIRS,
+  TRITON_SOURCE_FILE,
   WORKSPACE_DIR,
 } from "./tool.js";
 import { makeSpawnSubagentTool } from "./subagent.js";
@@ -64,6 +66,10 @@ async function buildContextMessage(kernelId) {
     throw new Error(`Triton did not produce reference PTX for ${kernelId}.`);
   }
 
+  // Save the Triton source in the workspace so subagents (which don't share this
+  // context) can read it, and point the model at it.
+  saveTritonSource(data.source);
+
   const system = data.system;
   const signature = data.ptx_signature
     .map((param) => `  ${param.name}: ${param.ptx_type}`)
@@ -79,7 +85,7 @@ async function buildContextMessage(kernelId) {
     `(reference launch uses num_threads_x = ${defaultThreadsX})\n\n` +
     "PTX parameter signature:\n" +
     `${signature}\n\n` +
-    "Triton source:\n" +
+    `Triton source (also saved to \`${TRITON_SOURCE_FILE}\` in your workspace):\n` +
     "```python\n" +
     `${data.source}\n` +
     "```\n\n" +

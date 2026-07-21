@@ -2,4 +2,5 @@ node_modules
 agent_workspace/ptx_skill
 agent_workspace/kernel-*.ptx
 agent_workspace/kernel-result-*.json
+agent_workspace/triton_source.py
 sessions/*
