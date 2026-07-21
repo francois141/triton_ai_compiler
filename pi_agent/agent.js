@@ -27,7 +27,7 @@ import {
   SKILL_DIRS,
   WORKSPACE_DIR,
 } from "./tool.js";
-import { BLUE, CYAN, GRAY, RED, RESET } from "./tui.js";
+import { BLUE, CYAN, GRAY, MAGENTA, RED, RESET } from "./tui.js";
 
 const SYSTEM_PROMPT =
   "You are an expert GPU engineer optimizing a single Triton kernel at the " +
@@ -119,6 +119,13 @@ async function main() {
     authPath: path.join(getAgentDir(), "auth.json"),
   });
 
+  // Persist the run as an append-only JSONL session tree so it can be analyzed
+  // later. Stored under pi_agent/sessions/ (gitignore it to keep runs local).
+  // Inspect with `pi --session <file>` or by reading the JSONL directly.
+  const sessionsDir = fileURLToPath(new URL("./sessions", import.meta.url));
+  const sessionManager = SessionManager.create(WORKSPACE_DIR, sessionsDir);
+  console.log(`${MAGENTA}Session log: ${sessionManager.getSessionFile()}${RESET}`);
+
   const { session } = await createAgentSession({
     cwd: WORKSPACE_DIR,
     customTools: [submitPtx],
@@ -130,7 +137,7 @@ async function main() {
     thinkingLevel: "medium",
     modelRuntime,
     resourceLoader: loader,
-    sessionManager: SessionManager.inMemory(),
+    sessionManager,
   });
 
   // TUI-style streaming: render reasoning (grey) and answer text (cyan) live,
@@ -215,6 +222,7 @@ async function main() {
   const best =
     tracker.bestSpeedup > 0 ? tracker.bestSpeedup.toFixed(3) + "x" : "none";
   console.log(`\n${GRAY}Done. Best passing speedup vs Triton: ${best}.${RESET}`);
+  console.log(`${MAGENTA}Session saved to: ${sessionManager.getSessionFile()}${RESET}`);
   if (lastStopReason === "length") {
     console.log(
       `${RED}Note:${RESET} ${GRAY}the run ended on a truncated turn (output-token ` +
