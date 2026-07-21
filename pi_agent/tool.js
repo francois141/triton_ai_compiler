@@ -2,7 +2,9 @@
  * Tools for the Pi agent and the workspace read-only jail.
  *
  * Exposes:
- *   - `makeSubmitPtxTool`  -- the custom submit_ptx tool (compile/verify/benchmark)
+ *   - `makeSubmitPtxTool`  -- the custom submit_ptx tool (compile/verify/benchmark),
+ *                             which also persists new record kernels to BEST_KERNEL_DIR
+ *   - `BEST_KERNEL_DIR`    -- where the top PTX per kernel is accumulated
  *   - `READ_ONLY_TOOL_NAMES` -- built-in tools the agent is allowed to enable
  *   - `WORKSPACE_DIR`      -- the folder the read-only tools are confined to
  *   - `makeWorkspaceJail`  -- an inline extension that blocks any read-only tool
@@ -20,7 +22,7 @@ import { defineTool } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
 import { evaluateCandidate, TritonApiError } from "./triton_api.js";
-import { GRAY, GREEN, RED, RESET } from "./tui.js";
+import { GRAY, GREEN, MAGENTA, RED, RESET } from "./tui.js";
 
 // --- Workspace ---
 
@@ -104,10 +106,60 @@ export function makeWorkspaceJail() {
   };
 }
 
+// --- Best-kernel persistence ---
+
+/**
+ * Directory where the top PTX per kernel is accumulated, indexed by kernel id:
+ *   best_kernel/<kernelId>/<speedup>-<sessionId>.ptx   (speedup as 5 decimals)
+ * A candidate is saved only when its speedup strictly beats every .ptx already
+ * saved for that kernel -- an append-only history of record-beaters. The
+ * session id in the filename links each result back to its saved session.
+ */
+export const BEST_KERNEL_DIR = fileURLToPath(new URL("./best_kernel", import.meta.url));
+
+/** Highest speedup encoded in the filenames already saved for a kernel, or 0. */
+function bestSavedSpeedup(kernelDir) {
+  let best = 0;
+  let entries;
+  try {
+    entries = fs.readdirSync(kernelDir);
+  } catch {
+    return best; // dir does not exist yet -> nothing saved
+  }
+  for (const name of entries) {
+    if (!name.endsWith(".ptx")) continue;
+    // Filename is "<speedup>-<sessionId>.ptx"; the speedup uses a dot and the
+    // session id owns the first hyphen, so parseFloat of the leading token is it.
+    const speedup = parseFloat(name);
+    if (Number.isFinite(speedup) && speedup > best) best = speedup;
+  }
+  return best;
+}
+
+/**
+ * Persist `ptx` as a new best for `kernelId` iff its (5-decimal) speedup beats
+ * every saved candidate. Returns the written path, or null if not saved.
+ * Best-effort: filesystem errors are logged but never break the tool.
+ */
+function saveBestKernel(kernelId, ptx, speedup, sessionId) {
+  const kernelDir = path.join(BEST_KERNEL_DIR, kernelId);
+  const rounded = Number(speedup.toFixed(5));
+  if (rounded <= bestSavedSpeedup(kernelDir)) return null;
+  const file = path.join(kernelDir, `${speedup.toFixed(5)}-${sessionId}.ptx`);
+  try {
+    fs.mkdirSync(kernelDir, { recursive: true });
+    fs.writeFileSync(file, ptx);
+    return file;
+  } catch (err) {
+    console.log(`${RED}[warn]${RESET} ${GRAY}Could not save best kernel: ${err.message}${RESET}`);
+    return null;
+  }
+}
+
 // --- submit_ptx tool ---
 
-/** Build the single submit_ptx tool bound to a kernel id. */
-export function makeSubmitPtxTool(kernelId, tracker) {
+/** Build the single submit_ptx tool bound to a kernel id and session id. */
+export function makeSubmitPtxTool(kernelId, tracker, sessionId) {
   return defineTool({
     name: "submit_ptx",
     label: "Submit PTX",
@@ -150,6 +202,20 @@ export function makeSubmitPtxTool(kernelId, tracker) {
 
       if (result.passed && result.speedup_vs_triton > tracker.bestSpeedup) {
         tracker.bestSpeedup = result.speedup_vs_triton;
+      }
+
+      // Persist the candidate as a new best only when it beats every kernel
+      // already saved for this kernel id (accumulate a history of records).
+      if (result.passed) {
+        const saved = saveBestKernel(
+          kernelId,
+          params.ptx,
+          result.speedup_vs_triton,
+          sessionId,
+        );
+        if (saved) {
+          console.log(`${MAGENTA}[best]${RESET} ${GRAY}saved ${saved}${RESET}`);
+        }
       }
 
       const tag = result.passed ? `${GREEN}[ok]${RESET}` : `${RED}[fail]${RESET}`;

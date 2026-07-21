@@ -90,7 +90,21 @@ async function main() {
 
   const contextMessage = await buildContextMessage(kernelId);
   const tracker = { bestSpeedup: 0 };
-  const submitPtx = makeSubmitPtxTool(kernelId, tracker);
+
+  // Persist the run as an append-only JSONL session tree so it can be analyzed
+  // later. Stored under pi_agent/sessions/ (gitignore it to keep runs local).
+  // Inspect with `pi --session <file>` or by reading the JSONL directly.
+  const sessionsDir = fileURLToPath(new URL("./sessions", import.meta.url));
+  const sessionManager = SessionManager.create(WORKSPACE_DIR, sessionsDir);
+  console.log(`${MAGENTA}Session log: ${sessionManager.getSessionFile()}${RESET}`);
+
+  // The session id is embedded in saved best-kernel filenames so each record
+  // links back to this run's session.
+  const submitPtx = makeSubmitPtxTool(
+    kernelId,
+    tracker,
+    sessionManager.getSessionId(),
+  );
 
   const loader = new DefaultResourceLoader({
     // Run tools out of the workspace so relative paths resolve there and the
@@ -118,13 +132,6 @@ async function main() {
     modelsPath,
     authPath: path.join(getAgentDir(), "auth.json"),
   });
-
-  // Persist the run as an append-only JSONL session tree so it can be analyzed
-  // later. Stored under pi_agent/sessions/ (gitignore it to keep runs local).
-  // Inspect with `pi --session <file>` or by reading the JSONL directly.
-  const sessionsDir = fileURLToPath(new URL("./sessions", import.meta.url));
-  const sessionManager = SessionManager.create(WORKSPACE_DIR, sessionsDir);
-  console.log(`${MAGENTA}Session log: ${sessionManager.getSessionFile()}${RESET}`);
 
   const { session } = await createAgentSession({
     cwd: WORKSPACE_DIR,
