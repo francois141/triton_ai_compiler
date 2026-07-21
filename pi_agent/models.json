@@ -5,9 +5,9 @@
       "api": "openai-completions",
       "apiKey": "$EPFL_API_KEY",
       "models": [
-        { "id": "moonshotai/Kimi-K2.7-Code", "maxTokens": 131072 },
-        { "id": "swiss-ai/Apertus-70B-Instruct-2509", "maxTokens": 131072 },
-        { "id": "Qwen/Qwen3.6-35B-A3B", "maxTokens": 131072 }
+        { "id": "moonshotai/Kimi-K2.7-Code", "contextWindow": 262144, "maxTokens": 32768 },
+        { "id": "swiss-ai/Apertus-70B-Instruct-2509", "contextWindow": 65536, "maxTokens": 16384 },
+        { "id": "Qwen/Qwen3.6-35B-A3B", "contextWindow": 262144, "maxTokens": 32768 }
       ]
     }
   }
