@@ -1,0 +1,281 @@
+.version 9.3
+.target sm_80
+.address_size 64
+
+.visible .entry kernel(
+    .param .u64 kernel_param_0,
+    .param .u64 kernel_param_1,
+    .param .u64 kernel_param_2,
+    .param .u64 kernel_param_3,
+    .param .u32 kernel_param_4,
+    .param .u32 kernel_param_5,
+    .param .u32 kernel_param_6,
+    .param .u32 kernel_param_7,
+    .param .u32 kernel_param_8,
+    .param .u32 kernel_param_9,
+    .param .u32 kernel_param_10,
+    .param .u32 kernel_param_11,
+    .param .u32 kernel_param_12,
+    .param .u32 kernel_param_13,
+    .param .u32 kernel_param_14,
+    .param .u32 kernel_param_15,
+    .param .u64 kernel_param_16,
+    .param .u64 kernel_param_17
+)
+{
+    .shared .align 16 .f32 q_s[64];
+    .shared .f32 s_max[4];
+    .shared .f32 s_sum[4];
+    .shared .align 16 .f32 w_s[128];
+
+    .reg .u64 %q_ptr, %k_ptr, %v_ptr, %o_ptr;
+    .reg .u64 %q_base, %k_base, %v_base, %o_base;
+    .reg .u64 %addr64, %tmp64, %q_s_base, %q_s_ptr;
+    .reg .u64 %kaddr, %vaddr, %w_s_base;
+
+    .reg .u32 %tidx, %lane, %warp, %row, %head, %batch, %j;
+    .reg .u32 %sqb, %sqh, %sqs, %skb, %skh, %sks, %svb, %svh, %svs, %sob, %soh, %sos;
+    .reg .u32 %off, %tmp0, %jrow;
+    .reg .u32 %seq_len, %head_dim, %hd_bytes;
+
+    .reg .pred %p_qload, %p_lane0, %p_loop, %p_mask, %p_active, %p_dvalid;
+
+    .reg .f32 %score, %score0, %score1, %maxv, %sumv, %e, %w, %scale_f, %inv_sum;
+    .reg .f32 %q0, %q1, %q2, %q3;
+    .reg .f32 %k0, %k1, %k2, %k3;
+    .reg .f32 %out_val, %wj, %vv;
+    .reg .f32 %rsh, %m0, %m1, %m2, %m3;
+
+    // indices
+    mov.u32 %tidx, %tid.x;
+    and.b32 %lane, %tidx, 31;
+    shr.u32 %warp, %tidx, 5;
+    mov.u32 %row, %ctaid.x;
+    mov.u32 %head, %ctaid.y;
+    mov.u32 %batch, %ctaid.z;
+    mov.u32 %j, %tidx;
+    mov.u32 %seq_len, %nctaid.x;
+
+    // load params
+    ld.param.u64 %q_ptr, [kernel_param_0];
+    ld.param.u64 %k_ptr, [kernel_param_1];
+    ld.param.u64 %v_ptr, [kernel_param_2];
+    ld.param.u64 %o_ptr, [kernel_param_3];
+    ld.param.u32 %sqb, [kernel_param_4];
+    ld.param.u32 %sqh, [kernel_param_5];
+    ld.param.u32 %sqs, [kernel_param_6];
+    ld.param.u32 %skb, [kernel_param_7];
+    ld.param.u32 %skh, [kernel_param_8];
+    ld.param.u32 %sks, [kernel_param_9];
+    ld.param.u32 %svb, [kernel_param_10];
+    ld.param.u32 %svh, [kernel_param_11];
+    ld.param.u32 %svs, [kernel_param_12];
+    ld.param.u32 %sob, [kernel_param_13];
+    ld.param.u32 %soh, [kernel_param_14];
+    ld.param.u32 %sos, [kernel_param_15];
+
+    mov.u32 %head_dim, %sqs;
+    shl.b32 %hd_bytes, %head_dim, 2;
+
+    // q_base = q_ptr + (batch*sqb + head*sqh + row*sqs) * 4
+    mov.u32 %tmp0, 0;
+    mad.lo.s32 %tmp0, %batch, %sqb, %tmp0;
+    mad.lo.s32 %tmp0, %head, %sqh, %tmp0;
+    mad.lo.s32 %tmp0, %row, %sqs, %tmp0;
+    cvt.u64.s32 %addr64, %tmp0;
+    shl.b64 %addr64, %addr64, 2;
+    add.u64 %q_base, %q_ptr, %addr64;
+
+    // k_base = k_ptr + (batch*skb + head*skh) * 4
+    mov.u32 %tmp0, 0;
+    mad.lo.s32 %tmp0, %batch, %skb, %tmp0;
+    mad.lo.s32 %tmp0, %head, %skh, %tmp0;
+    cvt.u64.s32 %addr64, %tmp0;
+    shl.b64 %addr64, %addr64, 2;
+    add.u64 %k_base, %k_ptr, %addr64;
+
+    // v_base = v_ptr + (batch*svb + head*svh) * 4
+    mov.u32 %tmp0, 0;
+    mad.lo.s32 %tmp0, %batch, %svb, %tmp0;
+    mad.lo.s32 %tmp0, %head, %svh, %tmp0;
+    cvt.u64.s32 %addr64, %tmp0;
+    shl.b64 %addr64, %addr64, 2;
+    add.u64 %v_base, %v_ptr, %addr64;
+
+    // o_base = o_ptr + (batch*sob + head*soh + row*sos) * 4
+    mov.u32 %tmp0, 0;
+    mad.lo.s32 %tmp0, %batch, %sob, %tmp0;
+    mad.lo.s32 %tmp0, %head, %soh, %tmp0;
+    mad.lo.s32 %tmp0, %row, %sos, %tmp0;
+    cvt.u64.s32 %addr64, %tmp0;
+    shl.b64 %addr64, %addr64, 2;
+    add.u64 %o_base, %o_ptr, %addr64;
+
+    // load q vector into shared memory
+    mov.u64 %q_s_base, q_s;
+    mov.u64 %w_s_base, w_s;
+    setp.ge.u32 %p_qload, %tidx, %head_dim;
+    @%p_qload bra L_qskip;
+    shl.b32 %off, %tidx, 2;
+    cvt.u64.u32 %addr64, %off;
+    add.u64 %tmp64, %q_base, %addr64;
+    ld.global.f32 %q0, [%tmp64];
+    add.u64 %tmp64, %q_s_base, %addr64;
+    st.shared.f32 [%tmp64], %q0;
+L_qskip:
+    bar.sync 0;
+
+    // score = dot(q, k[j,:]) * (HEAD_DIM^-0.5)
+    setp.lt.u32 %p_active, %j, %seq_len;
+    @%p_active bra L_score_active;
+    mov.b32 %score, 0xFF800000;
+    bra L_score_done;
+L_score_active:
+    mov.f32 %score0, 0f00000000;
+    mov.f32 %score1, 0f00000000;
+    mov.u64 %q_s_ptr, %q_s_base;
+    mov.u32 %off, 0;
+L_score_vec:
+    ld.shared.v4.f32 { %q0, %q1, %q2, %q3 }, [%q_s_ptr];
+    shr.u32 %tmp0, %off, 2;
+    mad.lo.s32 %tmp0, %j, %sks, %tmp0;
+    cvt.u64.s32 %kaddr, %tmp0;
+    shl.b64 %kaddr, %kaddr, 2;
+    add.u64 %kaddr, %kaddr, %k_base;
+    ld.global.v4.f32 { %k0, %k1, %k2, %k3 }, [%kaddr];
+    fma.rn.f32 %score0, %q0, %k0, %score0;
+    fma.rn.f32 %score0, %q1, %k1, %score0;
+    fma.rn.f32 %score0, %q2, %k2, %score0;
+    fma.rn.f32 %score0, %q3, %k3, %score0;
+    add.u64 %q_s_ptr, %q_s_ptr, 16;
+    add.u32 %off, %off, 16;
+
+    ld.shared.v4.f32 { %q0, %q1, %q2, %q3 }, [%q_s_ptr];
+    shr.u32 %tmp0, %off, 2;
+    mad.lo.s32 %tmp0, %j, %sks, %tmp0;
+    cvt.u64.s32 %kaddr, %tmp0;
+    shl.b64 %kaddr, %kaddr, 2;
+    add.u64 %kaddr, %kaddr, %k_base;
+    ld.global.v4.f32 { %k0, %k1, %k2, %k3 }, [%kaddr];
+    fma.rn.f32 %score1, %q0, %k0, %score1;
+    fma.rn.f32 %score1, %q1, %k1, %score1;
+    fma.rn.f32 %score1, %q2, %k2, %score1;
+    fma.rn.f32 %score1, %q3, %k3, %score1;
+    add.u64 %q_s_ptr, %q_s_ptr, 16;
+    add.u32 %off, %off, 16;
+
+    setp.lt.u32 %p_loop, %off, %hd_bytes;
+    @%p_loop bra L_score_vec;
+    add.f32 %score, %score0, %score1;
+L_score_done:
+
+    cvt.rn.f32.u32 %scale_f, %head_dim;
+    rsqrt.approx.ftz.f32 %scale_f, %scale_f;
+    mul.f32 %score, %score, %scale_f;
+
+    // causal mask
+    setp.gt.u32 %p_mask, %j, %row;
+    @%p_mask mov.b32 %score, 0xFF800000;
+
+    // softmax max reduction
+    mov.f32 %maxv, %score;
+    shfl.sync.bfly.b32 %rsh, %maxv, 16, 0x1f, 0xffffffff;
+    max.f32 %maxv, %maxv, %rsh;
+    shfl.sync.bfly.b32 %rsh, %maxv, 8, 0x1f, 0xffffffff;
+    max.f32 %maxv, %maxv, %rsh;
+    shfl.sync.bfly.b32 %rsh, %maxv, 4, 0x1f, 0xffffffff;
+    max.f32 %maxv, %maxv, %rsh;
+    shfl.sync.bfly.b32 %rsh, %maxv, 2, 0x1f, 0xffffffff;
+    max.f32 %maxv, %maxv, %rsh;
+    shfl.sync.bfly.b32 %rsh, %maxv, 1, 0x1f, 0xffffffff;
+    max.f32 %maxv, %maxv, %rsh;
+
+    setp.eq.u32 %p_lane0, %lane, 0;
+    shl.b32 %tmp0, %warp, 2;
+    cvt.u64.u32 %addr64, %tmp0;
+    mov.u64 %tmp64, s_max;
+    add.u64 %tmp64, %tmp64, %addr64;
+    @%p_lane0 st.shared.f32 [%tmp64], %maxv;
+    bar.sync 0;
+
+    ld.shared.f32 %m0, [s_max];
+    ld.shared.f32 %m1, [s_max+4];
+    ld.shared.f32 %m2, [s_max+8];
+    ld.shared.f32 %m3, [s_max+12];
+    max.f32 %maxv, %m0, %m1;
+    max.f32 %maxv, %maxv, %m2;
+    max.f32 %maxv, %maxv, %m3;
+
+    // exp(score - max)
+    sub.f32 %e, %score, %maxv;
+    mul.f32 %e, %e, 0f3FB8AA3B;
+    ex2.approx.ftz.f32 %e, %e;
+
+    // softmax sum reduction
+    mov.f32 %sumv, %e;
+    shfl.sync.bfly.b32 %rsh, %sumv, 16, 0x1f, 0xffffffff;
+    add.f32 %sumv, %sumv, %rsh;
+    shfl.sync.bfly.b32 %rsh, %sumv, 8, 0x1f, 0xffffffff;
+    add.f32 %sumv, %sumv, %rsh;
+    shfl.sync.bfly.b32 %rsh, %sumv, 4, 0x1f, 0xffffffff;
+    add.f32 %sumv, %sumv, %rsh;
+    shfl.sync.bfly.b32 %rsh, %sumv, 2, 0x1f, 0xffffffff;
+    add.f32 %sumv, %sumv, %rsh;
+    shfl.sync.bfly.b32 %rsh, %sumv, 1, 0x1f, 0xffffffff;
+    add.f32 %sumv, %sumv, %rsh;
+
+    mov.u64 %tmp64, s_sum;
+    add.u64 %tmp64, %tmp64, %addr64;
+    @%p_lane0 st.shared.f32 [%tmp64], %sumv;
+    bar.sync 0;
+
+    ld.shared.f32 %m0, [s_sum];
+    ld.shared.f32 %m1, [s_sum+4];
+    ld.shared.f32 %m2, [s_sum+8];
+    ld.shared.f32 %m3, [s_sum+12];
+    add.f32 %sumv, %m0, %m1;
+    add.f32 %sumv, %sumv, %m2;
+    add.f32 %sumv, %sumv, %m3;
+
+    // weight
+    rcp.approx.ftz.f32 %inv_sum, %sumv;
+    mul.f32 %w, %e, %inv_sum;
+
+    // store weight to shared
+    shl.b32 %off, %j, 2;
+    cvt.u64.u32 %addr64, %off;
+    add.u64 %tmp64, %w_s_base, %addr64;
+    st.shared.f32 [%tmp64], %w;
+    bar.sync 0;
+
+    // output = sum_j w_j * v[j, d] for this thread's output dimension d = tidx
+    setp.ge.u32 %p_dvalid, %tidx, %head_dim;
+    @%p_dvalid bra L_output_skip;
+
+    mov.f32 %out_val, 0f00000000;
+    mov.u32 %jrow, 0;
+L_vrow:
+    shl.b32 %tmp0, %jrow, 2;
+    cvt.u64.u32 %addr64, %tmp0;
+    add.u64 %addr64, %w_s_base, %addr64;
+    ld.shared.f32 %wj, [%addr64];
+    mad.lo.s32 %tmp0, %jrow, %svs, %tidx;
+    cvt.u64.s32 %vaddr, %tmp0;
+    shl.b64 %vaddr, %vaddr, 2;
+    add.u64 %vaddr, %vaddr, %v_base;
+    ld.global.f32 %vv, [%vaddr];
+    fma.rn.f32 %out_val, %wj, %vv, %out_val;
+    add.u32 %jrow, %jrow, 1;
+    setp.lt.u32 %p_loop, %jrow, %seq_len;
+    @%p_loop bra L_vrow;
+
+    shl.b32 %tmp0, %tidx, 2;
+    cvt.u64.u32 %addr64, %tmp0;
+    add.u64 %tmp64, %o_base, %addr64;
+    st.global.f32 [%tmp64], %out_val;
+
+L_output_skip:
+
+L_end:
+    ret;
+}

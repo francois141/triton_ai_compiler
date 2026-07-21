@@ -1,0 +1,149 @@
+.version 9.3
+.target sm_80
+.address_size 64
+
+.visible .entry kernel(
+    .param .u64 kernel_param_0,
+    .param .u64 kernel_param_1,
+    .param .u64 kernel_param_2,
+    .param .u32 kernel_param_3,
+    .param .u32 kernel_param_4,
+    .param .u32 kernel_param_5,
+    .param .u32 kernel_param_6,
+    .param .u64 kernel_param_7,
+    .param .u64 kernel_param_8
+)
+{
+    .reg .u64 %rdA, %rdB, %rdC;
+    .reg .u32 %stride_am, %stride_bk, %stride_cm, %k_dim;
+    .reg .u32 %pid_m, %pid_n, %thread_idx, %warp_idx, %warp_m, %warp_n;
+    .reg .u32 %warp_row, %warp_col;
+    .reg .u32 %num_k, %k_iter, %k_offset;
+    .reg .u32 %m_idx, %n_idx, %tile_row, %tile_col;
+    .reg .u64 %baseA_tile, %baseB_tile, %baseC_tile, %baseC_tile_col;
+    .reg .u64 %a_addr, %b_addr;
+    .reg .u64 %row_off64, %col_off64, %k_row_byte, %k_byte, %tmp64;
+    .reg .u32 %tmp0, %tmp1, %kg1_b;
+    .reg .b32 %a<8>, %b<8>;
+    .reg .f32 %acc<8>;
+    .reg .f16x2 %c0, %c1, %c2, %c3;
+    .reg .f32 %fzero;
+    .reg .pred %p0, %p1, %p2;
+
+    ld.param.u64 %rdA, [kernel_param_0];
+    ld.param.u64 %rdB, [kernel_param_1];
+    ld.param.u64 %rdC, [kernel_param_2];
+    ld.param.u32 %stride_am, [kernel_param_3];
+    ld.param.u32 %stride_bk, [kernel_param_4];
+    ld.param.u32 %stride_cm, [kernel_param_5];
+    ld.param.u32 %k_dim, [kernel_param_6];
+
+    mov.u32 %pid_m, %ctaid.x;
+    mov.u32 %pid_n, %ctaid.y;
+    mov.u32 %thread_idx, %tid.x;
+
+    shr.u32 %warp_idx, %thread_idx, 5;
+    shr.u32 %warp_m, %warp_idx, 1;
+    and.b32 %warp_n, %warp_idx, 1;
+
+    shl.b32 %tmp0, %pid_m, 7;
+    shl.b32 %tmp1, %warp_m, 6;
+    add.u32 %warp_row, %tmp0, %tmp1;
+
+    shl.b32 %tmp0, %pid_n, 7;
+    shl.b32 %tmp1, %warp_n, 6;
+    add.u32 %warp_col, %tmp0, %tmp1;
+
+    add.u32 %tmp0, %k_dim, 31;
+    shr.u32 %num_k, %tmp0, 5;
+
+    mov.f32 %fzero, 0f00000000;
+
+    shl.b32 %kg1_b, %stride_bk, 5;
+
+    mov.u32 %m_idx, 0;
+L_m_loop:
+    setp.ge.u32 %p0, %m_idx, 4;
+    @%p0 bra L_m_done;
+
+    shl.b32 %tmp0, %m_idx, 4;
+    add.u32 %tile_row, %warp_row, %tmp0;
+
+    mul.wide.u32 %row_off64, %tile_row, %stride_am;
+    add.u64 %baseA_tile, %rdA, %row_off64;
+    add.u64 %baseA_tile, %baseA_tile, %row_off64;
+
+    mul.wide.u32 %row_off64, %tile_row, %stride_cm;
+    add.u64 %baseC_tile, %rdC, %row_off64;
+    add.u64 %baseC_tile, %baseC_tile, %row_off64;
+
+    mov.u32 %n_idx, 0;
+L_n_loop:
+    setp.ge.u32 %p1, %n_idx, 4;
+    @%p1 bra L_n_done;
+
+    shl.b32 %tmp0, %n_idx, 4;
+    add.u32 %tile_col, %warp_col, %tmp0;
+
+    mul.wide.u32 %col_off64, %tile_col, 2;
+    add.u64 %baseB_tile, %rdB, %col_off64;
+    add.u64 %baseC_tile_col, %baseC_tile, %col_off64;
+
+    mov.f32 %acc0, %fzero;
+    mov.f32 %acc1, %fzero;
+    mov.f32 %acc2, %fzero;
+    mov.f32 %acc3, %fzero;
+    mov.f32 %acc4, %fzero;
+    mov.f32 %acc5, %fzero;
+    mov.f32 %acc6, %fzero;
+    mov.f32 %acc7, %fzero;
+
+    mov.u32 %k_iter, 0;
+L_k_loop:
+    setp.ge.u32 %p2, %k_iter, %num_k;
+    @%p2 bra L_k_done;
+
+    shl.b32 %k_offset, %k_iter, 5;
+
+    shl.b32 %tmp0, %k_offset, 1;
+    cvt.u64.u32 %k_byte, %tmp0;
+    add.u64 %a_addr, %baseA_tile, %k_byte;
+
+    mul.lo.u32 %tmp0, %k_offset, %stride_bk;
+    shl.b32 %tmp0, %tmp0, 1;
+    cvt.u64.u32 %k_row_byte, %tmp0;
+    add.u64 %b_addr, %baseB_tile, %k_row_byte;
+
+    wmma.load.a.sync.aligned.m16n16k16.global.row.f16 {%a0,%a1,%a2,%a3,%a4,%a5,%a6,%a7}, [%a_addr], %stride_am;
+    wmma.load.b.sync.aligned.m16n16k16.global.row.f16 {%b0,%b1,%b2,%b3,%b4,%b5,%b6,%b7}, [%b_addr], %stride_bk;
+    wmma.mma.sync.aligned.row.row.m16n16k16.f32.f32 {%acc0,%acc1,%acc2,%acc3,%acc4,%acc5,%acc6,%acc7}, {%a0,%a1,%a2,%a3,%a4,%a5,%a6,%a7}, {%b0,%b1,%b2,%b3,%b4,%b5,%b6,%b7}, {%acc0,%acc1,%acc2,%acc3,%acc4,%acc5,%acc6,%acc7};
+
+    add.u64 %a_addr, %a_addr, 32;
+    cvt.u64.u32 %tmp64, %kg1_b;
+    add.u64 %b_addr, %b_addr, %tmp64;
+
+    wmma.load.a.sync.aligned.m16n16k16.global.row.f16 {%a0,%a1,%a2,%a3,%a4,%a5,%a6,%a7}, [%a_addr], %stride_am;
+    wmma.load.b.sync.aligned.m16n16k16.global.row.f16 {%b0,%b1,%b2,%b3,%b4,%b5,%b6,%b7}, [%b_addr], %stride_bk;
+    wmma.mma.sync.aligned.row.row.m16n16k16.f32.f32 {%acc0,%acc1,%acc2,%acc3,%acc4,%acc5,%acc6,%acc7}, {%a0,%a1,%a2,%a3,%a4,%a5,%a6,%a7}, {%b0,%b1,%b2,%b3,%b4,%b5,%b6,%b7}, {%acc0,%acc1,%acc2,%acc3,%acc4,%acc5,%acc6,%acc7};
+
+    add.u32 %k_iter, %k_iter, 1;
+    bra L_k_loop;
+L_k_done:
+
+    cvt.rn.f16x2.f32 %c0, %acc1, %acc0;
+    cvt.rn.f16x2.f32 %c1, %acc3, %acc2;
+    cvt.rn.f16x2.f32 %c2, %acc5, %acc4;
+    cvt.rn.f16x2.f32 %c3, %acc7, %acc6;
+
+    wmma.store.d.sync.aligned.m16n16k16.global.row.f16 [%baseC_tile_col], {%c0,%c1,%c2,%c3}, %stride_cm;
+
+    add.u32 %n_idx, %n_idx, 1;
+    bra L_n_loop;
+L_n_done:
+
+    add.u32 %m_idx, %m_idx, 1;
+    bra L_m_loop;
+L_m_done:
+
+    ret;
+}

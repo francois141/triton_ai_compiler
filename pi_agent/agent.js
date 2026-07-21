@@ -89,10 +89,17 @@ function constexprValuesBlock(data) {
       : `- ${param.name}: unavailable from operator constexpr_values`,
   );
 
+  // It seems we have a bug: the evaluator uses different values.
+  // return (
+  //   "Operator constexpr values (fixed at compile time; folded into the " +
+  //   "kernel and absent from the signature). Use these exact values when " +
+  //   "writing indexing logic:\n" +
+  //   lines.join("\n")
+  // );
+
   return (
     "Operator constexpr values (fixed at compile time; folded into the " +
-    "kernel and absent from the signature). Use these exact values when " +
-    "writing indexing logic:\n" +
+    "kernel and absent from the signature). Those values may change, only assume they are multiple of 32 \n" +
     lines.join("\n")
   );
 }
