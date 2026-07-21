@@ -11,3 +11,17 @@ Example: from this folder
 ```sh
 cp -r ../skills/ptx_skills/ptx_skill agent_workspace/ 
 ```
+
+## Usage
+
+Optimize a single kernel:
+
+```sh
+node main.js MaxPool2dWithIndicesKernel
+```
+
+Optimize every available kernel sequentially (one fresh agent per kernel):
+
+```sh
+node main.js
+```

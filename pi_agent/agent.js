@@ -1,8 +1,8 @@
 /**
  * Minimal Pi-SDK agent that optimizes a single Triton kernel at the PTX level.
  *
- * Usage:
- *     node agent.js <KernelId>            (default: AddKernel)
+ * This module exposes `runAgentOnKernel(kernelId)`; the CLI entry point that
+ * drives it (single kernel or all kernels in a loop) lives in main.js.
  *
  * Environment variables:
  *     TRITON_PTX_URL   Base URL of the Triton PTX server (see triton_api.js).
@@ -99,8 +99,13 @@ async function buildContextMessage(kernelId) {
 
 // --- Agent ---
 
-async function main() {
-  const kernelId = process.argv[2] || "AddKernel";
+/**
+ * Run the optimization agent on a single kernel end-to-end.
+ *
+ * @param {string} kernelId  Identifier of the kernel to optimize.
+ * @returns {Promise<number>} The best passing speedup vs Triton (0 if none).
+ */
+export async function runAgentOnKernel(kernelId) {
   console.log(`Optimizing kernel ${JSON.stringify(kernelId)} with the Pi SDK`);
 
   // Clear kernel-<id>.ptx / kernel-result-<id>.json from any previous run so
@@ -309,9 +314,6 @@ async function main() {
         `limit), not because the model chose to stop.${RESET}`,
     );
   }
-}
 
-main().catch((err) => {
-  console.error(`${RED}Fatal:${RESET} ${err.stack || err.message}`);
-  process.exitCode = 1;
-});
+  return tracker.bestSpeedup;
+}

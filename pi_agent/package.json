@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "start": "node agent.js"
+    "start": "node main.js"
   },
   "dependencies": {
     "@earendil-works/pi-coding-agent": "^0.80.10",
