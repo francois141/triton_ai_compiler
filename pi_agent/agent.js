@@ -50,9 +50,9 @@ const SYSTEM_PROMPT =
   "Your tools can only access data in the `agent_workspace`.\n\n" +
   "You can also call spawn_subagent to delegate a focused task to an isolated " +
   "subagent that has the same tools but a fresh, separate context. Use it to " +
-  "keep large intermediate work out of your own context -- for example, " +
-  "searching the PTX documentation for a specific answer, or debugging a " +
-  "compilation error -- since only the subagent's final message is returned to " +
+  "keep intermediate work out of your own context -- for example, " +
+  "searching the PTX documentation for a specific answer, debugging a " +
+  "compilation error, or testing an hypothesis -- since only the subagent's final message is returned to " +
   "you. Give it complete, self-contained instructions, including exactly what " +
   "you want it to report back.";
 

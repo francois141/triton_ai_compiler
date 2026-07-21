@@ -289,7 +289,7 @@ export function makeSubmitPtxTool(kernelId, tracker, sessionId) {
           sessionId,
         );
         if (saved) {
-          console.log(`${MAGENTA}[best]${RESET} ${GRAY}saved ${saved}${RESET}`);
+          console.log(`${MAGENTA}[best]${RESET} saved ${saved}`);
         }
       }
 
@@ -307,7 +307,7 @@ export function makeSubmitPtxTool(kernelId, tracker, sessionId) {
 
       const tag = result.passed ? `${GREEN}[ok]${RESET}` : `${RED}[fail]${RESET}`;
       const text = `${JSON.stringify(trimmed, null, 2)}\n\n${saveNote}`;
-      console.log(`${tag} ${GRAY}${text}${RESET}`);
+      console.log(`${tag} ${text}`);
 
       return {
         content: [{ type: "text", text }],
