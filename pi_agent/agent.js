@@ -28,7 +28,8 @@ import {
   SKILL_DIRS,
   WORKSPACE_DIR,
 } from "./tool.js";
-import { BLUE, CYAN, GRAY, MAGENTA, RED, RESET } from "./tui.js";
+import { makeSpawnSubagentTool } from "./subagent.js";
+import { BLUE, CYAN, GRAY, MAGENTA, RED, RESET, YELLOW } from "./tui.js";
 
 const SYSTEM_PROMPT =
   "You are an expert GPU engineer optimizing a single Triton kernel at the " +
@@ -44,7 +45,14 @@ const SYSTEM_PROMPT =
   "satisfied that you cannot improve further, stop and summarize your best " +
   "result." +
   "You can use your tools to read the PTX documentation, provided as a skill." +
-  "Your tools can only access data in the `agent_workspace`.";
+  "Your tools can only access data in the `agent_workspace`.\n\n" +
+  "You can also call spawn_subagent to delegate a focused task to an isolated " +
+  "subagent that has the same tools but a fresh, separate context. Use it to " +
+  "keep large intermediate work out of your own context -- for example, " +
+  "searching the PTX documentation for a specific answer, or debugging a " +
+  "compilation error -- since only the subagent's final message is returned to " +
+  "you. Give it complete, self-contained instructions, including exactly what " +
+  "you want it to report back.";
 
 // --- Environment context ---
 
@@ -141,12 +149,23 @@ async function main() {
     authPath: path.join(getAgentDir(), "auth.json"),
   });
 
+  // Lets the lead agent delegate focused tasks to isolated subagents. Reuses the
+  // parent's submitPtx (shared kernel counter) and modelRuntime; child sessions
+  // are saved under sessionsDir linked to this run's session.
+  const spawnSubagent = makeSpawnSubagentTool({
+    modelRuntime,
+    sessionsDir,
+    parentSessionId: sessionManager.getSessionId(),
+    submitPtx,
+  });
+
   const { session } = await createAgentSession({
     cwd: WORKSPACE_DIR,
-    customTools: [submitPtx],
-    // Enable submit_ptx plus the built-in read-only tools (read/ls/grep/find),
-    // which the workspace jail confines to WORKSPACE_DIR. No write/edit/bash.
-    tools: ["submit_ptx", ...READ_ONLY_TOOL_NAMES],
+    customTools: [submitPtx, spawnSubagent],
+    // Enable submit_ptx and spawn_subagent plus the built-in read-only tools
+    // (read/ls/grep/find), which the workspace jail confines to WORKSPACE_DIR.
+    // No write/edit/bash.
+    tools: ["submit_ptx", "spawn_subagent", ...READ_ONLY_TOOL_NAMES],
     // Stream reasoning too, the way the Pi TUI does (ignored by models that do
     // not support thinking). Adjust with model selection later.
     thinkingLevel: "medium",
@@ -189,6 +208,10 @@ async function main() {
         if (event.toolName === "submit_ptx") {
           const ptxLen = typeof args.ptx === "string" ? `${args.ptx.length} chars` : "?";
           summary = `submit_ptx(ptx: ${ptxLen}, num_threads_x: ${args.num_threads_x})`;
+        } else if (event.toolName === "spawn_subagent") {
+          const instr = typeof args.instructions === "string" ? args.instructions : "";
+          const preview = instr.replace(/\s+/g, " ").slice(0, 80);
+          summary = `spawn_subagent(${preview}${instr.length > 80 ? "…" : ""})`;
         } else {
           // Read-only tools (read/ls/grep/find): show the most useful arg.
           const detail = args.pattern ?? args.path ?? "";
@@ -219,6 +242,42 @@ async function main() {
             `${RED}[warning]${RESET} ${GRAY}Turn hit the model output-token limit ` +
               `(maxTokens) mid-generation, so it may have stopped before calling ` +
               `submit_ptx. Raise the model's maxTokens or lower thinkingLevel.${RESET}`,
+          );
+        }
+        streamMode = null;
+        break;
+      }
+      case "compaction_start": {
+        // Pi auto-compacts when context passes contextWindow - reserveTokens
+        // (reason "threshold") or after a context-overflow response (reason
+        // "overflow"); "manual" is an explicit session.compact(). It summarizes
+        // older turns and keeps the recent ~keepRecentTokens verbatim.
+        process.stdout.write(RESET);
+        console.log(
+          `\n${YELLOW}[compact]${RESET} ${GRAY}start (${event.reason})...${RESET}`,
+        );
+        streamMode = null;
+        break;
+      }
+      case "compaction_end": {
+        process.stdout.write(RESET);
+        const { reason, result, aborted, willRetry, errorMessage } = event;
+        if (errorMessage) {
+          console.log(
+            `${RED}[compact]${RESET} ${GRAY}failed (${reason}): ${errorMessage}${RESET}`,
+          );
+        } else if (aborted) {
+          console.log(`${YELLOW}[compact]${RESET} ${GRAY}aborted (${reason})${RESET}`);
+        } else {
+          const before = result?.tokensBefore;
+          const after = result?.estimatedTokensAfter;
+          const delta =
+            before != null && after != null
+              ? `${before} -> ~${after} tokens`
+              : "tokens n/a";
+          const retryNote = willRetry ? ", retrying turn" : "";
+          console.log(
+            `${YELLOW}[compact]${RESET} ${GRAY}done (${reason}): ${delta}${retryNote}${RESET}`,
           );
         }
         streamMode = null;
