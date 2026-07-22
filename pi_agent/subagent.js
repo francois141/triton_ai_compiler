@@ -27,7 +27,8 @@ import {
   TRITON_SOURCE_FILE,
   WORKSPACE_DIR,
 } from "./tool.js";
-import { MAGENTA, RED, RESET, renderSessionOutput } from "./tui.js";
+import { promptUntilSettled } from "./agent.js";
+import { MAGENTA, RED, RESET } from "./tui.js";
 
 const SUBAGENT_SYSTEM_PROMPT =
   "You are a subagent spawned by a lead GPU-optimization agent to complete one " +
@@ -129,12 +130,13 @@ export function makeSpawnSubagentTool({
         return { content: [{ type: "text", text: message }], details: { error: message } };
       }
 
-      // Stream the subagent's reasoning and tool calls the same way the lead
-      // agent does, labelled so nested output is distinguishable in the log.
-      renderSessionOutput(child, { label: `[subagent ${id}]` });
-
       try {
-        await child.prompt(params.instructions);
+        // Stream the subagent's reasoning and tool calls the same way the lead
+        // agent does (labelled so nested output is distinguishable), and resume
+        // after any truncated turn, just like the lead agent.
+        await promptUntilSettled(child, params.instructions, {
+          label: `[subagent ${id}]`,
+        });
         let answer = child.getLastAssistantText() ?? "";
         if (!answer.trim()) {
           answer = "(The subagent finished without producing a final message.)";

@@ -31,7 +31,7 @@ import {
   WORKSPACE_DIR,
 } from "./tool.js";
 import { makeSpawnSubagentTool } from "./subagent.js";
-import { GRAY, MAGENTA, RED, RESET, renderSessionOutput } from "./tui.js";
+import { GRAY, MAGENTA, RED, RESET, YELLOW, renderSessionOutput } from "./tui.js";
 
 const SYSTEM_PROMPT =
   "You are an expert GPU engineer optimizing a single Triton kernel at the " +
@@ -55,6 +55,83 @@ const SYSTEM_PROMPT =
   "compilation error, or testing an hypothesis -- since only the subagent's final message is returned to " +
   "you. Give it complete, self-contained instructions, including exactly what " +
   "you want it to report back.";
+
+// --- Run-to-completion with resume ---
+
+// A turn can end with stopReason "length" (the model hit its output-token cap,
+// typically because input approached the context window and Pi clamped the
+// output budget). That ends the agent loop without a tool call, after which Pi
+// runs a threshold compaction that frees the context -- but prompt() has already
+// resolved, so the freed room goes unused. We recover by re-prompting: the
+// compaction has made space, so a fresh turn can actually respond. See the
+// "context-clamp starvation" note in the project memory.
+const RESUME_NUDGE =
+  "Your previous turn was cut off because the context window filled up, and " +
+  "the conversation history has now been automatically compacted to free " +
+  "space, so you have room to continue. Pick up where you left off and finish " +
+  "the task. If you are already done, produce your final response now.";
+
+// Cap re-prompts so a model that keeps truncating (e.g. a genuinely too-small
+// output cap, not a context problem) can't spin forever.
+const MAX_RESUMES = 3;
+// If context is still this full when we go to resume, force a manual compaction
+// first -- the auto threshold compaction may not have fired or freed enough.
+const RESUME_COMPACT_THRESHOLD = 0.8;
+
+/**
+ * Attach the streaming renderer and run `session.prompt(initialPrompt)` to
+ * completion, recovering from turns that end truncated ("length"). After such a
+ * turn Pi has usually already compacted; we re-prompt so the model uses the
+ * freed context instead of the run ending on a dangling truncation. Bounded by
+ * MAX_RESUMES. Shared by the lead agent (here) and subagents (subagent.js).
+ *
+ * @param {import("@earendil-works/pi-coding-agent").AgentSession} session
+ * @param {string} initialPrompt
+ * @param {object} [opts]
+ * @param {string} [opts.label]  Header prefix passed through to the renderer and
+ *   the resume log lines, e.g. "[subagent 0]". Empty for the lead agent.
+ * @returns {Promise<{ getLastStopReason: () => string | null }>} Accessor for
+ *   the last turn's stop reason, for the caller's post-run reporting.
+ */
+export async function promptUntilSettled(session, initialPrompt, { label = "" } = {}) {
+  const { getLastStopReason } = renderSessionOutput(session, { label });
+  const tag = label ? `${GRAY}${label}${RESET} ` : "";
+
+  await session.prompt(initialPrompt);
+
+  for (let resumes = 1; resumes <= MAX_RESUMES; resumes++) {
+    if (getLastStopReason() !== "length") break;
+
+    // If the auto-compaction didn't leave enough headroom, compact ourselves so
+    // the resume turn isn't immediately re-clamped. tokens/percent are null right
+    // after a compaction (nothing to do); we only force one when we can see the
+    // context is still near-full.
+    const usage = session.getContextUsage();
+    if (usage && usage.percent != null && usage.percent >= RESUME_COMPACT_THRESHOLD) {
+      const pct = Math.round(usage.percent * 100);
+      console.log(
+        `\n${tag}${YELLOW}[resume]${RESET} ${GRAY}context still ${pct}% full; ` +
+          `compacting before retrying...${RESET}`,
+      );
+      try {
+        await session.compact();
+      } catch (err) {
+        console.log(
+          `${tag}${YELLOW}[resume]${RESET} ${GRAY}manual compaction failed: ` +
+            `${err?.message ?? err}; retrying anyway.${RESET}`,
+        );
+      }
+    }
+
+    console.log(
+      `\n${tag}${YELLOW}[resume ${resumes}/${MAX_RESUMES}]${RESET} ${GRAY}` +
+        `re-prompting after a truncated turn.${RESET}`,
+    );
+    await session.prompt(RESUME_NUDGE);
+  }
+
+  return { getLastStopReason };
+}
 
 // --- Environment context ---
 
@@ -254,13 +331,12 @@ export async function runAgentOnKernel(kernelId) {
     sessionManager,
   });
 
-  // TUI-style streaming: render reasoning (grey), answer text (cyan), tool
-  // calls, and compaction notices live. Shared with subagents via render.js.
-  const { getLastStopReason } = renderSessionOutput(session);
-
+  // Run to completion with TUI-style streaming (reasoning, answer text, tool
+  // calls, compaction notices) and automatic resume after truncated turns.
+  // getLastStopReason lets us report below whether the run ended truncated.
+  let getLastStopReason;
   try {
-    // prompt() resolves only after the full run (all turns + tool calls) ends.
-    await session.prompt(contextMessage);
+    ({ getLastStopReason } = await promptUntilSettled(session, contextMessage));
   } finally {
     session.dispose();
   }
