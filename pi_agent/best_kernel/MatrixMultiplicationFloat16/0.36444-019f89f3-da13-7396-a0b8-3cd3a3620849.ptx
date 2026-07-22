@@ -1,0 +1,1058 @@
+.version 9.3
+.target sm_80
+.address_size 64
+
+.shared .align 64 .b8 shmem[16384];
+
+.visible .entry kernel(
+    .param .u64 kernel_param_0,
+    .param .u64 kernel_param_1,
+    .param .u64 kernel_param_2,
+    .param .u32 kernel_param_3,
+    .param .u32 kernel_param_4,
+    .param .u32 kernel_param_5,
+    .param .u32 kernel_param_6,
+    .param .u64 kernel_param_7,
+    .param .u64 kernel_param_8
+)
+{
+    // ------------------------------------------------------------
+    // Registers
+    // ------------------------------------------------------------
+    .reg .u32 %thread_id, %warp_id, %lane, %group_id, %tid_in_group;
+    .reg .u32 %pid_m, %pid_n;
+    .reg .u32 %block_row, %block_col;
+    .reg .u64 %a_ptr, %b_ptr, %c_ptr;
+    .reg .u32 %stride_am, %stride_bk, %stride_cm, %k_dim;
+    .reg .u32 %k_tiles, %k_tile, %i;
+    .reg .u32 %warp_row0, %warp_col0;
+    .reg .u32 %baseA_lane, %baseB_lane;
+    .reg .u32 %brow, %bchunk;
+    .reg .u32 %A_sh_offset, %B_sh_offset;
+    .reg .u32 %frag_off, %ks_off, %ks_Aadd;
+    .reg .u32 %row0, %col0, %tid_col_off;
+    .reg .u64 %addrA, %addrB, %addrC0, %addrC1, %tmp_addr;
+    .reg .u64 %shmem_base, %shmem_sbase;
+    .reg .u64 %tmp0_64, %tmp1_64;
+    .reg .u32 %tmp0, %tmp1, %tmp2, %tmp3;
+    .reg .b64 %data0;
+    .reg .f16x2 %a0, %a1, %a2, %a3;
+    .reg .f16x2 %b0_0, %b1_0, %b0_1, %b1_1, %b0_2, %b1_2, %b0_3, %b1_3;
+    .reg .f16x2 %b0_4, %b1_4, %b0_5, %b1_5, %b0_6, %b1_6, %b0_7, %b1_7;
+    .reg .f16x2 %c_half;
+    .reg .pred %p0, %p_ks;
+    .reg .f32 %acc<128>;
+
+    // ------------------------------------------------------------
+    // Load kernel parameters
+    // ------------------------------------------------------------
+    ld.param.u64 %a_ptr, [kernel_param_0];
+    ld.param.u64 %b_ptr, [kernel_param_1];
+    ld.param.u64 %c_ptr, [kernel_param_2];
+    ld.param.u32 %stride_am, [kernel_param_3];
+    ld.param.u32 %stride_bk, [kernel_param_4];
+    ld.param.u32 %stride_cm, [kernel_param_5];
+    ld.param.u32 %k_dim, [kernel_param_6];
+
+    cvta.shared.u64 %shmem_base, shmem;
+    mov.u64 %shmem_sbase, shmem;
+
+    // ------------------------------------------------------------
+    // Thread / block indices
+    // ------------------------------------------------------------
+    mov.u32 %thread_id, %tid.x;
+    shr.u32 %warp_id, %thread_id, 5;
+    and.b32 %lane, %thread_id, 31;
+
+    mov.u32 %pid_m, %ctaid.x;
+    mov.u32 %pid_n, %ctaid.y;
+    shl.b32 %block_row, %pid_m, 7;
+    shl.b32 %block_col, %pid_n, 7;
+
+    and.b32 %tmp0, %warp_id, 2;
+    shl.b32 %warp_row0, %tmp0, 5;
+    and.b32 %tmp0, %warp_id, 1;
+    shl.b32 %warp_col0, %tmp0, 6;
+
+    add.u32 %k_tiles, %k_dim, 31;
+    shr.u32 %k_tiles, %k_tiles, 5;
+
+    // baseA_lane = ((warp_row0 + (lane & 7) + ((lane >> 3) & 1)*8) * 32 + (lane >> 4)*8) * 2
+    and.b32 %tmp0, %lane, 7;
+    shr.u32 %tmp1, %lane, 3;
+    and.b32 %tmp1, %tmp1, 1;
+    shl.b32 %tmp1, %tmp1, 3;
+    add.u32 %tmp2, %warp_row0, %tmp0;
+    add.u32 %tmp2, %tmp2, %tmp1;
+    shl.b32 %tmp2, %tmp2, 5;
+    shr.u32 %tmp3, %lane, 4;
+    shl.b32 %tmp3, %tmp3, 3;
+    add.u32 %baseA_lane, %tmp2, %tmp3;
+    shl.b32 %baseA_lane, %baseA_lane, 1;
+
+    // baseB_lane = (((lane & 7) + ((lane >> 3) & 1)*8) * 128 + warp_col0) * 2
+    and.b32 %tmp0, %lane, 7;
+    shr.u32 %tmp1, %lane, 3;
+    and.b32 %tmp1, %tmp1, 1;
+    shl.b32 %tmp1, %tmp1, 3;
+    add.u32 %tmp2, %tmp0, %tmp1;
+    shl.b32 %tmp2, %tmp2, 7;
+    add.u32 %baseB_lane, %tmp2, %warp_col0;
+    shl.b32 %baseB_lane, %baseB_lane, 1;
+
+    shr.u32 %group_id, %lane, 2;
+    and.b32 %tid_in_group, %lane, 3;
+
+    shr.u32 %brow, %thread_id, 2;
+    and.b32 %bchunk, %thread_id, 3;
+
+    // ------------------------------------------------------------
+    // Zero all 128 accumulators
+    // ------------------------------------------------------------
+    mov.f32 %acc0, 0F00000000;
+    mov.f32 %acc1, 0F00000000;
+    mov.f32 %acc2, 0F00000000;
+    mov.f32 %acc3, 0F00000000;
+    mov.f32 %acc4, 0F00000000;
+    mov.f32 %acc5, 0F00000000;
+    mov.f32 %acc6, 0F00000000;
+    mov.f32 %acc7, 0F00000000;
+    mov.f32 %acc8, 0F00000000;
+    mov.f32 %acc9, 0F00000000;
+    mov.f32 %acc10, 0F00000000;
+    mov.f32 %acc11, 0F00000000;
+    mov.f32 %acc12, 0F00000000;
+    mov.f32 %acc13, 0F00000000;
+    mov.f32 %acc14, 0F00000000;
+    mov.f32 %acc15, 0F00000000;
+    mov.f32 %acc16, 0F00000000;
+    mov.f32 %acc17, 0F00000000;
+    mov.f32 %acc18, 0F00000000;
+    mov.f32 %acc19, 0F00000000;
+    mov.f32 %acc20, 0F00000000;
+    mov.f32 %acc21, 0F00000000;
+    mov.f32 %acc22, 0F00000000;
+    mov.f32 %acc23, 0F00000000;
+    mov.f32 %acc24, 0F00000000;
+    mov.f32 %acc25, 0F00000000;
+    mov.f32 %acc26, 0F00000000;
+    mov.f32 %acc27, 0F00000000;
+    mov.f32 %acc28, 0F00000000;
+    mov.f32 %acc29, 0F00000000;
+    mov.f32 %acc30, 0F00000000;
+    mov.f32 %acc31, 0F00000000;
+    mov.f32 %acc32, 0F00000000;
+    mov.f32 %acc33, 0F00000000;
+    mov.f32 %acc34, 0F00000000;
+    mov.f32 %acc35, 0F00000000;
+    mov.f32 %acc36, 0F00000000;
+    mov.f32 %acc37, 0F00000000;
+    mov.f32 %acc38, 0F00000000;
+    mov.f32 %acc39, 0F00000000;
+    mov.f32 %acc40, 0F00000000;
+    mov.f32 %acc41, 0F00000000;
+    mov.f32 %acc42, 0F00000000;
+    mov.f32 %acc43, 0F00000000;
+    mov.f32 %acc44, 0F00000000;
+    mov.f32 %acc45, 0F00000000;
+    mov.f32 %acc46, 0F00000000;
+    mov.f32 %acc47, 0F00000000;
+    mov.f32 %acc48, 0F00000000;
+    mov.f32 %acc49, 0F00000000;
+    mov.f32 %acc50, 0F00000000;
+    mov.f32 %acc51, 0F00000000;
+    mov.f32 %acc52, 0F00000000;
+    mov.f32 %acc53, 0F00000000;
+    mov.f32 %acc54, 0F00000000;
+    mov.f32 %acc55, 0F00000000;
+    mov.f32 %acc56, 0F00000000;
+    mov.f32 %acc57, 0F00000000;
+    mov.f32 %acc58, 0F00000000;
+    mov.f32 %acc59, 0F00000000;
+    mov.f32 %acc60, 0F00000000;
+    mov.f32 %acc61, 0F00000000;
+    mov.f32 %acc62, 0F00000000;
+    mov.f32 %acc63, 0F00000000;
+    mov.f32 %acc64, 0F00000000;
+    mov.f32 %acc65, 0F00000000;
+    mov.f32 %acc66, 0F00000000;
+    mov.f32 %acc67, 0F00000000;
+    mov.f32 %acc68, 0F00000000;
+    mov.f32 %acc69, 0F00000000;
+    mov.f32 %acc70, 0F00000000;
+    mov.f32 %acc71, 0F00000000;
+    mov.f32 %acc72, 0F00000000;
+    mov.f32 %acc73, 0F00000000;
+    mov.f32 %acc74, 0F00000000;
+    mov.f32 %acc75, 0F00000000;
+    mov.f32 %acc76, 0F00000000;
+    mov.f32 %acc77, 0F00000000;
+    mov.f32 %acc78, 0F00000000;
+    mov.f32 %acc79, 0F00000000;
+    mov.f32 %acc80, 0F00000000;
+    mov.f32 %acc81, 0F00000000;
+    mov.f32 %acc82, 0F00000000;
+    mov.f32 %acc83, 0F00000000;
+    mov.f32 %acc84, 0F00000000;
+    mov.f32 %acc85, 0F00000000;
+    mov.f32 %acc86, 0F00000000;
+    mov.f32 %acc87, 0F00000000;
+    mov.f32 %acc88, 0F00000000;
+    mov.f32 %acc89, 0F00000000;
+    mov.f32 %acc90, 0F00000000;
+    mov.f32 %acc91, 0F00000000;
+    mov.f32 %acc92, 0F00000000;
+    mov.f32 %acc93, 0F00000000;
+    mov.f32 %acc94, 0F00000000;
+    mov.f32 %acc95, 0F00000000;
+    mov.f32 %acc96, 0F00000000;
+    mov.f32 %acc97, 0F00000000;
+    mov.f32 %acc98, 0F00000000;
+    mov.f32 %acc99, 0F00000000;
+    mov.f32 %acc100, 0F00000000;
+    mov.f32 %acc101, 0F00000000;
+    mov.f32 %acc102, 0F00000000;
+    mov.f32 %acc103, 0F00000000;
+    mov.f32 %acc104, 0F00000000;
+    mov.f32 %acc105, 0F00000000;
+    mov.f32 %acc106, 0F00000000;
+    mov.f32 %acc107, 0F00000000;
+    mov.f32 %acc108, 0F00000000;
+    mov.f32 %acc109, 0F00000000;
+    mov.f32 %acc110, 0F00000000;
+    mov.f32 %acc111, 0F00000000;
+    mov.f32 %acc112, 0F00000000;
+    mov.f32 %acc113, 0F00000000;
+    mov.f32 %acc114, 0F00000000;
+    mov.f32 %acc115, 0F00000000;
+    mov.f32 %acc116, 0F00000000;
+    mov.f32 %acc117, 0F00000000;
+    mov.f32 %acc118, 0F00000000;
+    mov.f32 %acc119, 0F00000000;
+    mov.f32 %acc120, 0F00000000;
+    mov.f32 %acc121, 0F00000000;
+    mov.f32 %acc122, 0F00000000;
+    mov.f32 %acc123, 0F00000000;
+    mov.f32 %acc124, 0F00000000;
+    mov.f32 %acc125, 0F00000000;
+    mov.f32 %acc126, 0F00000000;
+    mov.f32 %acc127, 0F00000000;
+
+    // ------------------------------------------------------------
+    // Outer loop over K tiles
+    // ------------------------------------------------------------
+    mov.u32 %k_tile, 0;
+L_kloop:
+    setp.ge.u32 %p0, %k_tile, %k_tiles;
+    @%p0 bra END_KLOOP;
+
+    // ----- Load A block (128x32) into shared memory -----
+    add.u32 %tmp0, %block_row, %thread_id;
+    cvt.u64.u32 %addrA, %tmp0;
+    cvt.u64.u32 %tmp0_64, %stride_am;
+    mul.lo.u64 %addrA, %addrA, %tmp0_64;
+    shl.b32 %tmp0, %k_tile, 5;
+    cvt.u64.u32 %tmp0_64, %tmp0;
+    add.u64 %addrA, %addrA, %tmp0_64;
+    shl.b64 %addrA, %addrA, 1;
+    add.u64 %addrA, %addrA, %a_ptr;
+
+    shl.b32 %A_sh_offset, %thread_id, 6;
+
+    mov.u32 %i, 0;
+L_aload:
+    setp.ge.u32 %p0, %i, 8;
+    @%p0 bra END_ALOAD;
+    shl.b32 %tmp0, %i, 3;
+    cvt.u64.u32 %tmp0_64, %tmp0;
+    add.u64 %tmp_addr, %addrA, %tmp0_64;
+    ld.global.b64 %data0, [%tmp_addr];
+    add.u32 %tmp1, %A_sh_offset, %tmp0;
+    cvt.u64.u32 %tmp1_64, %tmp1;
+    add.u64 %tmp_addr, %shmem_base, %tmp1_64;
+    st.b64 [%tmp_addr], %data0;
+    add.u32 %i, %i, 1;
+    bra L_aload;
+END_ALOAD:
+
+    // ----- Load B block (32x128) into shared memory -----
+    shl.b32 %tmp0, %k_tile, 5;
+    add.u32 %tmp0, %tmp0, %brow;
+    cvt.u64.u32 %addrB, %tmp0;
+    cvt.u64.u32 %tmp0_64, %stride_bk;
+    mul.lo.u64 %addrB, %addrB, %tmp0_64;
+    shl.b32 %tmp1, %bchunk, 5;
+    add.u32 %tmp1, %tmp1, %block_col;
+    cvt.u64.u32 %tmp1_64, %tmp1;
+    add.u64 %addrB, %addrB, %tmp1_64;
+    shl.b64 %addrB, %addrB, 1;
+    add.u64 %addrB, %addrB, %b_ptr;
+
+    shl.b32 %tmp0, %brow, 7;
+    shl.b32 %tmp1, %bchunk, 5;
+    add.u32 %B_sh_offset, %tmp0, %tmp1;
+    shl.b32 %B_sh_offset, %B_sh_offset, 1;
+    add.u32 %B_sh_offset, %B_sh_offset, 8192;
+
+    mov.u32 %i, 0;
+L_bload:
+    setp.ge.u32 %p0, %i, 8;
+    @%p0 bra END_BLOAD;
+    shl.b32 %tmp0, %i, 3;
+    cvt.u64.u32 %tmp0_64, %tmp0;
+    add.u64 %tmp_addr, %addrB, %tmp0_64;
+    ld.global.b64 %data0, [%tmp_addr];
+    add.u32 %tmp1, %B_sh_offset, %tmp0;
+    cvt.u64.u32 %tmp1_64, %tmp1;
+    add.u64 %tmp_addr, %shmem_base, %tmp1_64;
+    st.b64 [%tmp_addr], %data0;
+    add.u32 %i, %i, 1;
+    bra L_bload;
+END_BLOAD:
+
+    bar.sync 0;
+
+    // ============================================================
+    // K-slice loop: ks_off = 0, 4096
+    // ============================================================
+    mov.u32 %ks_off, 0;
+L_ks:
+    shr.u32 %ks_Aadd, %ks_off, 7;
+
+    // ---- Load all 8 B fragments for this ks ----
+    add.u32 %frag_off, %baseB_lane, 8192;
+    add.u32 %frag_off, %frag_off, %ks_off;
+    cvt.u64.u32 %tmp0_64, %frag_off;
+    add.u64 %tmp_addr, %shmem_sbase, %tmp0_64;
+    ldmatrix.sync.aligned.m8n8.x2.trans.shared::cta.b16 {%b0_0, %b1_0}, [%tmp_addr];
+
+    add.u32 %frag_off, %baseB_lane, 8208;
+    add.u32 %frag_off, %frag_off, %ks_off;
+    cvt.u64.u32 %tmp0_64, %frag_off;
+    add.u64 %tmp_addr, %shmem_sbase, %tmp0_64;
+    ldmatrix.sync.aligned.m8n8.x2.trans.shared::cta.b16 {%b0_1, %b1_1}, [%tmp_addr];
+
+    add.u32 %frag_off, %baseB_lane, 8224;
+    add.u32 %frag_off, %frag_off, %ks_off;
+    cvt.u64.u32 %tmp0_64, %frag_off;
+    add.u64 %tmp_addr, %shmem_sbase, %tmp0_64;
+    ldmatrix.sync.aligned.m8n8.x2.trans.shared::cta.b16 {%b0_2, %b1_2}, [%tmp_addr];
+
+    add.u32 %frag_off, %baseB_lane, 8240;
+    add.u32 %frag_off, %frag_off, %ks_off;
+    cvt.u64.u32 %tmp0_64, %frag_off;
+    add.u64 %tmp_addr, %shmem_sbase, %tmp0_64;
+    ldmatrix.sync.aligned.m8n8.x2.trans.shared::cta.b16 {%b0_3, %b1_3}, [%tmp_addr];
+
+    add.u32 %frag_off, %baseB_lane, 8256;
+    add.u32 %frag_off, %frag_off, %ks_off;
+    cvt.u64.u32 %tmp0_64, %frag_off;
+    add.u64 %tmp_addr, %shmem_sbase, %tmp0_64;
+    ldmatrix.sync.aligned.m8n8.x2.trans.shared::cta.b16 {%b0_4, %b1_4}, [%tmp_addr];
+
+    add.u32 %frag_off, %baseB_lane, 8272;
+    add.u32 %frag_off, %frag_off, %ks_off;
+    cvt.u64.u32 %tmp0_64, %frag_off;
+    add.u64 %tmp_addr, %shmem_sbase, %tmp0_64;
+    ldmatrix.sync.aligned.m8n8.x2.trans.shared::cta.b16 {%b0_5, %b1_5}, [%tmp_addr];
+
+    add.u32 %frag_off, %baseB_lane, 8288;
+    add.u32 %frag_off, %frag_off, %ks_off;
+    cvt.u64.u32 %tmp0_64, %frag_off;
+    add.u64 %tmp_addr, %shmem_sbase, %tmp0_64;
+    ldmatrix.sync.aligned.m8n8.x2.trans.shared::cta.b16 {%b0_6, %b1_6}, [%tmp_addr];
+
+    add.u32 %frag_off, %baseB_lane, 8304;
+    add.u32 %frag_off, %frag_off, %ks_off;
+    cvt.u64.u32 %tmp0_64, %frag_off;
+    add.u64 %tmp_addr, %shmem_sbase, %tmp0_64;
+    ldmatrix.sync.aligned.m8n8.x2.trans.shared::cta.b16 {%b0_7, %b1_7}, [%tmp_addr];
+
+    // ---- row_group = 0 ----
+    add.u32 %frag_off, %baseA_lane, 0;
+    add.u32 %frag_off, %frag_off, %ks_Aadd;
+    cvt.u64.u32 %tmp0_64, %frag_off;
+    add.u64 %tmp_addr, %shmem_sbase, %tmp0_64;
+    ldmatrix.sync.aligned.m8n8.x4.shared::cta.b16 {%a0, %a1, %a2, %a3}, [%tmp_addr];
+
+    mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {%acc0, %acc1, %acc2, %acc3}, {%a0, %a1, %a2, %a3}, {%b0_0, %b1_0}, {%acc0, %acc1, %acc2, %acc3};
+    mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {%acc16, %acc17, %acc18, %acc19}, {%a0, %a1, %a2, %a3}, {%b0_1, %b1_1}, {%acc16, %acc17, %acc18, %acc19};
+    mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {%acc32, %acc33, %acc34, %acc35}, {%a0, %a1, %a2, %a3}, {%b0_2, %b1_2}, {%acc32, %acc33, %acc34, %acc35};
+    mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {%acc48, %acc49, %acc50, %acc51}, {%a0, %a1, %a2, %a3}, {%b0_3, %b1_3}, {%acc48, %acc49, %acc50, %acc51};
+    mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {%acc64, %acc65, %acc66, %acc67}, {%a0, %a1, %a2, %a3}, {%b0_4, %b1_4}, {%acc64, %acc65, %acc66, %acc67};
+    mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {%acc80, %acc81, %acc82, %acc83}, {%a0, %a1, %a2, %a3}, {%b0_5, %b1_5}, {%acc80, %acc81, %acc82, %acc83};
+    mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {%acc96, %acc97, %acc98, %acc99}, {%a0, %a1, %a2, %a3}, {%b0_6, %b1_6}, {%acc96, %acc97, %acc98, %acc99};
+    mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {%acc112, %acc113, %acc114, %acc115}, {%a0, %a1, %a2, %a3}, {%b0_7, %b1_7}, {%acc112, %acc113, %acc114, %acc115};
+
+    // ---- row_group = 1 ----
+    add.u32 %frag_off, %baseA_lane, 1024;
+    add.u32 %frag_off, %frag_off, %ks_Aadd;
+    cvt.u64.u32 %tmp0_64, %frag_off;
+    add.u64 %tmp_addr, %shmem_sbase, %tmp0_64;
+    ldmatrix.sync.aligned.m8n8.x4.shared::cta.b16 {%a0, %a1, %a2, %a3}, [%tmp_addr];
+
+    mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {%acc4, %acc5, %acc6, %acc7}, {%a0, %a1, %a2, %a3}, {%b0_0, %b1_0}, {%acc4, %acc5, %acc6, %acc7};
+    mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {%acc20, %acc21, %acc22, %acc23}, {%a0, %a1, %a2, %a3}, {%b0_1, %b1_1}, {%acc20, %acc21, %acc22, %acc23};
+    mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {%acc36, %acc37, %acc38, %acc39}, {%a0, %a1, %a2, %a3}, {%b0_2, %b1_2}, {%acc36, %acc37, %acc38, %acc39};
+    mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {%acc52, %acc53, %acc54, %acc55}, {%a0, %a1, %a2, %a3}, {%b0_3, %b1_3}, {%acc52, %acc53, %acc54, %acc55};
+    mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {%acc68, %acc69, %acc70, %acc71}, {%a0, %a1, %a2, %a3}, {%b0_4, %b1_4}, {%acc68, %acc69, %acc70, %acc71};
+    mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {%acc84, %acc85, %acc86, %acc87}, {%a0, %a1, %a2, %a3}, {%b0_5, %b1_5}, {%acc84, %acc85, %acc86, %acc87};
+    mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {%acc100, %acc101, %acc102, %acc103}, {%a0, %a1, %a2, %a3}, {%b0_6, %b1_6}, {%acc100, %acc101, %acc102, %acc103};
+    mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {%acc116, %acc117, %acc118, %acc119}, {%a0, %a1, %a2, %a3}, {%b0_7, %b1_7}, {%acc116, %acc117, %acc118, %acc119};
+
+    // ---- row_group = 2 ----
+    add.u32 %frag_off, %baseA_lane, 2048;
+    add.u32 %frag_off, %frag_off, %ks_Aadd;
+    cvt.u64.u32 %tmp0_64, %frag_off;
+    add.u64 %tmp_addr, %shmem_sbase, %tmp0_64;
+    ldmatrix.sync.aligned.m8n8.x4.shared::cta.b16 {%a0, %a1, %a2, %a3}, [%tmp_addr];
+
+    mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {%acc8, %acc9, %acc10, %acc11}, {%a0, %a1, %a2, %a3}, {%b0_0, %b1_0}, {%acc8, %acc9, %acc10, %acc11};
+    mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {%acc24, %acc25, %acc26, %acc27}, {%a0, %a1, %a2, %a3}, {%b0_1, %b1_1}, {%acc24, %acc25, %acc26, %acc27};
+    mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {%acc40, %acc41, %acc42, %acc43}, {%a0, %a1, %a2, %a3}, {%b0_2, %b1_2}, {%acc40, %acc41, %acc42, %acc43};
+    mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {%acc56, %acc57, %acc58, %acc59}, {%a0, %a1, %a2, %a3}, {%b0_3, %b1_3}, {%acc56, %acc57, %acc58, %acc59};
+    mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {%acc72, %acc73, %acc74, %acc75}, {%a0, %a1, %a2, %a3}, {%b0_4, %b1_4}, {%acc72, %acc73, %acc74, %acc75};
+    mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {%acc88, %acc89, %acc90, %acc91}, {%a0, %a1, %a2, %a3}, {%b0_5, %b1_5}, {%acc88, %acc89, %acc90, %acc91};
+    mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {%acc104, %acc105, %acc106, %acc107}, {%a0, %a1, %a2, %a3}, {%b0_6, %b1_6}, {%acc104, %acc105, %acc106, %acc107};
+    mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {%acc120, %acc121, %acc122, %acc123}, {%a0, %a1, %a2, %a3}, {%b0_7, %b1_7}, {%acc120, %acc121, %acc122, %acc123};
+
+    // ---- row_group = 3 ----
+    add.u32 %frag_off, %baseA_lane, 3072;
+    add.u32 %frag_off, %frag_off, %ks_Aadd;
+    cvt.u64.u32 %tmp0_64, %frag_off;
+    add.u64 %tmp_addr, %shmem_sbase, %tmp0_64;
+    ldmatrix.sync.aligned.m8n8.x4.shared::cta.b16 {%a0, %a1, %a2, %a3}, [%tmp_addr];
+
+    mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {%acc12, %acc13, %acc14, %acc15}, {%a0, %a1, %a2, %a3}, {%b0_0, %b1_0}, {%acc12, %acc13, %acc14, %acc15};
+    mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {%acc28, %acc29, %acc30, %acc31}, {%a0, %a1, %a2, %a3}, {%b0_1, %b1_1}, {%acc28, %acc29, %acc30, %acc31};
+    mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {%acc44, %acc45, %acc46, %acc47}, {%a0, %a1, %a2, %a3}, {%b0_2, %b1_2}, {%acc44, %acc45, %acc46, %acc47};
+    mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {%acc60, %acc61, %acc62, %acc63}, {%a0, %a1, %a2, %a3}, {%b0_3, %b1_3}, {%acc60, %acc61, %acc62, %acc63};
+    mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {%acc76, %acc77, %acc78, %acc79}, {%a0, %a1, %a2, %a3}, {%b0_4, %b1_4}, {%acc76, %acc77, %acc78, %acc79};
+    mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {%acc92, %acc93, %acc94, %acc95}, {%a0, %a1, %a2, %a3}, {%b0_5, %b1_5}, {%acc92, %acc93, %acc94, %acc95};
+    mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {%acc108, %acc109, %acc110, %acc111}, {%a0, %a1, %a2, %a3}, {%b0_6, %b1_6}, {%acc108, %acc109, %acc110, %acc111};
+    mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {%acc124, %acc125, %acc126, %acc127}, {%a0, %a1, %a2, %a3}, {%b0_7, %b1_7}, {%acc124, %acc125, %acc126, %acc127};
+
+    add.u32 %ks_off, %ks_off, 4096;
+    setp.ne.u32 %p_ks, %ks_off, 8192;
+    @%p_ks bra L_ks;
+
+    add.u32 %k_tile, %k_tile, 1;
+    bra L_kloop;
+END_KLOOP:
+
+    // ------------------------------------------------------------
+    // Store all 32 accumulator tiles
+    // ------------------------------------------------------------
+    shl.b32 %tid_col_off, %tid_in_group, 1;
+    add.u32 %tmp0, %block_row, %warp_row0;
+    add.u32 %row0, %tmp0, %group_id;
+
+    // ----- n_group = 0 -----
+    add.u32 %tmp2, %block_col, %warp_col0;
+    add.u32 %col0, %tmp2, %tid_col_off;
+
+    mul.lo.u32 %tmp0, %row0, %stride_cm;
+    add.u32 %tmp0, %tmp0, %col0;
+    cvt.u64.u32 %tmp0_64, %tmp0;
+    shl.b64 %tmp0_64, %tmp0_64, 1;
+    add.u64 %addrC0, %c_ptr, %tmp0_64;
+    cvt.rn.f16x2.f32 %c_half, %acc1, %acc0;
+    st.global.b32 [%addrC0], %c_half;
+
+    add.u32 %tmp0, %row0, 8;
+    mul.lo.u32 %tmp0, %tmp0, %stride_cm;
+    add.u32 %tmp0, %tmp0, %col0;
+    cvt.u64.u32 %tmp0_64, %tmp0;
+    shl.b64 %tmp0_64, %tmp0_64, 1;
+    add.u64 %addrC1, %c_ptr, %tmp0_64;
+    cvt.rn.f16x2.f32 %c_half, %acc3, %acc2;
+    st.global.b32 [%addrC1], %c_half;
+
+    add.u32 %tmp0, %row0, 16;
+    mul.lo.u32 %tmp1, %tmp0, %stride_cm;
+    add.u32 %tmp1, %tmp1, %col0;
+    cvt.u64.u32 %tmp0_64, %tmp1;
+    shl.b64 %tmp0_64, %tmp0_64, 1;
+    add.u64 %addrC0, %c_ptr, %tmp0_64;
+    cvt.rn.f16x2.f32 %c_half, %acc5, %acc4;
+    st.global.b32 [%addrC0], %c_half;
+
+    add.u32 %tmp0, %row0, 24;
+    mul.lo.u32 %tmp1, %tmp0, %stride_cm;
+    add.u32 %tmp1, %tmp1, %col0;
+    cvt.u64.u32 %tmp0_64, %tmp1;
+    shl.b64 %tmp0_64, %tmp0_64, 1;
+    add.u64 %addrC1, %c_ptr, %tmp0_64;
+    cvt.rn.f16x2.f32 %c_half, %acc7, %acc6;
+    st.global.b32 [%addrC1], %c_half;
+
+    add.u32 %tmp0, %row0, 32;
+    mul.lo.u32 %tmp1, %tmp0, %stride_cm;
+    add.u32 %tmp1, %tmp1, %col0;
+    cvt.u64.u32 %tmp0_64, %tmp1;
+    shl.b64 %tmp0_64, %tmp0_64, 1;
+    add.u64 %addrC0, %c_ptr, %tmp0_64;
+    cvt.rn.f16x2.f32 %c_half, %acc9, %acc8;
+    st.global.b32 [%addrC0], %c_half;
+
+    add.u32 %tmp0, %row0, 40;
+    mul.lo.u32 %tmp1, %tmp0, %stride_cm;
+    add.u32 %tmp1, %tmp1, %col0;
+    cvt.u64.u32 %tmp0_64, %tmp1;
+    shl.b64 %tmp0_64, %tmp0_64, 1;
+    add.u64 %addrC1, %c_ptr, %tmp0_64;
+    cvt.rn.f16x2.f32 %c_half, %acc11, %acc10;
+    st.global.b32 [%addrC1], %c_half;
+
+    add.u32 %tmp0, %row0, 48;
+    mul.lo.u32 %tmp1, %tmp0, %stride_cm;
+    add.u32 %tmp1, %tmp1, %col0;
+    cvt.u64.u32 %tmp0_64, %tmp1;
+    shl.b64 %tmp0_64, %tmp0_64, 1;
+    add.u64 %addrC0, %c_ptr, %tmp0_64;
+    cvt.rn.f16x2.f32 %c_half, %acc13, %acc12;
+    st.global.b32 [%addrC0], %c_half;
+
+    add.u32 %tmp0, %row0, 56;
+    mul.lo.u32 %tmp1, %tmp0, %stride_cm;
+    add.u32 %tmp1, %tmp1, %col0;
+    cvt.u64.u32 %tmp0_64, %tmp1;
+    shl.b64 %tmp0_64, %tmp0_64, 1;
+    add.u64 %addrC1, %c_ptr, %tmp0_64;
+    cvt.rn.f16x2.f32 %c_half, %acc15, %acc14;
+    st.global.b32 [%addrC1], %c_half;
+
+    // ----- n_group = 1 -----
+    add.u32 %tmp2, %block_col, %warp_col0;
+    add.u32 %col0, %tmp2, 8;
+    add.u32 %col0, %col0, %tid_col_off;
+
+    mul.lo.u32 %tmp0, %row0, %stride_cm;
+    add.u32 %tmp0, %tmp0, %col0;
+    cvt.u64.u32 %tmp0_64, %tmp0;
+    shl.b64 %tmp0_64, %tmp0_64, 1;
+    add.u64 %addrC0, %c_ptr, %tmp0_64;
+    cvt.rn.f16x2.f32 %c_half, %acc17, %acc16;
+    st.global.b32 [%addrC0], %c_half;
+
+    add.u32 %tmp0, %row0, 8;
+    mul.lo.u32 %tmp0, %tmp0, %stride_cm;
+    add.u32 %tmp0, %tmp0, %col0;
+    cvt.u64.u32 %tmp0_64, %tmp0;
+    shl.b64 %tmp0_64, %tmp0_64, 1;
+    add.u64 %addrC1, %c_ptr, %tmp0_64;
+    cvt.rn.f16x2.f32 %c_half, %acc19, %acc18;
+    st.global.b32 [%addrC1], %c_half;
+
+    add.u32 %tmp0, %row0, 16;
+    mul.lo.u32 %tmp1, %tmp0, %stride_cm;
+    add.u32 %tmp1, %tmp1, %col0;
+    cvt.u64.u32 %tmp0_64, %tmp1;
+    shl.b64 %tmp0_64, %tmp0_64, 1;
+    add.u64 %addrC0, %c_ptr, %tmp0_64;
+    cvt.rn.f16x2.f32 %c_half, %acc21, %acc20;
+    st.global.b32 [%addrC0], %c_half;
+
+    add.u32 %tmp0, %row0, 24;
+    mul.lo.u32 %tmp1, %tmp0, %stride_cm;
+    add.u32 %tmp1, %tmp1, %col0;
+    cvt.u64.u32 %tmp0_64, %tmp1;
+    shl.b64 %tmp0_64, %tmp0_64, 1;
+    add.u64 %addrC1, %c_ptr, %tmp0_64;
+    cvt.rn.f16x2.f32 %c_half, %acc23, %acc22;
+    st.global.b32 [%addrC1], %c_half;
+
+    add.u32 %tmp0, %row0, 32;
+    mul.lo.u32 %tmp1, %tmp0, %stride_cm;
+    add.u32 %tmp1, %tmp1, %col0;
+    cvt.u64.u32 %tmp0_64, %tmp1;
+    shl.b64 %tmp0_64, %tmp0_64, 1;
+    add.u64 %addrC0, %c_ptr, %tmp0_64;
+    cvt.rn.f16x2.f32 %c_half, %acc25, %acc24;
+    st.global.b32 [%addrC0], %c_half;
+
+    add.u32 %tmp0, %row0, 40;
+    mul.lo.u32 %tmp1, %tmp0, %stride_cm;
+    add.u32 %tmp1, %tmp1, %col0;
+    cvt.u64.u32 %tmp0_64, %tmp1;
+    shl.b64 %tmp0_64, %tmp0_64, 1;
+    add.u64 %addrC1, %c_ptr, %tmp0_64;
+    cvt.rn.f16x2.f32 %c_half, %acc27, %acc26;
+    st.global.b32 [%addrC1], %c_half;
+
+    add.u32 %tmp0, %row0, 48;
+    mul.lo.u32 %tmp1, %tmp0, %stride_cm;
+    add.u32 %tmp1, %tmp1, %col0;
+    cvt.u64.u32 %tmp0_64, %tmp1;
+    shl.b64 %tmp0_64, %tmp0_64, 1;
+    add.u64 %addrC0, %c_ptr, %tmp0_64;
+    cvt.rn.f16x2.f32 %c_half, %acc29, %acc28;
+    st.global.b32 [%addrC0], %c_half;
+
+    add.u32 %tmp0, %row0, 56;
+    mul.lo.u32 %tmp1, %tmp0, %stride_cm;
+    add.u32 %tmp1, %tmp1, %col0;
+    cvt.u64.u32 %tmp0_64, %tmp1;
+    shl.b64 %tmp0_64, %tmp0_64, 1;
+    add.u64 %addrC1, %c_ptr, %tmp0_64;
+    cvt.rn.f16x2.f32 %c_half, %acc31, %acc30;
+    st.global.b32 [%addrC1], %c_half;
+
+    // ----- n_group = 2 -----
+    add.u32 %tmp2, %block_col, %warp_col0;
+    add.u32 %col0, %tmp2, 16;
+    add.u32 %col0, %col0, %tid_col_off;
+
+    mul.lo.u32 %tmp0, %row0, %stride_cm;
+    add.u32 %tmp0, %tmp0, %col0;
+    cvt.u64.u32 %tmp0_64, %tmp0;
+    shl.b64 %tmp0_64, %tmp0_64, 1;
+    add.u64 %addrC0, %c_ptr, %tmp0_64;
+    cvt.rn.f16x2.f32 %c_half, %acc33, %acc32;
+    st.global.b32 [%addrC0], %c_half;
+
+    add.u32 %tmp0, %row0, 8;
+    mul.lo.u32 %tmp0, %tmp0, %stride_cm;
+    add.u32 %tmp0, %tmp0, %col0;
+    cvt.u64.u32 %tmp0_64, %tmp0;
+    shl.b64 %tmp0_64, %tmp0_64, 1;
+    add.u64 %addrC1, %c_ptr, %tmp0_64;
+    cvt.rn.f16x2.f32 %c_half, %acc35, %acc34;
+    st.global.b32 [%addrC1], %c_half;
+
+    add.u32 %tmp0, %row0, 16;
+    mul.lo.u32 %tmp1, %tmp0, %stride_cm;
+    add.u32 %tmp1, %tmp1, %col0;
+    cvt.u64.u32 %tmp0_64, %tmp1;
+    shl.b64 %tmp0_64, %tmp0_64, 1;
+    add.u64 %addrC0, %c_ptr, %tmp0_64;
+    cvt.rn.f16x2.f32 %c_half, %acc37, %acc36;
+    st.global.b32 [%addrC0], %c_half;
+
+    add.u32 %tmp0, %row0, 24;
+    mul.lo.u32 %tmp1, %tmp0, %stride_cm;
+    add.u32 %tmp1, %tmp1, %col0;
+    cvt.u64.u32 %tmp0_64, %tmp1;
+    shl.b64 %tmp0_64, %tmp0_64, 1;
+    add.u64 %addrC1, %c_ptr, %tmp0_64;
+    cvt.rn.f16x2.f32 %c_half, %acc39, %acc38;
+    st.global.b32 [%addrC1], %c_half;
+
+    add.u32 %tmp0, %row0, 32;
+    mul.lo.u32 %tmp1, %tmp0, %stride_cm;
+    add.u32 %tmp1, %tmp1, %col0;
+    cvt.u64.u32 %tmp0_64, %tmp1;
+    shl.b64 %tmp0_64, %tmp0_64, 1;
+    add.u64 %addrC0, %c_ptr, %tmp0_64;
+    cvt.rn.f16x2.f32 %c_half, %acc41, %acc40;
+    st.global.b32 [%addrC0], %c_half;
+
+    add.u32 %tmp0, %row0, 40;
+    mul.lo.u32 %tmp1, %tmp0, %stride_cm;
+    add.u32 %tmp1, %tmp1, %col0;
+    cvt.u64.u32 %tmp0_64, %tmp1;
+    shl.b64 %tmp0_64, %tmp0_64, 1;
+    add.u64 %addrC1, %c_ptr, %tmp0_64;
+    cvt.rn.f16x2.f32 %c_half, %acc43, %acc42;
+    st.global.b32 [%addrC1], %c_half;
+
+    add.u32 %tmp0, %row0, 48;
+    mul.lo.u32 %tmp1, %tmp0, %stride_cm;
+    add.u32 %tmp1, %tmp1, %col0;
+    cvt.u64.u32 %tmp0_64, %tmp1;
+    shl.b64 %tmp0_64, %tmp0_64, 1;
+    add.u64 %addrC0, %c_ptr, %tmp0_64;
+    cvt.rn.f16x2.f32 %c_half, %acc45, %acc44;
+    st.global.b32 [%addrC0], %c_half;
+
+    add.u32 %tmp0, %row0, 56;
+    mul.lo.u32 %tmp1, %tmp0, %stride_cm;
+    add.u32 %tmp1, %tmp1, %col0;
+    cvt.u64.u32 %tmp0_64, %tmp1;
+    shl.b64 %tmp0_64, %tmp0_64, 1;
+    add.u64 %addrC1, %c_ptr, %tmp0_64;
+    cvt.rn.f16x2.f32 %c_half, %acc47, %acc46;
+    st.global.b32 [%addrC1], %c_half;
+
+    // ----- n_group = 3 -----
+    add.u32 %tmp2, %block_col, %warp_col0;
+    add.u32 %col0, %tmp2, 24;
+    add.u32 %col0, %col0, %tid_col_off;
+
+    mul.lo.u32 %tmp0, %row0, %stride_cm;
+    add.u32 %tmp0, %tmp0, %col0;
+    cvt.u64.u32 %tmp0_64, %tmp0;
+    shl.b64 %tmp0_64, %tmp0_64, 1;
+    add.u64 %addrC0, %c_ptr, %tmp0_64;
+    cvt.rn.f16x2.f32 %c_half, %acc49, %acc48;
+    st.global.b32 [%addrC0], %c_half;
+
+    add.u32 %tmp0, %row0, 8;
+    mul.lo.u32 %tmp0, %tmp0, %stride_cm;
+    add.u32 %tmp0, %tmp0, %col0;
+    cvt.u64.u32 %tmp0_64, %tmp0;
+    shl.b64 %tmp0_64, %tmp0_64, 1;
+    add.u64 %addrC1, %c_ptr, %tmp0_64;
+    cvt.rn.f16x2.f32 %c_half, %acc51, %acc50;
+    st.global.b32 [%addrC1], %c_half;
+
+    add.u32 %tmp0, %row0, 16;
+    mul.lo.u32 %tmp1, %tmp0, %stride_cm;
+    add.u32 %tmp1, %tmp1, %col0;
+    cvt.u64.u32 %tmp0_64, %tmp1;
+    shl.b64 %tmp0_64, %tmp0_64, 1;
+    add.u64 %addrC0, %c_ptr, %tmp0_64;
+    cvt.rn.f16x2.f32 %c_half, %acc53, %acc52;
+    st.global.b32 [%addrC0], %c_half;
+
+    add.u32 %tmp0, %row0, 24;
+    mul.lo.u32 %tmp1, %tmp0, %stride_cm;
+    add.u32 %tmp1, %tmp1, %col0;
+    cvt.u64.u32 %tmp0_64, %tmp1;
+    shl.b64 %tmp0_64, %tmp0_64, 1;
+    add.u64 %addrC1, %c_ptr, %tmp0_64;
+    cvt.rn.f16x2.f32 %c_half, %acc55, %acc54;
+    st.global.b32 [%addrC1], %c_half;
+
+    add.u32 %tmp0, %row0, 32;
+    mul.lo.u32 %tmp1, %tmp0, %stride_cm;
+    add.u32 %tmp1, %tmp1, %col0;
+    cvt.u64.u32 %tmp0_64, %tmp1;
+    shl.b64 %tmp0_64, %tmp0_64, 1;
+    add.u64 %addrC0, %c_ptr, %tmp0_64;
+    cvt.rn.f16x2.f32 %c_half, %acc57, %acc56;
+    st.global.b32 [%addrC0], %c_half;
+
+    add.u32 %tmp0, %row0, 40;
+    mul.lo.u32 %tmp1, %tmp0, %stride_cm;
+    add.u32 %tmp1, %tmp1, %col0;
+    cvt.u64.u32 %tmp0_64, %tmp1;
+    shl.b64 %tmp0_64, %tmp0_64, 1;
+    add.u64 %addrC1, %c_ptr, %tmp0_64;
+    cvt.rn.f16x2.f32 %c_half, %acc59, %acc58;
+    st.global.b32 [%addrC1], %c_half;
+
+    add.u32 %tmp0, %row0, 48;
+    mul.lo.u32 %tmp1, %tmp0, %stride_cm;
+    add.u32 %tmp1, %tmp1, %col0;
+    cvt.u64.u32 %tmp0_64, %tmp1;
+    shl.b64 %tmp0_64, %tmp0_64, 1;
+    add.u64 %addrC0, %c_ptr, %tmp0_64;
+    cvt.rn.f16x2.f32 %c_half, %acc61, %acc60;
+    st.global.b32 [%addrC0], %c_half;
+
+    add.u32 %tmp0, %row0, 56;
+    mul.lo.u32 %tmp1, %tmp0, %stride_cm;
+    add.u32 %tmp1, %tmp1, %col0;
+    cvt.u64.u32 %tmp0_64, %tmp1;
+    shl.b64 %tmp0_64, %tmp0_64, 1;
+    add.u64 %addrC1, %c_ptr, %tmp0_64;
+    cvt.rn.f16x2.f32 %c_half, %acc63, %acc62;
+    st.global.b32 [%addrC1], %c_half;
+
+    // ----- n_group = 4 -----
+    add.u32 %tmp2, %block_col, %warp_col0;
+    add.u32 %col0, %tmp2, 32;
+    add.u32 %col0, %col0, %tid_col_off;
+
+    mul.lo.u32 %tmp0, %row0, %stride_cm;
+    add.u32 %tmp0, %tmp0, %col0;
+    cvt.u64.u32 %tmp0_64, %tmp0;
+    shl.b64 %tmp0_64, %tmp0_64, 1;
+    add.u64 %addrC0, %c_ptr, %tmp0_64;
+    cvt.rn.f16x2.f32 %c_half, %acc65, %acc64;
+    st.global.b32 [%addrC0], %c_half;
+
+    add.u32 %tmp0, %row0, 8;
+    mul.lo.u32 %tmp0, %tmp0, %stride_cm;
+    add.u32 %tmp0, %tmp0, %col0;
+    cvt.u64.u32 %tmp0_64, %tmp0;
+    shl.b64 %tmp0_64, %tmp0_64, 1;
+    add.u64 %addrC1, %c_ptr, %tmp0_64;
+    cvt.rn.f16x2.f32 %c_half, %acc67, %acc66;
+    st.global.b32 [%addrC1], %c_half;
+
+    add.u32 %tmp0, %row0, 16;
+    mul.lo.u32 %tmp1, %tmp0, %stride_cm;
+    add.u32 %tmp1, %tmp1, %col0;
+    cvt.u64.u32 %tmp0_64, %tmp1;
+    shl.b64 %tmp0_64, %tmp0_64, 1;
+    add.u64 %addrC0, %c_ptr, %tmp0_64;
+    cvt.rn.f16x2.f32 %c_half, %acc69, %acc68;
+    st.global.b32 [%addrC0], %c_half;
+
+    add.u32 %tmp0, %row0, 24;
+    mul.lo.u32 %tmp1, %tmp0, %stride_cm;
+    add.u32 %tmp1, %tmp1, %col0;
+    cvt.u64.u32 %tmp0_64, %tmp1;
+    shl.b64 %tmp0_64, %tmp0_64, 1;
+    add.u64 %addrC1, %c_ptr, %tmp0_64;
+    cvt.rn.f16x2.f32 %c_half, %acc71, %acc70;
+    st.global.b32 [%addrC1], %c_half;
+
+    add.u32 %tmp0, %row0, 32;
+    mul.lo.u32 %tmp1, %tmp0, %stride_cm;
+    add.u32 %tmp1, %tmp1, %col0;
+    cvt.u64.u32 %tmp0_64, %tmp1;
+    shl.b64 %tmp0_64, %tmp0_64, 1;
+    add.u64 %addrC0, %c_ptr, %tmp0_64;
+    cvt.rn.f16x2.f32 %c_half, %acc73, %acc72;
+    st.global.b32 [%addrC0], %c_half;
+
+    add.u32 %tmp0, %row0, 40;
+    mul.lo.u32 %tmp1, %tmp0, %stride_cm;
+    add.u32 %tmp1, %tmp1, %col0;
+    cvt.u64.u32 %tmp0_64, %tmp1;
+    shl.b64 %tmp0_64, %tmp0_64, 1;
+    add.u64 %addrC1, %c_ptr, %tmp0_64;
+    cvt.rn.f16x2.f32 %c_half, %acc75, %acc74;
+    st.global.b32 [%addrC1], %c_half;
+
+    add.u32 %tmp0, %row0, 48;
+    mul.lo.u32 %tmp1, %tmp0, %stride_cm;
+    add.u32 %tmp1, %tmp1, %col0;
+    cvt.u64.u32 %tmp0_64, %tmp1;
+    shl.b64 %tmp0_64, %tmp0_64, 1;
+    add.u64 %addrC0, %c_ptr, %tmp0_64;
+    cvt.rn.f16x2.f32 %c_half, %acc77, %acc76;
+    st.global.b32 [%addrC0], %c_half;
+
+    add.u32 %tmp0, %row0, 56;
+    mul.lo.u32 %tmp1, %tmp0, %stride_cm;
+    add.u32 %tmp1, %tmp1, %col0;
+    cvt.u64.u32 %tmp0_64, %tmp1;
+    shl.b64 %tmp0_64, %tmp0_64, 1;
+    add.u64 %addrC1, %c_ptr, %tmp0_64;
+    cvt.rn.f16x2.f32 %c_half, %acc79, %acc78;
+    st.global.b32 [%addrC1], %c_half;
+
+    // ----- n_group = 5 -----
+    add.u32 %tmp2, %block_col, %warp_col0;
+    add.u32 %col0, %tmp2, 40;
+    add.u32 %col0, %col0, %tid_col_off;
+
+    mul.lo.u32 %tmp0, %row0, %stride_cm;
+    add.u32 %tmp0, %tmp0, %col0;
+    cvt.u64.u32 %tmp0_64, %tmp0;
+    shl.b64 %tmp0_64, %tmp0_64, 1;
+    add.u64 %addrC0, %c_ptr, %tmp0_64;
+    cvt.rn.f16x2.f32 %c_half, %acc81, %acc80;
+    st.global.b32 [%addrC0], %c_half;
+
+    add.u32 %tmp0, %row0, 8;
+    mul.lo.u32 %tmp0, %tmp0, %stride_cm;
+    add.u32 %tmp0, %tmp0, %col0;
+    cvt.u64.u32 %tmp0_64, %tmp0;
+    shl.b64 %tmp0_64, %tmp0_64, 1;
+    add.u64 %addrC1, %c_ptr, %tmp0_64;
+    cvt.rn.f16x2.f32 %c_half, %acc83, %acc82;
+    st.global.b32 [%addrC1], %c_half;
+
+    add.u32 %tmp0, %row0, 16;
+    mul.lo.u32 %tmp1, %tmp0, %stride_cm;
+    add.u32 %tmp1, %tmp1, %col0;
+    cvt.u64.u32 %tmp0_64, %tmp1;
+    shl.b64 %tmp0_64, %tmp0_64, 1;
+    add.u64 %addrC0, %c_ptr, %tmp0_64;
+    cvt.rn.f16x2.f32 %c_half, %acc85, %acc84;
+    st.global.b32 [%addrC0], %c_half;
+
+    add.u32 %tmp0, %row0, 24;
+    mul.lo.u32 %tmp1, %tmp0, %stride_cm;
+    add.u32 %tmp1, %tmp1, %col0;
+    cvt.u64.u32 %tmp0_64, %tmp1;
+    shl.b64 %tmp0_64, %tmp0_64, 1;
+    add.u64 %addrC1, %c_ptr, %tmp0_64;
+    cvt.rn.f16x2.f32 %c_half, %acc87, %acc86;
+    st.global.b32 [%addrC1], %c_half;
+
+    add.u32 %tmp0, %row0, 32;
+    mul.lo.u32 %tmp1, %tmp0, %stride_cm;
+    add.u32 %tmp1, %tmp1, %col0;
+    cvt.u64.u32 %tmp0_64, %tmp1;
+    shl.b64 %tmp0_64, %tmp0_64, 1;
+    add.u64 %addrC0, %c_ptr, %tmp0_64;
+    cvt.rn.f16x2.f32 %c_half, %acc89, %acc88;
+    st.global.b32 [%addrC0], %c_half;
+
+    add.u32 %tmp0, %row0, 40;
+    mul.lo.u32 %tmp1, %tmp0, %stride_cm;
+    add.u32 %tmp1, %tmp1, %col0;
+    cvt.u64.u32 %tmp0_64, %tmp1;
+    shl.b64 %tmp0_64, %tmp0_64, 1;
+    add.u64 %addrC1, %c_ptr, %tmp0_64;
+    cvt.rn.f16x2.f32 %c_half, %acc91, %acc90;
+    st.global.b32 [%addrC1], %c_half;
+
+    add.u32 %tmp0, %row0, 48;
+    mul.lo.u32 %tmp1, %tmp0, %stride_cm;
+    add.u32 %tmp1, %tmp1, %col0;
+    cvt.u64.u32 %tmp0_64, %tmp1;
+    shl.b64 %tmp0_64, %tmp0_64, 1;
+    add.u64 %addrC0, %c_ptr, %tmp0_64;
+    cvt.rn.f16x2.f32 %c_half, %acc93, %acc92;
+    st.global.b32 [%addrC0], %c_half;
+
+    add.u32 %tmp0, %row0, 56;
+    mul.lo.u32 %tmp1, %tmp0, %stride_cm;
+    add.u32 %tmp1, %tmp1, %col0;
+    cvt.u64.u32 %tmp0_64, %tmp1;
+    shl.b64 %tmp0_64, %tmp0_64, 1;
+    add.u64 %addrC1, %c_ptr, %tmp0_64;
+    cvt.rn.f16x2.f32 %c_half, %acc95, %acc94;
+    st.global.b32 [%addrC1], %c_half;
+
+    // ----- n_group = 6 -----
+    add.u32 %tmp2, %block_col, %warp_col0;
+    add.u32 %col0, %tmp2, 48;
+    add.u32 %col0, %col0, %tid_col_off;
+
+    mul.lo.u32 %tmp0, %row0, %stride_cm;
+    add.u32 %tmp0, %tmp0, %col0;
+    cvt.u64.u32 %tmp0_64, %tmp0;
+    shl.b64 %tmp0_64, %tmp0_64, 1;
+    add.u64 %addrC0, %c_ptr, %tmp0_64;
+    cvt.rn.f16x2.f32 %c_half, %acc97, %acc96;
+    st.global.b32 [%addrC0], %c_half;
+
+    add.u32 %tmp0, %row0, 8;
+    mul.lo.u32 %tmp0, %tmp0, %stride_cm;
+    add.u32 %tmp0, %tmp0, %col0;
+    cvt.u64.u32 %tmp0_64, %tmp0;
+    shl.b64 %tmp0_64, %tmp0_64, 1;
+    add.u64 %addrC1, %c_ptr, %tmp0_64;
+    cvt.rn.f16x2.f32 %c_half, %acc99, %acc98;
+    st.global.b32 [%addrC1], %c_half;
+
+    add.u32 %tmp0, %row0, 16;
+    mul.lo.u32 %tmp1, %tmp0, %stride_cm;
+    add.u32 %tmp1, %tmp1, %col0;
+    cvt.u64.u32 %tmp0_64, %tmp1;
+    shl.b64 %tmp0_64, %tmp0_64, 1;
+    add.u64 %addrC0, %c_ptr, %tmp0_64;
+    cvt.rn.f16x2.f32 %c_half, %acc101, %acc100;
+    st.global.b32 [%addrC0], %c_half;
+
+    add.u32 %tmp0, %row0, 24;
+    mul.lo.u32 %tmp1, %tmp0, %stride_cm;
+    add.u32 %tmp1, %tmp1, %col0;
+    cvt.u64.u32 %tmp0_64, %tmp1;
+    shl.b64 %tmp0_64, %tmp0_64, 1;
+    add.u64 %addrC1, %c_ptr, %tmp0_64;
+    cvt.rn.f16x2.f32 %c_half, %acc103, %acc102;
+    st.global.b32 [%addrC1], %c_half;
+
+    add.u32 %tmp0, %row0, 32;
+    mul.lo.u32 %tmp1, %tmp0, %stride_cm;
+    add.u32 %tmp1, %tmp1, %col0;
+    cvt.u64.u32 %tmp0_64, %tmp1;
+    shl.b64 %tmp0_64, %tmp0_64, 1;
+    add.u64 %addrC0, %c_ptr, %tmp0_64;
+    cvt.rn.f16x2.f32 %c_half, %acc105, %acc104;
+    st.global.b32 [%addrC0], %c_half;
+
+    add.u32 %tmp0, %row0, 40;
+    mul.lo.u32 %tmp1, %tmp0, %stride_cm;
+    add.u32 %tmp1, %tmp1, %col0;
+    cvt.u64.u32 %tmp0_64, %tmp1;
+    shl.b64 %tmp0_64, %tmp0_64, 1;
+    add.u64 %addrC1, %c_ptr, %tmp0_64;
+    cvt.rn.f16x2.f32 %c_half, %acc107, %acc106;
+    st.global.b32 [%addrC1], %c_half;
+
+    add.u32 %tmp0, %row0, 48;
+    mul.lo.u32 %tmp1, %tmp0, %stride_cm;
+    add.u32 %tmp1, %tmp1, %col0;
+    cvt.u64.u32 %tmp0_64, %tmp1;
+    shl.b64 %tmp0_64, %tmp0_64, 1;
+    add.u64 %addrC0, %c_ptr, %tmp0_64;
+    cvt.rn.f16x2.f32 %c_half, %acc109, %acc108;
+    st.global.b32 [%addrC0], %c_half;
+
+    add.u32 %tmp0, %row0, 56;
+    mul.lo.u32 %tmp1, %tmp0, %stride_cm;
+    add.u32 %tmp1, %tmp1, %col0;
+    cvt.u64.u32 %tmp0_64, %tmp1;
+    shl.b64 %tmp0_64, %tmp0_64, 1;
+    add.u64 %addrC1, %c_ptr, %tmp0_64;
+    cvt.rn.f16x2.f32 %c_half, %acc111, %acc110;
+    st.global.b32 [%addrC1], %c_half;
+
+    // ----- n_group = 7 -----
+    add.u32 %tmp2, %block_col, %warp_col0;
+    add.u32 %col0, %tmp2, 56;
+    add.u32 %col0, %col0, %tid_col_off;
+
+    mul.lo.u32 %tmp0, %row0, %stride_cm;
+    add.u32 %tmp0, %tmp0, %col0;
+    cvt.u64.u32 %tmp0_64, %tmp0;
+    shl.b64 %tmp0_64, %tmp0_64, 1;
+    add.u64 %addrC0, %c_ptr, %tmp0_64;
+    cvt.rn.f16x2.f32 %c_half, %acc113, %acc112;
+    st.global.b32 [%addrC0], %c_half;
+
+    add.u32 %tmp0, %row0, 8;
+    mul.lo.u32 %tmp0, %tmp0, %stride_cm;
+    add.u32 %tmp0, %tmp0, %col0;
+    cvt.u64.u32 %tmp0_64, %tmp0;
+    shl.b64 %tmp0_64, %tmp0_64, 1;
+    add.u64 %addrC1, %c_ptr, %tmp0_64;
+    cvt.rn.f16x2.f32 %c_half, %acc115, %acc114;
+    st.global.b32 [%addrC1], %c_half;
+
+    add.u32 %tmp0, %row0, 16;
+    mul.lo.u32 %tmp1, %tmp0, %stride_cm;
+    add.u32 %tmp1, %tmp1, %col0;
+    cvt.u64.u32 %tmp0_64, %tmp1;
+    shl.b64 %tmp0_64, %tmp0_64, 1;
+    add.u64 %addrC0, %c_ptr, %tmp0_64;
+    cvt.rn.f16x2.f32 %c_half, %acc117, %acc116;
+    st.global.b32 [%addrC0], %c_half;
+
+    add.u32 %tmp0, %row0, 24;
+    mul.lo.u32 %tmp1, %tmp0, %stride_cm;
+    add.u32 %tmp1, %tmp1, %col0;
+    cvt.u64.u32 %tmp0_64, %tmp1;
+    shl.b64 %tmp0_64, %tmp0_64, 1;
+    add.u64 %addrC1, %c_ptr, %tmp0_64;
+    cvt.rn.f16x2.f32 %c_half, %acc119, %acc118;
+    st.global.b32 [%addrC1], %c_half;
+
+    add.u32 %tmp0, %row0, 32;
+    mul.lo.u32 %tmp1, %tmp0, %stride_cm;
+    add.u32 %tmp1, %tmp1, %col0;
+    cvt.u64.u32 %tmp0_64, %tmp1;
+    shl.b64 %tmp0_64, %tmp0_64, 1;
+    add.u64 %addrC0, %c_ptr, %tmp0_64;
+    cvt.rn.f16x2.f32 %c_half, %acc121, %acc120;
+    st.global.b32 [%addrC0], %c_half;
+
+    add.u32 %tmp0, %row0, 40;
+    mul.lo.u32 %tmp1, %tmp0, %stride_cm;
+    add.u32 %tmp1, %tmp1, %col0;
+    cvt.u64.u32 %tmp0_64, %tmp1;
+    shl.b64 %tmp0_64, %tmp0_64, 1;
+    add.u64 %addrC1, %c_ptr, %tmp0_64;
+    cvt.rn.f16x2.f32 %c_half, %acc123, %acc122;
+    st.global.b32 [%addrC1], %c_half;
+
+    add.u32 %tmp0, %row0, 48;
+    mul.lo.u32 %tmp1, %tmp0, %stride_cm;
+    add.u32 %tmp1, %tmp1, %col0;
+    cvt.u64.u32 %tmp0_64, %tmp1;
+    shl.b64 %tmp0_64, %tmp0_64, 1;
+    add.u64 %addrC0, %c_ptr, %tmp0_64;
+    cvt.rn.f16x2.f32 %c_half, %acc125, %acc124;
+    st.global.b32 [%addrC0], %c_half;
+
+    add.u32 %tmp0, %row0, 56;
+    mul.lo.u32 %tmp1, %tmp0, %stride_cm;
+    add.u32 %tmp1, %tmp1, %col0;
+    cvt.u64.u32 %tmp0_64, %tmp1;
+    shl.b64 %tmp0_64, %tmp0_64, 1;
+    add.u64 %addrC1, %c_ptr, %tmp0_64;
+    cvt.rn.f16x2.f32 %c_half, %acc127, %acc126;
+    st.global.b32 [%addrC1], %c_half;
+
+    ret;
+}
