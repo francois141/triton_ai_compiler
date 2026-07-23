@@ -6,8 +6,6 @@ import json
 from pathlib import Path
 from time import perf_counter
 
-from openai import OpenAI
-
 from prompts.improvement import (
     build_candidate_prompt,
     build_failure_analysis_prompt,
@@ -28,12 +26,12 @@ from utils.evaluation import (
 )
 from triton_ptx import Payload
 from utils.cost import append_daily_cost_summary
-from skills import load_ptx
-from utils.response import request_json, response_json_text, verifier_for_kernel
+from utils.providers import create_provider_session
+from utils.response import response_json_text, verifier_for_kernel
 from utils.setup import (
     build_initial_prompt,
-    build_tools,
     load_start_json,
+    load_triton_generated_ptx,
 )
 from utils.traces import (
     create_trace_directory,
@@ -103,7 +101,7 @@ def _should_repair_candidate(evaluation):
 
 
 def _generate_tested_candidate(
-    client,
+    provider_session,
     evaluator,
     responses,
     trace_path,
@@ -116,7 +114,6 @@ def _generate_tested_candidate(
     round_index,
     candidate_index,
     reasoning_effort,
-    tools,
     max_repair_attempts,
 ):
     candidate_prompt = build_candidate_prompt(
@@ -134,13 +131,11 @@ def _generate_tested_candidate(
         idea=idea,
         speedup_vs_triton=best_evaluation.speedup_vs_triton,
     )
-    response, _ = request_json(
-        client,
+    response, _ = provider_session.request_json(
         model=model,
         prompt=candidate_prompt,
         response_format=PTX_KERNEL_RESPONSE_FORMAT,
         reasoning_effort=reasoning_effort,
-        tools=tools,
         kernel_name=kernel_name,
     )
     responses.append(response.model_dump(mode="json"))
@@ -192,13 +187,11 @@ def _generate_tested_candidate(
             idea=idea,
             speedup_vs_triton=best_attempt.speedup_vs_triton,
         )
-        analysis_response, _ = request_json(
-            client,
+        analysis_response, _ = provider_session.request_json(
             model=model,
             prompt=analysis_prompt,
             response_format=FAILURE_ANALYSIS_RESPONSE_FORMAT,
             reasoning_effort=reasoning_effort,
-            tools=tools,
             kernel_name=kernel_name,
         )
         responses.append(analysis_response.model_dump(mode="json"))
@@ -226,13 +219,11 @@ def _generate_tested_candidate(
             idea=idea,
             speedup_vs_triton=best_attempt.speedup_vs_triton,
         )
-        response, _ = request_json(
-            client,
+        response, _ = provider_session.request_json(
             model=model,
             prompt=repair_prompt,
             response_format=PTX_KERNEL_RESPONSE_FORMAT,
             reasoning_effort=reasoning_effort,
-            tools=tools,
             kernel_name=kernel_name,
         )
         responses.append(response.model_dump(mode="json"))
@@ -266,7 +257,7 @@ def _generate_tested_candidate(
 
 
 def _repair_initial_candidate(
-    client,
+    provider_session,
     evaluator,
     responses,
     trace_path,
@@ -276,7 +267,6 @@ def _repair_initial_candidate(
     base_prompt,
     initial_evaluation,
     reasoning_effort,
-    tools,
     max_repair_attempts,
 ):
     best_attempt = initial_evaluation
@@ -305,13 +295,11 @@ def _repair_initial_candidate(
             candidate_index=0,
             speedup_vs_triton=best_attempt.speedup_vs_triton,
         )
-        analysis_response, _ = request_json(
-            client,
+        analysis_response, _ = provider_session.request_json(
             model=model,
             prompt=analysis_prompt,
             response_format=FAILURE_ANALYSIS_RESPONSE_FORMAT,
             reasoning_effort=reasoning_effort,
-            tools=tools,
             kernel_name=kernel_name,
         )
         responses.append(analysis_response.model_dump(mode="json"))
@@ -336,13 +324,11 @@ def _repair_initial_candidate(
             candidate_index=0,
             speedup_vs_triton=best_attempt.speedup_vs_triton,
         )
-        response, _ = request_json(
-            client,
+        response, _ = provider_session.request_json(
             model=model,
             prompt=repair_prompt,
             response_format=PTX_KERNEL_RESPONSE_FORMAT,
             reasoning_effort=reasoning_effort,
-            tools=tools,
             kernel_name=kernel_name,
         )
         responses.append(response.model_dump(mode="json"))
@@ -379,14 +365,20 @@ def run_agent_loop(
     kernel_name,
     *,
     model,
+    provider="openai",
     max_tool_rounds,
     max_repair_attempts,
     reasoning_effort,
     trace_path,
     start_json=None,
+    start_triton_generated_ptx=False,
 ):
     if max_repair_attempts < 0:
         raise ValueError("max_repair_attempts must be non-negative.")
+    if start_json is not None and start_triton_generated_ptx:
+        raise ValueError(
+            "--start-json and --start-triton-generated-ptx cannot be used together."
+        )
 
     trace_path = create_trace_directory(
         trace_path,
@@ -397,12 +389,13 @@ def run_agent_loop(
     print(f"=== Writing trace artifacts to {trace_path} ===", flush=True)
 
     evaluator = verifier_for_kernel(kernel_name)
-    client = OpenAI()
-    skill_id = load_ptx(client)
-    print(f"=== Uploaded PTX skill {skill_id} ===", flush=True)
-    tools = build_tools(skill_id)
+    provider_session = create_provider_session(provider)
 
-    starting_candidate = load_start_json(start_json)
+    starting_candidate = (
+        load_triton_generated_ptx(kernel_name)
+        if start_triton_generated_ptx
+        else load_start_json(start_json)
+    )
     base_prompt = build_initial_prompt(kernel_name)
     responses = []
     recent_evaluations = []
@@ -430,13 +423,11 @@ def run_agent_loop(
                 round_index=0,
                 speedup_vs_triton=None,
             )
-            response, _ = request_json(
-                client,
+            response, _ = provider_session.request_json(
                 model=model,
                 prompt=base_prompt,
                 response_format=PTX_KERNEL_RESPONSE_FORMAT,
                 reasoning_effort=reasoning_effort,
-                tools=tools,
                 kernel_name=kernel_name,
             )
             responses.append(response.model_dump(mode="json"))
@@ -457,7 +448,7 @@ def run_agent_loop(
             attempt_index=0,
         )
         best_evaluation = _repair_initial_candidate(
-            client,
+            provider_session,
             evaluator,
             responses,
             trace_path,
@@ -466,7 +457,6 @@ def run_agent_loop(
             base_prompt=base_prompt,
             initial_evaluation=best_evaluation,
             reasoning_effort=reasoning_effort,
-            tools=tools,
             max_repair_attempts=max_repair_attempts,
         )
         if not best_evaluation.passed:
@@ -493,13 +483,11 @@ def run_agent_loop(
                 speedup_vs_triton=best_evaluation.speedup_vs_triton,
             )
             request_start = perf_counter()
-            response, cost = request_json(
-                client,
+            response, cost = provider_session.request_json(
                 model=model,
                 prompt=plan_prompt,
                 response_format=IMPROVEMENT_PLAN_RESPONSE_FORMAT,
                 reasoning_effort=reasoning_effort,
-                tools=tools,
                 kernel_name=kernel_name,
             )
             request_duration = perf_counter() - request_start
@@ -529,7 +517,7 @@ def run_agent_loop(
                     flush=True,
                 )
                 evaluated_candidate = _generate_tested_candidate(
-                    client,
+                    provider_session,
                     evaluator,
                     responses,
                     trace_path,
@@ -541,7 +529,6 @@ def run_agent_loop(
                     round_index=round_index,
                     candidate_index=candidate_index,
                     reasoning_effort=reasoning_effort,
-                    tools=tools,
                     max_repair_attempts=max_repair_attempts,
                 )
                 recent_evaluations.append(evaluated_candidate)
@@ -590,12 +577,16 @@ def run_agent_loop(
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Optimize PTX with an OpenAI agent.")
+    parser = argparse.ArgumentParser(description="Optimize PTX with an LLM agent.")
     parser.add_argument("kernel", help="Kernel class name, for example AddKernel.")
+    parser.add_argument("--model", help="Model to use; defaults depend on --provider.")
     parser.add_argument(
-        "--model", default="gpt-5.6-sol", help="OpenAI model to use for optimization."
+        "--provider",
+        choices=("openai", "anthropic"),
+        default="openai",
+        help="LLM API provider to use.",
     )
-    parser.add_argument("--max-tool-rounds", type=int, default=5)
+    parser.add_argument("--max-tool-rounds", type=int, default=3)
     parser.add_argument(
         "--max-repair-attempts",
         type=int,
@@ -609,19 +600,36 @@ def parse_args():
         default=Path("output_traces"),
         help="Directory where a dated per-kernel trace folder is created.",
     )
-    parser.add_argument(
+    start_group = parser.add_mutually_exclusive_group()
+    start_group.add_argument(
         "--start-json",
         help="Inline candidate JSON or path to a candidate JSON file.",
+    )
+    start_group.add_argument(
+        "--start-triton-generated-ptx",
+        action="store_true",
+        help=(
+            "Start from triton_generated_ptx/<kernel>.ptx and launch it with "
+            "128 threads."
+        ),
     )
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
+    model = (
+        args.model
+        or {
+            "openai": "gpt-5.6-sol",
+            "anthropic": "claude-opus-4-8",
+        }[args.provider]
+    )
     print(
         run_agent_loop(
             args.kernel,
-            model=args.model,
+            model=model,
+            provider=args.provider,
             max_tool_rounds=args.max_tool_rounds,
             max_repair_attempts=args.max_repair_attempts,
             reasoning_effort=(
@@ -629,6 +637,7 @@ def main():
             ),
             trace_path=args.trace_path,
             start_json=args.start_json,
+            start_triton_generated_ptx=args.start_triton_generated_ptx,
         )
     )
 

@@ -1,6 +1,7 @@
 # Triton PTX Client
 
-An OpenAI tool-calling agent for optimizing Triton kernels as PTX. It compiles,
+An OpenAI- and Anthropic-compatible tool-calling agent for optimizing Triton
+kernels as PTX. It compiles,
 verifies, benchmarks, and records every candidate it evaluates.
 
 ## Setup
@@ -18,7 +19,8 @@ uv pip install -e triton_ptx
 uv pip install numpy
 ```
 
-The agent uploads the bundled PTX skill before each run. Ensure the
+Both providers upload the bundled PTX skill before each run. The Anthropic
+provider uses Anthropic's Skills API and code-execution tool; ensure the
 `skills/ptx_skills` submodule is initialized as part of the command above.
 
 ## Test installation
@@ -30,20 +32,40 @@ python smoke_run.py
 ## Optimize a kernel
 
 ```bash
-python -m openai_agent_tools MatrixMultiplicationKernel
+python -m agent MatrixMultiplicationFloat16
+```
+
+Use Claude through Anthropic's Messages API by installing the optional SDK and
+selecting the provider. This reads `ANTHROPIC_API_KEY`; the OpenAI default reads
+`OPENAI_API_KEY`.
+
+```bash
+uv pip install anthropic
+python -m agent MatrixMultiplicationFloat16 \
+  --provider anthropic
 ```
 
 To continue from a candidate JSON file or inline JSON, use `--start-json`:
 
 ```bash
-python -m openai_agent_tools MatrixMultiplicationKernel \
+python -m agent MatrixMultiplicationFloat16 \
   --start-json output_traces/folder/final_speedup_vs_triton_*.json
+```
+
+To use the extracted Triton PTX for the selected kernel as the starting
+candidate, with a 128-thread launch, use `--start-triton-generated-ptx`:
+
+```bash
+python -m agent MatrixMultiplicationFloat16 \
+  --start-triton-generated-ptx
 ```
 
 Each run creates a timestamped directory under `output_traces/`, containing
 prompts, model responses, evaluated candidate JSON and PTX artifacts, and the
-final candidate. Configure the run with `--model`, `--max-tool-rounds`,
+final candidate. Configure the run with `--provider`, `--model`, `--max-tool-rounds`,
 `--max-repair-attempts`, `--reasoning-effort`, and `--trace-path`.
+`--reasoning-effort` applies to OpenAI models; Anthropic requests use the
+Messages API's standard tool-use flow.
 
 ## Utilities
 

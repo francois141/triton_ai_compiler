@@ -28,16 +28,33 @@ def extract_payload(record):
     if isinstance(payload, dict):
         return payload
 
+    candidate = record.get("candidate")
+    if isinstance(candidate, dict) and "ptx" in candidate:
+        return candidate
+
+    evaluation = record.get("evaluation")
+    if isinstance(evaluation, dict):
+        evaluated_payload = evaluation.get("payload")
+        if isinstance(evaluated_payload, dict):
+            return evaluated_payload
+
     # Accept a raw payload file too, so users can remeasure either archived
     # EvaluatedCandidate JSON or just {"ptx": ..., "num_threads_x": ...}.
     if "ptx" in record:
         return record
 
-    raise ValueError('Input JSON must contain a "payload" object or be a raw PTX payload.')
+    raise ValueError(
+        'Input JSON must contain a "payload" or "candidate" PTX object, or be '
+        "a raw PTX payload."
+    )
 
 
 def resolve_kernel_name(record, explicit_kernel):
-    kernel_name = explicit_kernel or record.get("kernel_name")
+    evaluation = record.get("evaluation")
+    archived_kernel_name = (
+        evaluation.get("kernel_name") if isinstance(evaluation, dict) else None
+    )
+    kernel_name = explicit_kernel or record.get("kernel_name") or archived_kernel_name
     if not isinstance(kernel_name, str) or not kernel_name.strip():
         raise ValueError(
             'Kernel name is missing. Include "kernel_name" in the JSON or pass --kernel.'
@@ -71,7 +88,7 @@ def parse_args():
     parser.add_argument(
         "json_path",
         type=Path,
-        help="Path to an EvaluatedCandidate JSON file or raw PTX payload JSON.",
+        help="Path to an evaluated candidate, archived trace, or raw PTX payload JSON.",
     )
     parser.add_argument(
         "--kernel",

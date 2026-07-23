@@ -97,7 +97,7 @@ Name: {idea["name"]}
 Rationale: {idea["rationale"]}
 Instruction: {idea["instruction"]}
 
-Generate exactly one PTX candidate by applying only this improvement to the
+Generate PTX candidate variations that apply only this improvement to the
 current best. Preserve correctness and the required output schema.
 
 This must be a micro-edit of the current best PTX. Preserve its tiling strategy,
@@ -115,10 +115,12 @@ arithmetic. Leave the compute microkernel and stores intact. If the idea turns
 out not to apply, make the smallest useful related micro-change instead.
 
 Before returning the final JSON for this candidate, call the available
-`triton_ptx` tool to compile, verify, and benchmark your attempted improvement.
-If it fails compilation or correctness, repair the same attempted candidate
+`triton_ptx` tool to compile, verify, and benchmark every variation you choose
+to investigate. You may call the tool multiple times before returning: use it
+to compare technically distinct micro-variations of this same improvement and
+their performance. If a variation fails compilation or correctness, repair it
 using the diagnostics and call `triton_ptx` again. Return only the fastest
-verified version you actually tested. If no repair passes, return the closest
+verified variation you actually tested. If no repair passes, return the closest
 repaired candidate you tested so the outer loop can record diagnostics.
 """.strip()
 

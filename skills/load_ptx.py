@@ -9,6 +9,7 @@ from openai import OpenAI
 
 PTX_SKILL_DIR = Path(__file__).resolve().parent / "ptx_skills" / "ptx_skill"
 PTX_SKILL_NAME = "ptx"
+ANTHROPIC_SKILLS_BETA = "skills-2025-10-02"
 
 
 def _validate_skill_dir(skill_dir):
@@ -54,4 +55,31 @@ def load_ptx(client = None):
         with zip_path.open("rb") as skill_file:
             skill = openai_client.skills.create(files=[skill_file])
 
+    return skill.id
+
+
+def load_anthropic_ptx(client):
+    from anthropic.lib import files_from_dir
+
+    _validate_skill_dir(PTX_SKILL_DIR)
+    existing_skill = next(
+        (
+            skill
+            for skill in client.beta.skills.list(
+                source="custom",
+                limit=100,
+                betas=[ANTHROPIC_SKILLS_BETA],
+            )
+            if skill.display_title == PTX_SKILL_NAME
+        ),
+        None,
+    )
+    if existing_skill is not None:
+        return existing_skill.id
+
+    skill = client.beta.skills.create(
+        files=files_from_dir(PTX_SKILL_DIR),
+        display_title=PTX_SKILL_NAME,
+        betas=[ANTHROPIC_SKILLS_BETA],
+    )
     return skill.id

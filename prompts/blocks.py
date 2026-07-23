@@ -74,6 +74,14 @@ When stopping, return the fastest verified candidate using the required
 `ptx`, `num_threads_x`, `num_threads_y`, and `num_threads_z` schema. Do not
 return analysis, benchmark commentary, markdown fences, or a newly modified
 candidate that was not evaluated.
+
+To improve the performance of the kernel, the main priority should be increasing data reuse instead of relying only on `cp.async` and triple buffering. 
+The current design computes the output in four separate 128×32 panels, which causes the same A tile to be loaded four times and roughly doubles the number of `ldmatrix` instructions compared with the first kernel.
+
+A better approach would be to compute wider output panels, such as 128×64 or 128×128, so that each loaded A fragment is reused across more B fragments and more Tensor Core operations. 
+It is also worth testing a two-stage pipeline instead of three stages to reduce shared-memory usage and allow more blocks to reside on each SM. In addition, the output-store mapping should be reorganized so that each warp writes fully coalesced 32-byte sectors, and invariant pointer calculations should be moved outside the inner loop. 
+Finally, compare the generated SASS and Nsight Compute metrics rather than judging the PTX alone, especially register usage, occupancy, L2 traffic, shared-memory bank conflicts, `cp.async` wait stalls, Tensor Core utilization, and global-store efficiency.
+
 """.strip()
 
 
@@ -169,7 +177,8 @@ def signature_template(
 ## PTX Entry Template
 
 Use this exact entry template shape and fill the body with your PTX:
-- Any argument name containing `_ptr` should be treated as a pointer to float32 data.
+- Any argument name containing `_ptr` should be treated as a pointer to float16 data.
+- Each dimension of each tensor is a multiple of 32 in size.
 
 
 ```ptx

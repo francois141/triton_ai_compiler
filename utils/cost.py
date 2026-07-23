@@ -138,10 +138,14 @@ def estimate_response_cost(response, model):
     )
     cached_input_tokens = _get_nested_int(
         usage, "input_tokens_details", "cached_tokens"
-    ) or _get_nested_int(usage, "prompt_tokens_details", "cached_tokens")
+    ) or _get_nested_int(
+        usage, "prompt_tokens_details", "cached_tokens"
+    ) or _get_nested_int(usage, "cache_read_input_tokens")
     cache_write_tokens = _get_nested_int(
         usage, "input_tokens_details", "cache_write_tokens"
-    ) or _get_nested_int(usage, "prompt_tokens_details", "cache_write_tokens")
+    ) or _get_nested_int(
+        usage, "prompt_tokens_details", "cache_write_tokens"
+    ) or _get_nested_int(usage, "cache_creation_input_tokens")
     tool_usage = getattr(response, "tool_usage", None)
     web_search_calls = _get_nested_int(
         tool_usage, "web_search", "num_requests"

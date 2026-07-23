@@ -1,8 +1,8 @@
 import json
 import time
+from dataclasses import dataclass
 from functools import cache
 
-from openai import NotFoundError
 from triton_ptx import Payload, TritonPTXCandidateEvaluator, resolve_kernel
 
 from .cost import append_cost_log
@@ -10,6 +10,12 @@ from prompts.blocks import system_prompt
 
 
 RESPONSE_RETRY_ATTEMPTS = 6
+ANTHROPIC_MAX_TOKENS = 16_384
+ANTHROPIC_SKILLS_BETA = "skills-2025-10-02"
+ANTHROPIC_CODE_EXECUTION_TOOL = {
+    "type": "code_execution_20260521",
+    "name": "code_execution",
+}
 
 
 @cache
@@ -91,7 +97,150 @@ def response_json_text(response):
     return fallback_text
 
 
-def request_json(
+@dataclass(slots=True)
+class _AnthropicResponse:
+    output_text: str
+    usage: object
+    response: object
+
+    def model_dump(self, mode="json"):
+        del mode
+        return {
+            "provider": "anthropic",
+            "output_text": self.output_text,
+            "response": _json_value(self.response),
+        }
+
+
+def _json_value(value):
+    if hasattr(value, "model_dump"):
+        return value.model_dump(mode="json")
+    if hasattr(value, "to_dict"):
+        return value.to_dict()
+    return value
+
+
+def _anthropic_response_tool(response_format):
+    return {
+        "name": "submit_response",
+        "description": (
+            "Submit the final response after using launch_verifier as needed. "
+            "The submitted value must exactly match this response schema."
+        ),
+        "input_schema": response_format["schema"],
+    }
+
+
+def request_anthropic_json(
+    client,
+    *,
+    model,
+    prompt,
+    response_format,
+    tools,
+    kernel_name,
+    skill_id,
+):
+    verifier = verifier_for_kernel(kernel_name)
+    messages = [{"role": "user", "content": prompt}]
+    anthropic_tools = [
+        *tools,
+        _anthropic_response_tool(response_format),
+        ANTHROPIC_CODE_EXECUTION_TOOL,
+    ]
+    container = {
+        "skills": [
+            {
+                "type": "custom",
+                "skill_id": skill_id,
+                "version": "latest",
+            }
+        ]
+    }
+    total_cost = None
+
+    while True:
+        response = client.beta.messages.create(
+            model=model,
+            max_tokens=ANTHROPIC_MAX_TOKENS,
+            system=system_prompt(),
+            messages=messages,
+            tools=anthropic_tools,
+            container=container,
+            betas=[ANTHROPIC_SKILLS_BETA],
+        )
+        cost = append_cost_log(model=model, response=response)
+        if cost is not None:
+            total_cost = (total_cost or 0) + cost
+
+        tool_uses = [
+            block
+            for block in response.content
+            if _get_field(block, "type") == "tool_use"
+        ]
+        submitted_response = next(
+            (
+                tool_use
+                for tool_use in tool_uses
+                if _get_field(tool_use, "name") == "submit_response"
+            ),
+            None,
+        )
+        if submitted_response is not None:
+            response_text = json.dumps(_get_field(submitted_response, "input"))
+            return (
+                _AnthropicResponse(response_text, response.usage, response),
+                total_cost,
+            )
+        if _get_field(response, "stop_reason") == "pause_turn":
+            container_id = _get_field(_get_field(response, "container"), "id")
+            if isinstance(container_id, str):
+                container["id"] = container_id
+            messages.append(
+                {
+                    "role": "assistant",
+                    "content": [_json_value(block) for block in response.content],
+                }
+            )
+            continue
+        if not tool_uses:
+            raise ValueError(
+                "Anthropic response did not call submit_response with the "
+                "required structured output."
+            )
+
+        tool_results = []
+        for tool_use in tool_uses:
+            tool_name = _get_field(tool_use, "name")
+            tool_id = _get_field(tool_use, "id")
+            print(
+                f"=== LLM called tool: tool={tool_name}, id={tool_id} ===",
+                flush=True,
+            )
+            if tool_name != "launch_verifier":
+                raise RuntimeError(f"Unsupported Anthropic tool call: {tool_name}")
+            evaluation = verifier.evaluate(
+                Payload.from_input(_get_field(tool_use, "input"))
+            )
+            tool_results.append(
+                {
+                    "type": "tool_result",
+                    "tool_use_id": tool_id,
+                    "content": evaluation.to_json(indent=2),
+                }
+            )
+        messages.extend(
+            [
+                {
+                    "role": "assistant",
+                    "content": [_json_value(block) for block in response.content],
+                },
+                {"role": "user", "content": tool_results},
+            ]
+        )
+
+
+def request_openai_json(
     client,
     *,
     model,
@@ -101,6 +250,8 @@ def request_json(
     tools,
     kernel_name,
 ):
+    from openai import NotFoundError
+
     verifier = verifier_for_kernel(kernel_name)
     kwargs = {
         "model": model,

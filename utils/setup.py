@@ -11,7 +11,12 @@ from triton_ptx import (
 from utils.response_format import PtxKernel
 
 
-def build_tools(skill_id):
+TRITON_GENERATED_PTX_DIRECTORY = (
+    Path(__file__).resolve().parent.parent / "triton_generated_ptx"
+)
+
+
+def build_openai_tools(skill_id=None):
     tools = [
         {
             "type": "function",
@@ -58,6 +63,17 @@ def build_tools(skill_id):
     return tools
 
 
+def build_anthropic_tools():
+    verifier_tool = build_openai_tools()[0]
+    return [
+        {
+            "name": verifier_tool["name"],
+            "description": verifier_tool["description"],
+            "input_schema": verifier_tool["parameters"],
+        }
+    ]
+
+
 def build_initial_prompt(kernel_name):
     kernel_cls = resolve_kernel(kernel_name)
     version, target, address_size = get_ptx_system_config()
@@ -83,7 +99,9 @@ def load_start_json(start_json):
     loaded_data = json.loads(serialized_candidate)
     if not isinstance(loaded_data, dict):
         raise ValueError("Starting candidate JSON must contain an object.")
-    candidate_data = loaded_data.get("payload", loaded_data.get("candidate", loaded_data))
+    candidate_data = loaded_data.get(
+        "payload", loaded_data.get("candidate", loaded_data)
+    )
     if not isinstance(candidate_data, dict):
         raise ValueError("Starting candidate payload must contain an object.")
     candidate_data = {
@@ -92,3 +110,15 @@ def load_start_json(start_json):
         if key in PtxKernel.model_fields
     }
     return PtxKernel.model_validate(candidate_data)
+
+
+def load_triton_generated_ptx(kernel_name):
+    ptx_path = TRITON_GENERATED_PTX_DIRECTORY / f"{kernel_name}.ptx"
+    try:
+        ptx = ptx_path.read_text(encoding="utf-8")
+    except FileNotFoundError as exc:
+        raise FileNotFoundError(
+            f"No generated PTX found for {kernel_name!r}: {ptx_path}"
+        ) from exc
+
+    return PtxKernel(ptx=ptx, num_threads_x=128)
