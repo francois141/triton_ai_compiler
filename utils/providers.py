@@ -1,5 +1,8 @@
 from .response import request_anthropic_json, request_openai_json
 from .setup import build_anthropic_tools, build_openai_tools
+from openai import OpenAI
+from anthropic import Anthropic
+from skills import load_ptx, load_anthropic_ptx
 
 
 class ProviderSession:
@@ -68,22 +71,11 @@ class AnthropicProviderSession(ProviderSession):
 
 def create_provider_session(provider):
     if provider == "openai":
-        from openai import OpenAI
-        from skills import load_ptx
-
         client = OpenAI()
         skill_id = load_ptx(client)
         print(f"=== Uploaded PTX skill {skill_id} ===", flush=True)
         return OpenAIProviderSession(client, build_openai_tools(skill_id))
-
-    if provider == "anthropic":
-        try:
-            from anthropic import Anthropic
-            from skills import load_anthropic_ptx
-        except ImportError as error:
-            raise RuntimeError(
-                "Anthropic support requires `uv pip install anthropic`."
-            ) from error
+    elif provider == "anthropic":
         client = Anthropic()
         skill_id = load_anthropic_ptx(client)
         print(f"=== Uploaded PTX skill {skill_id} ===", flush=True)
