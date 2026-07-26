@@ -35,6 +35,10 @@ python smoke_run.py
 python -m agent MatrixMultiplicationFloat16
 ```
 
+By default, the agent starts from
+`triton_generated_ptx/<kernel>.ptx`, evaluates it, and applies localized PTX
+patches. It does not generate an initial PTX implementation from scratch.
+
 Use Claude through Anthropic's Messages API by installing the optional SDK and
 selecting the provider. This reads `ANTHROPIC_API_KEY`; the OpenAI default reads
 `OPENAI_API_KEY`.
@@ -52,18 +56,41 @@ python -m agent MatrixMultiplicationFloat16 \
   --start-json output_traces/folder/final_speedup_vs_triton_*.json
 ```
 
-To use the extracted Triton PTX for the selected kernel as the starting
-candidate, with a 128-thread launch, use `--start-triton-generated-ptx`:
+`--start-triton-generated-ptx` remains available as a compatibility flag; it
+has the same behavior as the default:
 
 ```bash
 python -m agent MatrixMultiplicationFloat16 \
   --start-triton-generated-ptx
 ```
 
+To optimize an existing PTX file without asking the model to reproduce the
+entire file, pass it with `--start-ptx`. The model edits the working PTX using
+small unified diffs, each edit is evaluated, and the final source is written to
+`final_candidate.ptx` in the run's trace directory.
+
+```bash
+python -m agent MatrixMultiplicationFloat16 \
+  --start-ptx path/to/candidate.ptx \
+  --start-num-threads-x 128
+```
+
+Set `--start-num-threads-y` and `--start-num-threads-z` when the existing
+kernel uses a multidimensional launch.
+
+To choose improvements solely from the current Nsight Compute report, set
+`NCU_PATH` and use `--ncu-decision`. The run stops with an error if NCU does
+not produce a usable report.
+
+```bash
+python -m agent MatrixMultiplicationFloat16 --ncu-decision
+```
+
 Each run creates a timestamped directory under `output_traces/`, containing
 prompts, model responses, evaluated candidate JSON and PTX artifacts, and the
 final candidate. Configure the run with `--provider`, `--model`, `--max-tool-rounds`,
-`--max-repair-attempts`, `--reasoning-effort`, and `--trace-path`.
+`--max-repair-attempts`, `--reasoning-effort`, `--trace-path`, and
+`--ncu-decision`.
 `--reasoning-effort` applies to OpenAI models; Anthropic requests use the
 Messages API's standard tool-use flow.
 

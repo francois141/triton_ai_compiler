@@ -11,14 +11,17 @@ from prompts.improvement import (
     build_failure_analysis_prompt,
     build_improvement_prompt,
     build_initial_repair_prompt,
+    build_ncu_improvement_prompt,
     build_repair_prompt,
 )
 from utils.response_format import (
     FAILURE_ANALYSIS_RESPONSE_FORMAT,
     IMPROVEMENT_PLAN_RESPONSE_FORMAT,
+    PTX_KERNEL_METADATA_RESPONSE_FORMAT,
     PTX_KERNEL_RESPONSE_FORMAT,
     FailureAnalysis,
     PtxKernel,
+    PtxKernelMetadata,
 )
 from utils.evaluation import (
     candidate_from_evaluation,
@@ -31,6 +34,7 @@ from utils.response import response_json_text, verifier_for_kernel
 from utils.setup import (
     build_initial_prompt,
     load_start_json,
+    load_start_ptx,
     load_triton_generated_ptx,
 )
 from utils.traces import (
@@ -44,6 +48,34 @@ from utils.traces import (
 
 def _candidate_json(candidate):
     return candidate.model_dump_json(exclude_none=False, indent=2)
+
+
+def _candidate_from_patch_response(response, patched_candidate):
+    if patched_candidate is None:
+        raise ValueError("The model did not apply a PTX patch.")
+    metadata = PtxKernelMetadata.model_validate_json(response_json_text(response))
+    launch_dimensions = (
+        metadata.num_threads_x,
+        metadata.num_threads_y,
+        metadata.num_threads_z,
+    )
+    patched_dimensions = (
+        patched_candidate.num_threads_x,
+        patched_candidate.num_threads_y,
+        patched_candidate.num_threads_z,
+    )
+    if launch_dimensions != patched_dimensions:
+        raise ValueError(
+            "The final launch metadata must match the most recently patched "
+            "and verified PTX candidate."
+        )
+    return PtxKernel(
+        ptx=patched_candidate.ptx,
+        num_threads_x=metadata.num_threads_x,
+        num_threads_y=metadata.num_threads_y,
+        num_threads_z=metadata.num_threads_z,
+        difficulties=metadata.difficulties,
+    )
 
 
 def _evaluate_and_record(
@@ -100,6 +132,16 @@ def _should_repair_candidate(evaluation):
     return bool(evaluation.timing_error)
 
 
+def _require_ncu_report(evaluation):
+    ncu_report = evaluation.ncu_report
+    if ncu_report.get("available") and ncu_report.get("summary"):
+        return
+    raise RuntimeError(
+        "--ncu-decision requires a successful Nsight Compute report. "
+        f"NCU error: {ncu_report.get('error', '')}"
+    )
+
+
 def _generate_tested_candidate(
     provider_session,
     evaluator,
@@ -131,16 +173,17 @@ def _generate_tested_candidate(
         idea=idea,
         speedup_vs_triton=best_evaluation.speedup_vs_triton,
     )
-    response, _ = provider_session.request_json(
+    response, _, patched_candidate = provider_session.request_json(
         model=model,
         prompt=candidate_prompt,
-        response_format=PTX_KERNEL_RESPONSE_FORMAT,
+        response_format=PTX_KERNEL_METADATA_RESPONSE_FORMAT,
         reasoning_effort=reasoning_effort,
         kernel_name=kernel_name,
+        current_candidate=candidate_from_evaluation(best_evaluation),
     )
     responses.append(response.model_dump(mode="json"))
     write_trace(trace_path, responses)
-    candidate = PtxKernel.model_validate_json(response_json_text(response))
+    candidate = _candidate_from_patch_response(response, patched_candidate)
     print(
         "--- Generated candidate ---\n"
         f"{_candidate_json(candidate)}\n"
@@ -187,7 +230,7 @@ def _generate_tested_candidate(
             idea=idea,
             speedup_vs_triton=best_attempt.speedup_vs_triton,
         )
-        analysis_response, _ = provider_session.request_json(
+        analysis_response, _, _ = provider_session.request_json(
             model=model,
             prompt=analysis_prompt,
             response_format=FAILURE_ANALYSIS_RESPONSE_FORMAT,
@@ -219,16 +262,17 @@ def _generate_tested_candidate(
             idea=idea,
             speedup_vs_triton=best_attempt.speedup_vs_triton,
         )
-        response, _ = provider_session.request_json(
+        response, _, patched_candidate = provider_session.request_json(
             model=model,
             prompt=repair_prompt,
-            response_format=PTX_KERNEL_RESPONSE_FORMAT,
+            response_format=PTX_KERNEL_METADATA_RESPONSE_FORMAT,
             reasoning_effort=reasoning_effort,
             kernel_name=kernel_name,
+            current_candidate=candidate_from_evaluation(best_attempt),
         )
         responses.append(response.model_dump(mode="json"))
         write_trace(trace_path, responses)
-        repaired_candidate = PtxKernel.model_validate_json(response_json_text(response))
+        repaired_candidate = _candidate_from_patch_response(response, patched_candidate)
         print(
             "--- Repaired candidate ---\n"
             f"{_candidate_json(repaired_candidate)}\n"
@@ -295,7 +339,7 @@ def _repair_initial_candidate(
             candidate_index=0,
             speedup_vs_triton=best_attempt.speedup_vs_triton,
         )
-        analysis_response, _ = provider_session.request_json(
+        analysis_response, _, _ = provider_session.request_json(
             model=model,
             prompt=analysis_prompt,
             response_format=FAILURE_ANALYSIS_RESPONSE_FORMAT,
@@ -324,16 +368,17 @@ def _repair_initial_candidate(
             candidate_index=0,
             speedup_vs_triton=best_attempt.speedup_vs_triton,
         )
-        response, _ = provider_session.request_json(
+        response, _, patched_candidate = provider_session.request_json(
             model=model,
             prompt=repair_prompt,
-            response_format=PTX_KERNEL_RESPONSE_FORMAT,
+            response_format=PTX_KERNEL_METADATA_RESPONSE_FORMAT,
             reasoning_effort=reasoning_effort,
             kernel_name=kernel_name,
+            current_candidate=candidate_from_evaluation(best_attempt),
         )
         responses.append(response.model_dump(mode="json"))
         write_trace(trace_path, responses)
-        repaired_candidate = PtxKernel.model_validate_json(response_json_text(response))
+        repaired_candidate = _candidate_from_patch_response(response, patched_candidate)
         print(
             "--- Repaired initial candidate ---\n"
             f"{_candidate_json(repaired_candidate)}\n"
@@ -371,13 +416,25 @@ def run_agent_loop(
     reasoning_effort,
     trace_path,
     start_json=None,
+    start_ptx=None,
+    start_num_threads_x=128,
+    start_num_threads_y=1,
+    start_num_threads_z=1,
     start_triton_generated_ptx=False,
+    ncu_decision=False,
 ):
     if max_repair_attempts < 0:
         raise ValueError("max_repair_attempts must be non-negative.")
-    if start_json is not None and start_triton_generated_ptx:
+    if (
+        sum(
+            value is not None and value is not False
+            for value in (start_json, start_ptx, start_triton_generated_ptx)
+        )
+        > 1
+    ):
         raise ValueError(
-            "--start-json and --start-triton-generated-ptx cannot be used together."
+            "Use only one of --start-json, --start-ptx, or "
+            "--start-triton-generated-ptx."
         )
 
     trace_path = create_trace_directory(
@@ -391,11 +448,18 @@ def run_agent_loop(
     evaluator = verifier_for_kernel(kernel_name)
     provider_session = create_provider_session(provider)
 
-    starting_candidate = (
-        load_triton_generated_ptx(kernel_name)
-        if start_triton_generated_ptx
-        else load_start_json(start_json)
+    starting_candidate = load_start_ptx(
+        start_ptx,
+        num_threads_x=start_num_threads_x,
+        num_threads_y=start_num_threads_y,
+        num_threads_z=start_num_threads_z,
     )
+    if starting_candidate is None:
+        starting_candidate = (
+            load_start_json(start_json)
+            if start_json is not None
+            else load_triton_generated_ptx(kernel_name)
+        )
     base_prompt = build_initial_prompt(kernel_name)
     responses = []
     recent_evaluations = []
@@ -423,7 +487,7 @@ def run_agent_loop(
                 round_index=0,
                 speedup_vs_triton=None,
             )
-            response, _ = provider_session.request_json(
+            response, _, _ = provider_session.request_json(
                 model=model,
                 prompt=base_prompt,
                 response_format=PTX_KERNEL_RESPONSE_FORMAT,
@@ -462,28 +526,44 @@ def run_agent_loop(
         if not best_evaluation.passed:
             raise RuntimeError("Initial candidate must compile and pass verification.")
 
+        if ncu_decision:
+            _require_ncu_report(best_evaluation)
+
         for round_index in range(1, max_tool_rounds + 1):
+            if ncu_decision:
+                _require_ncu_report(best_evaluation)
             print(
                 f"=== TTS round {round_index}/{max_tool_rounds}: planning three "
                 "ordered improvements ===",
                 flush=True,
             )
-            plan_prompt = build_improvement_prompt(
-                base_prompt,
-                best_evaluation,
-                recent_evaluations,
-                kernel_name,
+            plan_prompt = (
+                build_ncu_improvement_prompt(
+                    base_prompt,
+                    best_evaluation.ncu_report,
+                    kernel_name,
+                )
+                if ncu_decision
+                else build_improvement_prompt(
+                    base_prompt,
+                    best_evaluation,
+                    recent_evaluations,
+                    kernel_name,
+                )
+            )
+            plan_prompt_name = (
+                "ncu_improvement_plan" if ncu_decision else "improvement_plan"
             )
             record_prompt(
                 responses,
                 trace_path,
-                prompt_name="improvement_plan",
+                prompt_name=plan_prompt_name,
                 prompt=plan_prompt,
                 round_index=round_index,
                 speedup_vs_triton=best_evaluation.speedup_vs_triton,
             )
             request_start = perf_counter()
-            response, cost = provider_session.request_json(
+            response, cost, _ = provider_session.request_json(
                 model=model,
                 prompt=plan_prompt,
                 response_format=IMPROVEMENT_PLAN_RESPONSE_FORMAT,
@@ -503,7 +583,7 @@ def run_agent_loop(
             record_generated_json(
                 trace_path,
                 {"improvements": ideas},
-                prompt_name="improvement_plan",
+                prompt_name=plan_prompt_name,
                 round_index=round_index,
                 attempt_index=0,
                 speedup_vs_triton=best_evaluation.speedup_vs_triton,
@@ -570,6 +650,10 @@ def run_agent_loop(
             f"{final_json}\n",
             encoding="utf-8",
         )
+        (trace_path / "final_candidate.ptx").write_text(
+            final_candidate.ptx.rstrip() + "\n",
+            encoding="utf-8",
+        )
         write_daily_summary()
         return final_json
     finally:
@@ -595,6 +679,11 @@ def parse_args():
     )
     parser.add_argument("--reasoning-effort", default="medium")
     parser.add_argument(
+        "--ncu-decision",
+        action="store_true",
+        help="Plan improvements exclusively from the Nsight Compute report.",
+    )
+    parser.add_argument(
         "--trace-path",
         type=Path,
         default=Path("output_traces"),
@@ -606,12 +695,35 @@ def parse_args():
         help="Inline candidate JSON or path to a candidate JSON file.",
     )
     start_group.add_argument(
+        "--start-ptx",
+        type=Path,
+        help="Path to a PTX file to edit and optimize.",
+    )
+    start_group.add_argument(
         "--start-triton-generated-ptx",
         action="store_true",
         help=(
-            "Start from triton_generated_ptx/<kernel>.ptx and launch it with "
-            "128 threads."
+            "Compatibility flag; Triton-generated PTX is already the default "
+            "starting point."
         ),
+    )
+    parser.add_argument(
+        "--start-num-threads-x",
+        type=int,
+        default=128,
+        help="X launch dimension for --start-ptx (default: 128).",
+    )
+    parser.add_argument(
+        "--start-num-threads-y",
+        type=int,
+        default=1,
+        help="Y launch dimension for --start-ptx (default: 1).",
+    )
+    parser.add_argument(
+        "--start-num-threads-z",
+        type=int,
+        default=1,
+        help="Z launch dimension for --start-ptx (default: 1).",
     )
     return parser.parse_args()
 
@@ -637,7 +749,12 @@ def main():
             ),
             trace_path=args.trace_path,
             start_json=args.start_json,
+            start_ptx=args.start_ptx,
+            start_num_threads_x=args.start_num_threads_x,
+            start_num_threads_y=args.start_num_threads_y,
+            start_num_threads_z=args.start_num_threads_z,
             start_triton_generated_ptx=args.start_triton_generated_ptx,
+            ncu_decision=args.ncu_decision,
         )
     )
 

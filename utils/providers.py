@@ -18,6 +18,7 @@ class ProviderSession:
         response_format,
         reasoning_effort,
         kernel_name,
+        current_candidate=None,
     ):
         raise NotImplementedError
 
@@ -31,6 +32,7 @@ class OpenAIProviderSession(ProviderSession):
         response_format,
         reasoning_effort,
         kernel_name,
+        current_candidate=None,
     ):
         return request_openai_json(
             self.client,
@@ -40,6 +42,7 @@ class OpenAIProviderSession(ProviderSession):
             reasoning_effort=reasoning_effort,
             tools=self.tools,
             kernel_name=kernel_name,
+            current_candidate=current_candidate,
         )
 
 
@@ -56,6 +59,7 @@ class AnthropicProviderSession(ProviderSession):
         response_format,
         reasoning_effort,
         kernel_name,
+        current_candidate=None,
     ):
         del reasoning_effort
         return request_anthropic_json(
@@ -66,6 +70,7 @@ class AnthropicProviderSession(ProviderSession):
             tools=self.tools,
             kernel_name=kernel_name,
             skill_id=self.skill_id,
+            current_candidate=current_candidate,
         )
 
 

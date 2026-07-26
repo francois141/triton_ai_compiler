@@ -7,13 +7,13 @@ PositiveInteger = Annotated[int, Field(ge=1)]
 
 
 class PtxKernel(BaseModel):
-
     model_config = ConfigDict(extra="forbid")
 
     ptx: str = Field(min_length=1)
     num_threads_x: PositiveInteger
     num_threads_y: PositiveInteger = 1
     num_threads_z: PositiveInteger = 1
+    difficulties: list[str] = Field(default_factory=list, max_length=3)
 
     @field_validator("ptx")
     @classmethod
@@ -23,8 +23,16 @@ class PtxKernel(BaseModel):
         return value
 
 
-class FailureAnalysis(BaseModel):
+class PtxKernelMetadata(BaseModel):
+    model_config = ConfigDict(extra="forbid")
 
+    num_threads_x: PositiveInteger
+    num_threads_y: PositiveInteger = 1
+    num_threads_z: PositiveInteger = 1
+    difficulties: list[str] = Field(default_factory=list, max_length=3)
+
+
+class FailureAnalysis(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     root_cause: str = Field(min_length=1)
@@ -32,9 +40,7 @@ class FailureAnalysis(BaseModel):
 
 
 PTX_KERNEL_JSON_SCHEMA = PtxKernel.model_json_schema()
-PTX_KERNEL_JSON_SCHEMA["required"] = list(
-    PTX_KERNEL_JSON_SCHEMA["properties"]
-)
+PTX_KERNEL_JSON_SCHEMA["required"] = list(PTX_KERNEL_JSON_SCHEMA["properties"])
 
 PTX_KERNEL_RESPONSE_FORMAT = {
     "type": "json_schema",
@@ -42,6 +48,16 @@ PTX_KERNEL_RESPONSE_FORMAT = {
     "strict": True,
     "schema": PTX_KERNEL_JSON_SCHEMA,
 }
+
+PTX_KERNEL_METADATA_RESPONSE_FORMAT = {
+    "type": "json_schema",
+    "name": "ptx_kernel_metadata",
+    "strict": True,
+    "schema": PtxKernelMetadata.model_json_schema(),
+}
+PTX_KERNEL_METADATA_RESPONSE_FORMAT["schema"]["required"] = list(
+    PTX_KERNEL_METADATA_RESPONSE_FORMAT["schema"]["properties"]
+)
 
 FAILURE_ANALYSIS_RESPONSE_FORMAT = {
     "type": "json_schema",

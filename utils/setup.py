@@ -44,6 +44,50 @@ def build_openai_tools(skill_id=None):
             "strict": True,
         }
     ]
+    tools.extend(
+        [
+            {
+                "type": "function",
+                "name": "apply_ptx_patch",
+                "description": (
+                    "Apply a unified diff to the current candidate PTX file. "
+                    "Use this to make every source-code change; do not return "
+                    "complete PTX in the final response."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "patch": {"type": "string", "minLength": 1},
+                        "num_threads_x": {"type": "integer", "minimum": 1},
+                        "num_threads_y": {"type": "integer", "minimum": 1},
+                        "num_threads_z": {"type": "integer", "minimum": 1},
+                    },
+                    "required": [
+                        "patch",
+                        "num_threads_x",
+                        "num_threads_y",
+                        "num_threads_z",
+                    ],
+                    "additionalProperties": False,
+                },
+                "strict": True,
+            },
+            {
+                "type": "function",
+                "name": "verify_current_ptx",
+                "description": (
+                    "Compile, verify, and benchmark the current PTX file after "
+                    "applying a patch."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": False,
+                },
+                "strict": True,
+            },
+        ]
+    )
     if skill_id is not None:
         tools.append(
             {
@@ -64,13 +108,14 @@ def build_openai_tools(skill_id=None):
 
 
 def build_anthropic_tools():
-    verifier_tool = build_openai_tools()[0]
     return [
         {
-            "name": verifier_tool["name"],
-            "description": verifier_tool["description"],
-            "input_schema": verifier_tool["parameters"],
+            "name": tool["name"],
+            "description": tool["description"],
+            "input_schema": tool["parameters"],
         }
+        for tool in build_openai_tools()
+        if tool["type"] == "function"
     ]
 
 
@@ -110,6 +155,17 @@ def load_start_json(start_json):
         if key in PtxKernel.model_fields
     }
     return PtxKernel.model_validate(candidate_data)
+
+
+def load_start_ptx(start_ptx, *, num_threads_x, num_threads_y, num_threads_z):
+    if start_ptx is None:
+        return None
+    return PtxKernel(
+        ptx=Path(start_ptx).read_text(encoding="utf-8"),
+        num_threads_x=num_threads_x,
+        num_threads_y=num_threads_y,
+        num_threads_z=num_threads_z,
+    )
 
 
 def load_triton_generated_ptx(kernel_name):

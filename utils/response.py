@@ -1,12 +1,16 @@
 import json
+import subprocess
+import tempfile
 import time
 from dataclasses import dataclass
 from functools import cache
+from pathlib import Path
 
 from triton_ptx import Payload, TritonPTXCandidateEvaluator, resolve_kernel
 
 from .cost import append_cost_log
 from prompts.blocks import system_prompt
+from .response_format import PtxKernel
 
 
 RESPONSE_RETRY_ATTEMPTS = 6
@@ -131,6 +135,51 @@ def _anthropic_response_tool(response_format):
     }
 
 
+class PtxPatchWorkspace:
+    def __init__(self, candidate):
+        self.candidate = candidate
+
+    def apply_patch(self, arguments):
+        patch = arguments["patch"]
+        headers = [
+            line for line in patch.splitlines() if line.startswith(("--- ", "+++ "))
+        ]
+        if len(headers) != 2 or headers != ["--- candidate.ptx", "+++ candidate.ptx"]:
+            raise ValueError(
+                "PTX patch must modify only candidate.ptx with standard unified "
+                "diff headers."
+            )
+        with tempfile.TemporaryDirectory() as directory:
+            ptx_path = Path(directory) / "candidate.ptx"
+            ptx_path.write_text(self.candidate.ptx, encoding="utf-8")
+            result = subprocess.run(
+                ["patch", "--batch", "--forward", "--strip=0", "--input=-"],
+                cwd=directory,
+                input=patch,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            if result.returncode != 0:
+                output = (result.stdout + result.stderr).strip()
+                raise ValueError(f"PTX patch did not apply: {output}")
+            ptx = ptx_path.read_text(encoding="utf-8")
+
+        self.candidate = PtxKernel(
+            ptx=ptx,
+            num_threads_x=arguments["num_threads_x"],
+            num_threads_y=arguments["num_threads_y"],
+            num_threads_z=arguments["num_threads_z"],
+        )
+        return {
+            "status": "applied",
+            "ptx_lines": self.candidate.ptx.count("\n") + 1,
+            "num_threads_x": self.candidate.num_threads_x,
+            "num_threads_y": self.candidate.num_threads_y,
+            "num_threads_z": self.candidate.num_threads_z,
+        }
+
+
 def request_anthropic_json(
     client,
     *,
@@ -140,8 +189,12 @@ def request_anthropic_json(
     tools,
     kernel_name,
     skill_id,
+    current_candidate=None,
 ):
     verifier = verifier_for_kernel(kernel_name)
+    workspace = (
+        PtxPatchWorkspace(current_candidate) if current_candidate is not None else None
+    )
     messages = [{"role": "user", "content": prompt}]
     anthropic_tools = [
         *tools,
@@ -191,6 +244,7 @@ def request_anthropic_json(
             return (
                 _AnthropicResponse(response_text, response.usage, response),
                 total_cost,
+                workspace.candidate if workspace is not None else None,
             )
         if _get_field(response, "stop_reason") == "pause_turn":
             container_id = _get_field(_get_field(response, "container"), "id")
@@ -217,16 +271,27 @@ def request_anthropic_json(
                 f"=== LLM called tool: tool={tool_name}, id={tool_id} ===",
                 flush=True,
             )
-            if tool_name != "launch_verifier":
+            arguments = _get_field(tool_use, "input")
+            if tool_name == "launch_verifier":
+                evaluation = verifier.evaluate(Payload.from_input(arguments))
+                result = evaluation.to_json(indent=2)
+            elif tool_name == "apply_ptx_patch" and workspace is not None:
+                try:
+                    result = json.dumps(workspace.apply_patch(arguments))
+                except ValueError as error:
+                    result = json.dumps({"error": str(error)})
+            elif tool_name == "verify_current_ptx" and workspace is not None:
+                evaluation = verifier.evaluate(
+                    Payload.from_input(workspace.candidate.model_dump())
+                )
+                result = evaluation.to_json(indent=2)
+            else:
                 raise RuntimeError(f"Unsupported Anthropic tool call: {tool_name}")
-            evaluation = verifier.evaluate(
-                Payload.from_input(_get_field(tool_use, "input"))
-            )
             tool_results.append(
                 {
                     "type": "tool_result",
                     "tool_use_id": tool_id,
-                    "content": evaluation.to_json(indent=2),
+                    "content": result,
                 }
             )
         messages.extend(
@@ -249,10 +314,14 @@ def request_openai_json(
     reasoning_effort,
     tools,
     kernel_name,
+    current_candidate=None,
 ):
     from openai import NotFoundError
 
     verifier = verifier_for_kernel(kernel_name)
+    workspace = (
+        PtxPatchWorkspace(current_candidate) if current_candidate is not None else None
+    )
     kwargs = {
         "model": model,
         "instructions": system_prompt(),
@@ -293,23 +362,32 @@ def request_openai_json(
             if _get_field(item, "type") == "function_call"
         ]
         if not function_calls:
-            return response, total_cost
+            return response, total_cost, workspace.candidate if workspace else None
 
         tool_outputs = []
         for function_call in function_calls:
-            if _get_field(function_call, "name") != "launch_verifier":
-                raise RuntimeError(
-                    f"Unsupported function call: {_get_field(function_call, 'name')}"
-                )
+            tool_name = _get_field(function_call, "name")
             arguments = json.loads(_get_field(function_call, "arguments"))
-            evaluation = verifier.evaluate(Payload.from_input(arguments))
-            if hasattr(evaluation, "to_json"):
-                evaluation = evaluation.to_json(indent=2)
+            if tool_name == "launch_verifier":
+                evaluation = verifier.evaluate(Payload.from_input(arguments))
+                output = evaluation.to_json(indent=2)
+            elif tool_name == "apply_ptx_patch" and workspace is not None:
+                try:
+                    output = json.dumps(workspace.apply_patch(arguments))
+                except ValueError as error:
+                    output = json.dumps({"error": str(error)})
+            elif tool_name == "verify_current_ptx" and workspace is not None:
+                evaluation = verifier.evaluate(
+                    Payload.from_input(workspace.candidate.model_dump())
+                )
+                output = evaluation.to_json(indent=2)
+            else:
+                raise RuntimeError(f"Unsupported function call: {tool_name}")
             tool_outputs.append(
                 {
                     "type": "function_call_output",
                     "call_id": _get_field(function_call, "call_id"),
-                    "output": evaluation,
+                    "output": output,
                 }
             )
 

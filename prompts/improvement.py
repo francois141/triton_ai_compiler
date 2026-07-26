@@ -1,29 +1,30 @@
 from __future__ import annotations
 
+import json
 
 from utils.evaluation import evaluation_summary
 
 
-KERNEL_CATEGORIES = {
-    "gemm": {
-        "name_markers": ("gemm", "matmul", "matrixmultiplication"),
-        "planning_requirements": (
-            "Use asynchronous global-to-shared data movement when the target "
-            "supports it.",
-            "Schedule asynchronous transfers early enough to overlap them with "
-            "independent computation; do not leave them serialized.",
-        ),
-    },
-}
+PTX_PATCH_WORKFLOW = """
+## PTX File Editing Workflow
+
+For this task, this workflow overrides the base output contract.
+The current candidate PTX is the working source file. Do not regenerate or
+return the full file. To change it, call `apply_ptx_patch` with a standard
+unified diff whose paths are both `candidate.ptx`; this changes only the lines
+in the diff. Then call `verify_current_ptx` to compile, verify, and benchmark
+that edited file. You may make further small patches and verify again. Return
+only the required launch metadata after the fastest verified file is current.
+""".strip()
 
 
-def _category_requirements(kernel_name):
-    normalized_name = kernel_name.lower()
-    requirements = []
-    for category in KERNEL_CATEGORIES.values():
-        if any(marker in normalized_name for marker in category["name_markers"]):
-            requirements.extend(category["planning_requirements"])
-    return requirements
+ASYNC_MEMORY_OPERATIONS_RULE = """
+Do not propose or introduce asynchronous memory loads or stores. In particular,
+do not use `cp.async`, `cp.async.bulk`, TMA asynchronous transfers, `st.async`,
+or equivalent asynchronous memory instructions. This restriction applies even
+when the target supports them. Asynchronous compute instructions are outside
+this restriction.
+""".strip()
 
 
 def build_improvement_prompt(
@@ -69,14 +70,47 @@ tiling, micro-tile shape, unrolling structure, register accumulators, shared-mem
 store pattern, predicates, and algorithm. Do not replace the kernel with generic loops or 
 local-memory accumulator arrays.
 
-The improvement ideas may also explore newer hardware features supported by the target architecture, 
-including asynchronous copies, ldmatrix, Tensor Cores, mma.sync, or other relevant instructions, 
+The improvement ideas may also explore newer hardware features supported by the target architecture,
+including ldmatrix, Tensor Cores, mma.sync, or other relevant instructions,
 when the model determines that they could improve performance. 
 Such an idea may include the minimum structural changes required to use the selected hardware feature correctly.
 
-## Applicable Kernel-Category Requirements
+{ASYNC_MEMORY_OPERATIONS_RULE}
+""".strip()
 
-{_category_requirements(kernel_name)}
+
+def build_ncu_improvement_prompt(base_prompt, ncu_report, kernel_name):
+    summary = ncu_report.get("summary", {})
+    return f"""{base_prompt}
+
+## NCU-Only Planning Override
+
+For this response only, do not generate PTX and ignore the output contract
+above. Return only the structured three-idea improvement plan requested below.
+
+Make every improvement decision exclusively from the Nsight Compute report
+below. Except for the required first idea, do not use benchmark timings,
+candidate history, kernel category, knowledge of the algorithm, assumptions
+about the PTX, or metrics not present in this report. Do not infer a bottleneck
+from a missing metric.
+
+## Nsight Compute Report
+
+{json.dumps(summary, indent=2)}
+
+## Planning Task
+
+Return exactly three specific, ordered improvement ideas. The first idea must
+be exactly the required idea below. Each remaining idea must target one
+measurable bottleneck reported above, cite the exact metric or derived ratio
+that justifies it, and prescribe one concrete PTX-level change. Order the
+remaining ideas by the expected impact supported by the report. If the report
+does not support two distinct additional changes, return conservative
+measurement-driven ideas that keep the kernel unchanged except for the
+smallest change needed to test the cited bottleneck.
+
+{ASYNC_MEMORY_OPERATIONS_RULE}
+
 """.strip()
 
 
@@ -114,12 +148,16 @@ padding, or skew, change only the relevant shared-memory allocation and address
 arithmetic. Leave the compute microkernel and stores intact. If the idea turns
 out not to apply, make the smallest useful related micro-change instead.
 
-Before returning the final JSON for this candidate, call the available
-`triton_ptx` tool to compile, verify, and benchmark every variation you choose
+{ASYNC_MEMORY_OPERATIONS_RULE}
+
+{PTX_PATCH_WORKFLOW}
+
+Before returning the final metadata, use the patch workflow to compile, verify,
+and benchmark every variation you choose
 to investigate. You may call the tool multiple times before returning: use it
 to compare technically distinct micro-variations of this same improvement and
 their performance. If a variation fails compilation or correctness, repair it
-using the diagnostics and call `triton_ptx` again. Return only the fastest
+using the diagnostics and call `launch_verifier` again. Return only the fastest
 verified variation you actually tested. If no repair passes, return the closest
 repaired candidate you tested so the outer loop can record diagnostics.
 """.strip()
@@ -169,7 +207,12 @@ shared-memory staging, synchronization strategy, predicate/store pattern, and
 manual unroll structure unless the diagnostic proves one of those exact parts
 is the bug.
 
-You have access to the `triton_ptx` tool: use it to investigate if the failure
+{ASYNC_MEMORY_OPERATIONS_RULE}
+
+{PTX_PATCH_WORKFLOW}
+
+Use the bundled `ptx` skill to check relevant PTX ISA constraints. Use the
+patch workflow to investigate if the failure
 analysis or diagnostics leave anything uncertain, and always use it to test the
 repair before returning. If the repaired candidate still fails, use the new
 diagnostic to make one more minimal repair while remaining within this attempt.
@@ -211,7 +254,12 @@ strategy,
 predicate/store pattern, and manual unroll structure unless the diagnostic
 proves one of those exact parts is the bug.
 
-You have access to the `triton_ptx` tool: use it to investigate if the failure
+{ASYNC_MEMORY_OPERATIONS_RULE}
+
+{PTX_PATCH_WORKFLOW}
+
+Use the bundled `ptx` skill to check relevant PTX ISA constraints. Use the
+patch workflow to investigate if the failure
 analysis or diagnostics leave anything uncertain, and always use it to test the
 repair before returning. If the repaired candidate still fails, use the new
 diagnostic to make one more minimal repair while remaining within this attempt.
@@ -255,7 +303,10 @@ debugging checklist. Preserve the candidate's tiling, micro-tile shape,
 shared-memory staging, synchronization strategy, predicates, stores, and
 manual unroll structure unless the diagnostics establish that one is faulty.
 
-You have access to the `triton_ptx` tool. Use it when the provided evidence is
+{ASYNC_MEMORY_OPERATIONS_RULE}
+
+Use the bundled `ptx` skill to check relevant PTX ISA constraints. Use
+`launch_verifier` when the provided evidence is
 insufficient to determine the precise defect; otherwise, do not generate a
 candidate in this analysis response.
 """.strip()
