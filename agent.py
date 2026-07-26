@@ -458,7 +458,11 @@ def run_agent_loop(
         starting_candidate = (
             load_start_json(start_json)
             if start_json is not None
-            else load_triton_generated_ptx(kernel_name)
+            else (
+                load_triton_generated_ptx(kernel_name)
+                if start_triton_generated_ptx
+                else None
+            )
         )
     base_prompt = build_initial_prompt(kernel_name)
     responses = []
@@ -587,6 +591,7 @@ def run_agent_loop(
                 round_index=round_index,
                 attempt_index=0,
                 speedup_vs_triton=best_evaluation.speedup_vs_triton,
+                include_speedup=False,
             )
             round_base = best_evaluation
 
@@ -702,10 +707,7 @@ def parse_args():
     start_group.add_argument(
         "--start-triton-generated-ptx",
         action="store_true",
-        help=(
-            "Compatibility flag; Triton-generated PTX is already the default "
-            "starting point."
-        ),
+        help="Start from the saved Triton-generated PTX for this kernel.",
     )
     parser.add_argument(
         "--start-num-threads-x",

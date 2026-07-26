@@ -32,15 +32,20 @@ def _artifact_stem(
     attempt_index,
     speedup_vs_triton,
     candidate_index=None,
+    include_speedup=True,
 ):
     candidate_suffix = (
         "" if candidate_index is None else f"_candidate_{candidate_index:02d}"
     )
-    speedup = "pending" if speedup_vs_triton is None else f"{speedup_vs_triton:.4f}x"
-    return (
+    artifact_stem = (
         f"iteration_{round_index:03d}{candidate_suffix}_try_{attempt_index:02d}_"
-        f"{prompt_name}_speedup_vs_triton_{speedup}"
+        f"{prompt_name}"
     )
+    if not include_speedup:
+        return artifact_stem
+
+    speedup = "pending" if speedup_vs_triton is None else f"{speedup_vs_triton:.4f}x"
+    return f"{artifact_stem}_speedup_vs_triton_{speedup}"
 
 
 def record_prompt(
@@ -61,6 +66,7 @@ def record_prompt(
         attempt_index=attempt_index,
         candidate_index=candidate_index,
         speedup_vs_triton=speedup_vs_triton,
+        include_speedup=False,
     )
     (trace_path / f"{artifact_stem}_prompt.txt").write_text(
         prompt,
@@ -89,6 +95,7 @@ def record_generated_json(
     attempt_index,
     speedup_vs_triton,
     candidate_index=None,
+    include_speedup=True,
 ):
     artifact_stem = _artifact_stem(
         prompt_name=prompt_name,
@@ -96,6 +103,7 @@ def record_generated_json(
         attempt_index=attempt_index,
         candidate_index=candidate_index,
         speedup_vs_triton=speedup_vs_triton,
+        include_speedup=include_speedup,
     )
     (trace_path / f"{artifact_stem}.json").write_text(
         json.dumps(generated_value, indent=2, default=json_default),

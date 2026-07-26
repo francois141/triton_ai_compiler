@@ -28,7 +28,7 @@ this restriction.
 
 
 def build_improvement_prompt(
-    base_prompt,
+    _base_prompt,
     best_evaluation,
     recent_evaluations,
     kernel_name,
@@ -40,14 +40,7 @@ def build_improvement_prompt(
     if not recent_block:
         recent_block = "None yet."
 
-    return f"""{base_prompt}
-
-## Planning Override
-
-For this response only, do not generate PTX and ignore the output contract above.
-Return only the structured three-idea improvement plan requested below.
-
-## Current Best Verified Candidate
+    return f"""## Current Best Verified Candidate
 
 {evaluation_summary(best_evaluation, include_ptx=True)}
 
@@ -79,16 +72,9 @@ Such an idea may include the minimum structural changes required to use the sele
 """.strip()
 
 
-def build_ncu_improvement_prompt(base_prompt, ncu_report, kernel_name):
+def build_ncu_improvement_prompt(_base_prompt, ncu_report, kernel_name):
     summary = ncu_report.get("summary", {})
-    return f"""{base_prompt}
-
-## NCU-Only Planning Override
-
-For this response only, do not generate PTX and ignore the output contract
-above. Return only the structured three-idea improvement plan requested below.
-
-Make every improvement decision exclusively from the Nsight Compute report
+    return f"""Make every improvement decision exclusively from the Nsight Compute report
 below. Except for the required first idea, do not use benchmark timings,
 candidate history, kernel category, knowledge of the algorithm, assumptions
 about the PTX, or metrics not present in this report. Do not infer a bottleneck

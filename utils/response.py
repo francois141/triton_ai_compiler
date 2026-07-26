@@ -20,6 +20,7 @@ ANTHROPIC_CODE_EXECUTION_TOOL = {
     "type": "code_execution_20260521",
     "name": "code_execution",
 }
+PATCH_WORKFLOW_TOOL_NAMES = frozenset({"apply_ptx_patch", "verify_current_ptx"})
 
 
 @cache
@@ -31,6 +32,16 @@ def _get_field(value, field_name):
     if isinstance(value, dict):
         return value.get(field_name)
     return getattr(value, field_name, None)
+
+
+def _tools_for_request(tools, current_candidate):
+    if current_candidate is not None:
+        return tools
+    return [
+        tool
+        for tool in tools
+        if tool.get("name") not in PATCH_WORKFLOW_TOOL_NAMES
+    ]
 
 
 def _format_tool_call(output_item):
@@ -195,9 +206,10 @@ def request_anthropic_json(
     workspace = (
         PtxPatchWorkspace(current_candidate) if current_candidate is not None else None
     )
+    available_tools = _tools_for_request(tools, current_candidate)
     messages = [{"role": "user", "content": prompt}]
     anthropic_tools = [
-        *tools,
+        *available_tools,
         _anthropic_response_tool(response_format),
         ANTHROPIC_CODE_EXECUTION_TOOL,
     ]
@@ -322,11 +334,12 @@ def request_openai_json(
     workspace = (
         PtxPatchWorkspace(current_candidate) if current_candidate is not None else None
     )
+    available_tools = _tools_for_request(tools, current_candidate)
     kwargs = {
         "model": model,
         "instructions": system_prompt(),
         "input": [{"role": "user", "content": prompt}],
-        "tools": tools,
+        "tools": available_tools,
         "text": {"format": response_format},
     }
     if reasoning_effort is not None:
@@ -395,7 +408,7 @@ def request_openai_json(
             "model": model,
             "previous_response_id": _get_field(response, "id"),
             "input": tool_outputs,
-            "tools": tools,
+            "tools": available_tools,
             "text": {"format": response_format},
         }
         if reasoning_effort is not None:
