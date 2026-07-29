@@ -74,6 +74,7 @@ Such an idea may include the minimum structural changes required to use the sele
 
 def build_ncu_improvement_prompt(_base_prompt, ncu_report, kernel_name):
     summary = ncu_report.get("summary", {})
+    metrics = ncu_report.get("metrics", {})
     return f"""Make every improvement decision exclusively from the Nsight Compute report
 below. Except for the required first idea, do not use benchmark timings,
 candidate history, kernel category, knowledge of the algorithm, assumptions
@@ -83,6 +84,10 @@ from a missing metric.
 ## Nsight Compute Report
 
 {json.dumps(summary, indent=2)}
+
+## All Nsight Compute Metrics
+
+{json.dumps(metrics, indent=2)}
 
 ## Planning Task
 

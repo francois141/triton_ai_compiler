@@ -136,9 +136,6 @@ def signature_template(
 
 Use this exact entry template shape and fill the body with your PTX:
 - Any argument name containing `_ptr` should be treated as a pointer to float16 data.
-- Each matrix is exactly 4096 by 4096; specialize indexing and tiling for this
-  fixed shape.
-
 
 ```ptx
 .version {version}

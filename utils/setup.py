@@ -1,4 +1,5 @@
 import json
+import re
 from pathlib import Path
 
 from prompts import build_prompt_for_operator
@@ -13,6 +14,11 @@ from utils.response_format import PtxKernel
 
 TRITON_GENERATED_PTX_DIRECTORY = (
     Path(__file__).resolve().parent.parent / "triton_generated_ptx"
+)
+
+_REQNTID_PATTERN = re.compile(
+    r"^\s*\.reqntid\s+(\d+)(?:\s*,\s*(\d+))?(?:\s*,\s*(\d+))?\s*$",
+    re.MULTILINE,
 )
 
 
@@ -177,4 +183,14 @@ def load_triton_generated_ptx(kernel_name):
             f"No generated PTX found for {kernel_name!r}: {ptx_path}"
         ) from exc
 
-    return PtxKernel(ptx=ptx, num_threads_x=128)
+    required_threads = _REQNTID_PATTERN.search(ptx)
+    if required_threads is None:
+        return PtxKernel(ptx=ptx, num_threads_x=128)
+
+    threads_x, threads_y, threads_z = required_threads.groups()
+    return PtxKernel(
+        ptx=ptx,
+        num_threads_x=int(threads_x),
+        num_threads_y=int(threads_y) if threads_y is not None else 1,
+        num_threads_z=int(threads_z) if threads_z is not None else 1,
+    )
