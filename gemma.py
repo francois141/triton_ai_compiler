@@ -390,3 +390,5 @@ if __name__ == "__main__":
     )
     print(response)
     print(f"Generation speed: {generated_tokens / elapsed_time:.2f} tokens/second")
+
+    print(model)
