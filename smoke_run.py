@@ -1,15 +1,15 @@
 from triton_ptx import Payload, TritonPTXCandidateEvaluator
 from triton_ptx.helpers.triton import dump_kernel_ptx
-from triton_ptx.kernels import AddKernel
+from triton_ptx.kernels import ReLUKernel
 
 def main():
     try:
-        kernel = AddKernel()
+        kernel = ReLUKernel()
         ptx = dump_kernel_ptx(kernel)
         if not ptx:
-            raise RuntimeError("Triton did not produce PTX for AddKernel.")
+            raise RuntimeError("Triton did not produce PTX for ReLUKernel.")
 
-        report = TritonPTXCandidateEvaluator(AddKernel).evaluate(
+        report = TritonPTXCandidateEvaluator(ReLUKernel).evaluate(
             Payload.from_input(
                 {
                     "ptx": ptx,
