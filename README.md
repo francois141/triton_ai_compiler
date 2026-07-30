@@ -27,6 +27,7 @@ provider uses Anthropic's Skills API and code-execution tool; ensure the
 
 ```bash
 python smoke_run.py
+python -m pytest triton_ptx/triton_ptx/kernels/test_triton_kernels.py
 ```
 
 ## Optimize a kernel
