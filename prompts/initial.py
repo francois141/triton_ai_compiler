@@ -9,6 +9,7 @@ from .blocks import (
     launch_configuration_block,
     output_contract,
     performance_rules,
+    shape_information_block,
     signature_template,
     triton_kernel_block,
 )
@@ -36,6 +37,7 @@ def prompt_builder(
             kernel_name=spec.kernel_name,
             ptx_signature=ptx_signature,
         ),
+        shape_information_block(spec.shape_information),
         correctness_rules(),
         commenting_rules(),
         performance_rules(),

@@ -134,8 +134,7 @@ def signature_template(
     return f"""
 ## PTX Entry Template
 
-Use this exact entry template shape and fill the body with your PTX:
-- Any argument name containing `_ptr` should be treated as a pointer to float16 data.
+Use this exact entry template and fill the body with your PTX
 
 ```ptx
 .version {version}
@@ -150,6 +149,16 @@ Use this exact entry template shape and fill the body with your PTX:
 }}
 ```
 """.strip()
+
+
+def shape_information_block(shape_information):
+    return "\n\n".join(
+        [
+            "## Pointer Shape Information",
+            "Use these exact dtype and shape details for pointer arguments.",
+            shape_information,
+        ]
+    )
 
 
 def correctness_rules():
