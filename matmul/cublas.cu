@@ -295,3 +295,5 @@ int main()
 
     return EXIT_SUCCESS;
 }
+
+// /usr/local/cuda-12.8/bin/nvcc -O3 -std=c++17 -arch=sm_89 -lcublas  matmul/cublas.cu -o matmul/cublas && ./matmul/cublas

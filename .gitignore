@@ -16,3 +16,5 @@ costs.txt
 /agent_traces/
 /output/
 /output_traces/
+matmul/matmul
+matmul/cublas

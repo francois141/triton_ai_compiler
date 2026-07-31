@@ -102,7 +102,7 @@ __global__ void matmul_fp16(
 
     constexpr int SHARED_MEMORY_BYTES =
         sizeof(__half) * (BLOCK_TILE_M * TILE_K + TILE_K * BLOCK_TILE_N) +
-        sizeof(float) * BLOCK_TILE_M * BLOCK_TILE_N;
+        sizeof(float) * WARP_TILES_M * WMMA_TILE_SIZE * WMMA_TILE_SIZE;
 
     constexpr int PADDED_SHARED_MEMORY_BYTES =
         SHARED_MEMORY_BYTES +
@@ -127,7 +127,7 @@ __global__ void matmul_fp16(
 
     __shared__ __half tile_a[BLOCK_TILE_M][A_SHARED_STRIDE];
     __shared__ __half tile_b[TILE_K][B_SHARED_STRIDE];
-    __shared__ float tile_c[BLOCK_TILE_M][BLOCK_TILE_N];
+    __shared__ float warp_c[WARP_TILES_M][WMMA_TILE_SIZE][WMMA_TILE_SIZE];
 
     const int thread_id = threadIdx.x;
     const int warp_tile_m = thread_id / WARP_SIZE;
@@ -211,22 +211,27 @@ __global__ void matmul_fp16(
     for (int warp_tile_n = 0;
          warp_tile_n < WARP_TILES_N;
          ++warp_tile_n) {
+        float* const warp_scratch = &warp_c[warp_tile_m][0][0];
         wmma::store_matrix_sync(
-            &tile_c[warp_tile_m * WMMA_TILE_SIZE]
-                   [warp_tile_n * WMMA_TILE_SIZE],
+            warp_scratch,
             c_fragments[warp_tile_n],
-            BLOCK_TILE_N,
+            WMMA_TILE_SIZE,
             wmma::mem_row_major);
-    }
-    __syncthreads();
 
-    for (int element = thread_id;
-         element < BLOCK_TILE_M * BLOCK_TILE_N;
-         element += THREADS_PER_BLOCK) {
-        const int tile_row = element / BLOCK_TILE_N;
-        const int tile_col = element % BLOCK_TILE_N;
-        matrix_c[(block_row + tile_row) * 4096 + block_col + tile_col] =
-            __float2half_rn(tile_c[tile_row][tile_col]);
+        __syncwarp();
+
+        for (int element = thread_id % WARP_SIZE;
+             element < WMMA_TILE_SIZE * WMMA_TILE_SIZE;
+             element += WARP_SIZE) {
+            const int tile_row = element / WMMA_TILE_SIZE;
+            const int tile_col = element % WMMA_TILE_SIZE;
+            matrix_c[
+                (block_row + warp_tile_m * WMMA_TILE_SIZE + tile_row) * 4096 +
+                block_col + warp_tile_n * WMMA_TILE_SIZE + tile_col] =
+                __float2half_rn(warp_scratch[element]);
+        }
+
+        __syncwarp();
     }
 }
 
@@ -328,7 +333,7 @@ int main()
               << OPERATIONS_PER_MATMUL / 1.0e12 << " TFLOP\n\n";
     std::cout << "  WM   WN   BM   BN   BK Threads      ms     TFLOP/s  Verification\n";
 
-    benchmark_configuration<8, 4, 32>(
+    benchmark_configuration<4, 8, 64>(
         matrix_a, matrix_b, matrix_c, start, stop);
 
     CUDA_CHECK(cudaEventDestroy(start));
