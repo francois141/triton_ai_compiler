@@ -3,24 +3,13 @@
 import torch
 
 from triton_ptx import dump_kernel_ptx
+from triton_ptx.LLMs import measure
 from triton_ptx.LLMs.apertus import Apertus
-from triton_ptx.LLMs.apertus.kernels import (
-    ApertusRMSNormKernel,
-    CausalAttentionKernel,
-    LinearKernel,
-    RoPEKernel,
-    XIELUKernel,
-)
 
-KERNEL_CLASSES = {
-    "causal_attention": CausalAttentionKernel,
-    "linear": LinearKernel,
-    "rms_norm": ApertusRMSNormKernel,
-    "rope": RoPEKernel,
-    "xielu": XIELUKernel,
-}
+KERNEL_CLASSES = Apertus.get_kernel_classes()
 
 
+@torch.inference_mode()
 def extract_base_ptx_payloads():
     """Compile Apertus's base Triton kernels into injectable PTX payloads."""
     device = "cuda"
@@ -67,7 +56,8 @@ def extract_base_ptx_payloads():
 def main():
     payloads = extract_base_ptx_payloads()
     llm = Apertus.from_custom_ptx(**payloads)
-    response = llm.generate(
+    response, tokens_per_second = measure(
+        llm,
         [
             {
                 "role": "system",
@@ -76,14 +66,15 @@ def main():
             {
                 "role": "user",
                 "content": (
-                    "You are a good Swiss citizen. On est d'accord le fromage "
-                    "français est bizarre?"
+                    "Compte de 1 à 10 000, en écrivant chaque nombre sur une "
+                    "nouvelle ligne.\nNe t’arrête pas avant d’atteindre la limite "
+                    "de génération."
                 ),
             },
         ],
-        max_new_tokens=640,
+        max_new_tokens=100,
     )
-    print(response)
+    print(f"Throughput: {tokens_per_second:.2f} tokens/s")
 
 
 if __name__ == "__main__":
