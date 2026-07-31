@@ -95,7 +95,7 @@ __global__ void matmul_fp16(
     constexpr int BLOCK_TILE_M = WARP_TILES_M * WMMA_TILE_SIZE;
     constexpr int BLOCK_TILE_N = WARP_TILES_N * WMMA_TILE_SIZE;
 
-    constexpr int THREADS_PER_BLOCK = WARP_SIZE;
+    constexpr int THREADS_PER_BLOCK = WARP_TILES_M * WARP_SIZE;
 
     constexpr int A_VECTORS_PER_ROW = TILE_K / HALF_VALUES_PER_VECTOR;
     constexpr int B_VECTORS_PER_ROW = BLOCK_TILE_N / HALF_VALUES_PER_VECTOR;
@@ -130,26 +130,22 @@ __global__ void matmul_fp16(
     __shared__ float tile_c[BLOCK_TILE_M][BLOCK_TILE_N];
 
     const int thread_id = threadIdx.x;
+    const int warp_tile_m = thread_id / WARP_SIZE;
     const int block_row = blockIdx.y * BLOCK_TILE_M;
     const int block_col = blockIdx.x * BLOCK_TILE_N;
 
     wmma::fragment<wmma::matrix_a, 16,16,16, __half, wmma::row_major>
-        a_fragments[WARP_TILES_M];
+        a_fragment;
     wmma::fragment<wmma::matrix_b, 16, 16, 16, __half, wmma::row_major>
         b_fragments[WARP_TILES_N];
     wmma::fragment<wmma::accumulator, 16,16,16, float>
-        c_fragments[WARP_TILES_M][WARP_TILES_N];
+        c_fragments[WARP_TILES_N];
 
     #pragma unroll
-    for (int warp_tile_m = 0; warp_tile_m < WARP_TILES_M; ++warp_tile_m) {
-        #pragma unroll
-        for (int warp_tile_n = 0;
-             warp_tile_n < WARP_TILES_N;
-             ++warp_tile_n) {
-            wmma::fill_fragment(
-                c_fragments[warp_tile_m][warp_tile_n],
-                0.0f);
-        }
+    for (int warp_tile_n = 0;
+         warp_tile_n < WARP_TILES_N;
+         ++warp_tile_n) {
+        wmma::fill_fragment(c_fragments[warp_tile_n], 0.0f);
     }
 
     for (int k_base = 0; k_base < 4096; k_base += TILE_K) {
@@ -182,15 +178,10 @@ __global__ void matmul_fp16(
         #pragma unroll
         for (int k_offset = 0; k_offset < TILE_K;
              k_offset += WMMA_TILE_SIZE) {
-            #pragma unroll
-            for (int warp_tile_m = 0;
-                 warp_tile_m < WARP_TILES_M;
-                 ++warp_tile_m) {
-                wmma::load_matrix_sync(
-                    a_fragments[warp_tile_m],
-                    &tile_a[warp_tile_m * WMMA_TILE_SIZE][k_offset],
-                    A_SHARED_STRIDE);
-            }
+            wmma::load_matrix_sync(
+                a_fragment,
+                &tile_a[warp_tile_m * WMMA_TILE_SIZE][k_offset],
+                A_SHARED_STRIDE);
 
             #pragma unroll
             for (int warp_tile_n = 0;
@@ -203,37 +194,29 @@ __global__ void matmul_fp16(
             }
 
             #pragma unroll
-            for (int warp_tile_m = 0;
-                 warp_tile_m < WARP_TILES_M;
-                 ++warp_tile_m) {
-                #pragma unroll
-                for (int warp_tile_n = 0;
-                     warp_tile_n < WARP_TILES_N;
-                     ++warp_tile_n) {
-                    wmma::mma_sync(
-                        c_fragments[warp_tile_m][warp_tile_n],
-                        a_fragments[warp_tile_m],
-                        b_fragments[warp_tile_n],
-                        c_fragments[warp_tile_m][warp_tile_n]);
-                }
+            for (int warp_tile_n = 0;
+                 warp_tile_n < WARP_TILES_N;
+                 ++warp_tile_n) {
+                wmma::mma_sync(
+                    c_fragments[warp_tile_n],
+                    a_fragment,
+                    b_fragments[warp_tile_n],
+                    c_fragments[warp_tile_n]);
             }
         }
         __syncthreads();
     }
 
     #pragma unroll
-    for (int warp_tile_m = 0; warp_tile_m < WARP_TILES_M; ++warp_tile_m) {
-        #pragma unroll
-        for (int warp_tile_n = 0;
-             warp_tile_n < WARP_TILES_N;
-             ++warp_tile_n) {
-            wmma::store_matrix_sync(
-                &tile_c[warp_tile_m * WMMA_TILE_SIZE]
-                       [warp_tile_n * WMMA_TILE_SIZE],
-                c_fragments[warp_tile_m][warp_tile_n],
-                BLOCK_TILE_N,
-                wmma::mem_row_major);
-        }
+    for (int warp_tile_n = 0;
+         warp_tile_n < WARP_TILES_N;
+         ++warp_tile_n) {
+        wmma::store_matrix_sync(
+            &tile_c[warp_tile_m * WMMA_TILE_SIZE]
+                   [warp_tile_n * WMMA_TILE_SIZE],
+            c_fragments[warp_tile_n],
+            BLOCK_TILE_N,
+            wmma::mem_row_major);
     }
     __syncthreads();
 
@@ -257,7 +240,7 @@ void benchmark_configuration(
 {
     constexpr int BLOCK_TILE_M = WARP_TILES_M * WMMA_TILE_SIZE;
     constexpr int BLOCK_TILE_N = WARP_TILES_N * WMMA_TILE_SIZE;
-    constexpr int THREADS_PER_BLOCK = WARP_SIZE;
+    constexpr int THREADS_PER_BLOCK = WARP_TILES_M * WARP_SIZE;
 
     const dim3 block(THREADS_PER_BLOCK);
     const dim3 grid(
@@ -345,7 +328,7 @@ int main()
               << OPERATIONS_PER_MATMUL / 1.0e12 << " TFLOP\n\n";
     std::cout << "  WM   WN   BM   BN   BK Threads      ms     TFLOP/s  Verification\n";
 
-    benchmark_configuration<2, 4, 32>(
+    benchmark_configuration<8, 4, 32>(
         matrix_a, matrix_b, matrix_c, start, stop);
 
     CUDA_CHECK(cudaEventDestroy(start));
@@ -355,3 +338,6 @@ int main()
     CUDA_CHECK(cudaFree(matrix_c));
     return 0;
 }
+
+// /usr/local/cuda-12.8/bin/nvcc -O3 -std=c++17 -arch=sm_89 matmul/matmul.cu -o matmul/matmul && ./matmul/matmul
+// /usr/local/cuda-12.8/bin/ncu --set basic --kernel-name-base demangled --kernel-name 'regex:matmul_fp16.*'  ./matmul/matmul
