@@ -1,10 +1,10 @@
 """Run Apertus using PTX extracted from its base Triton kernels."""
 
 import torch
-
-from triton_ptx import dump_kernel_ptx
 from triton_ptx.LLMs import measure
 from triton_ptx.LLMs.apertus import Apertus
+
+from triton_ptx import dump_kernel_ptx
 
 KERNEL_CLASSES = Apertus.get_kernel_classes()
 
@@ -16,8 +16,7 @@ def extract_base_ptx_payloads():
     dtype = torch.bfloat16
     sample_inputs = {
         "causal_attention": tuple(
-            torch.rand((1, 1, 1, 128), device=device, dtype=dtype)
-            for _ in range(3)
+            torch.rand((1, 1, 32, 128), device=device, dtype=dtype) for _ in range(3)
         ),
         "linear": (
             torch.rand((1, 4096), device=device, dtype=dtype),
@@ -29,9 +28,9 @@ def extract_base_ptx_payloads():
             1e-5,
         ),
         "rope": (
-            torch.rand((1, 1, 1, 128), device=device, dtype=dtype),
-            torch.rand((1, 128), device=device, dtype=dtype),
-            torch.rand((1, 128), device=device, dtype=dtype),
+            torch.rand((1, 1, 32, 128), device=device, dtype=dtype),
+            torch.rand((32, 128), device=device, dtype=dtype),
+            torch.rand((32, 128), device=device, dtype=dtype),
         ),
         "xielu": tuple(
             torch.rand(256 if index == 0 else 1, device=device, dtype=dtype)
@@ -46,7 +45,7 @@ def extract_base_ptx_payloads():
             raise RuntimeError(
                 f"Triton did not produce PTX for {kernel_class.__name__}."
             )
-        payloads[name] = {
+        payloads[f"{name}_payload"] = {
             "ptx": ptx,
             "num_threads_x": kernel.num_warps * 32,
         }
@@ -56,7 +55,7 @@ def extract_base_ptx_payloads():
 def main():
     payloads = extract_base_ptx_payloads()
     llm = Apertus.from_custom_ptx(**payloads)
-    response, tokens_per_second = measure(
+    _, tokens_per_second = measure(
         llm,
         [
             {

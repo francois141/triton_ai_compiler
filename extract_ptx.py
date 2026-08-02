@@ -3,7 +3,7 @@ import argparse
 import re
 from pathlib import Path
 
-
+from triton_ptx.LLMs.apertus import Apertus
 from triton_ptx.helpers.environment import is_gpu_available
 from triton_ptx.helpers.triton import dump_kernel_ptx
 from triton_ptx.kernels import kernel_list
@@ -95,7 +95,6 @@ def clean_ptx(ptx):
 
 
 def dump_and_save_ptx_kernel(kernel, output_dir, clean=False):
-
     kernel_name = kernel.__class__.__name__
     ptx = dump_kernel_ptx(kernel)
 
@@ -109,6 +108,24 @@ def dump_and_save_ptx_kernel(kernel, output_dir, clean=False):
     output_path.write_text(ptx)
 
     return output_path
+
+
+def dump_apertus_ptx(output_dir, clean, failed_kernels):
+    """Extract Apertus PTX into its dedicated output directory."""
+    apertus_output_dir = output_dir / "APERTUS"
+    apertus_output_dir.mkdir(parents=True, exist_ok=True)
+
+    for name, kernel_class in Apertus.get_kernel_classes().items():
+        kernel = kernel_class()
+        kernel_name = kernel.__class__.__name__
+        print(f"Compiling APERTUS/{kernel_name}")
+
+        try:
+            output_path = dump_and_save_ptx_kernel(kernel, apertus_output_dir, clean)
+            print(f"Dumped PTX to {output_path}")
+        except Exception as exc:
+            print(f"Failed to dump APERTUS/{kernel_name}: {exc}")
+            failed_kernels.append(f"APERTUS/{name}")
 
 
 def main(output_dir, clean=False):
@@ -132,6 +149,8 @@ def main(output_dir, clean=False):
         except Exception as exc:
             print(f"Failed to dump PTX for {kernel_name}: {exc}")
             failed_kernels.append(kernel_name)
+
+    dump_apertus_ptx(output_dir, clean, failed_kernels)
 
     if failed_kernels:
         print("\nFailed kernels:")
