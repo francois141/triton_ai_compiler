@@ -16,13 +16,19 @@ def extract_base_ptx_payloads():
     dtype = torch.bfloat16
     sample_inputs = {
         "causal_attention": tuple(
-            torch.rand((1, 1, 32, 128), device=device, dtype=dtype) for _ in range(3)
+            torch.rand((1, 32, 32, 128), device=device, dtype=dtype)
+            for _ in range(3)
         ),
         "linear": (
             torch.rand((1, 4096), device=device, dtype=dtype),
             torch.rand((4096, 4096), device=device, dtype=dtype),
         ),
-        "rms_norm": (
+        "rms_norm_128": (
+            torch.rand((1, 128), device=device, dtype=dtype),
+            torch.rand(128, device=device, dtype=dtype),
+            1e-5,
+        ),
+        "rms_norm_4096": (
             torch.rand((1, 4096), device=device, dtype=dtype),
             torch.rand(4096, device=device, dtype=dtype),
             1e-5,
@@ -33,7 +39,7 @@ def extract_base_ptx_payloads():
             torch.rand((32, 128), device=device, dtype=dtype),
         ),
         "xielu": tuple(
-            torch.rand(256 if index == 0 else 1, device=device, dtype=dtype)
+            torch.rand(1024 if index == 0 else 1, device=device, dtype=dtype)
             for index in range(5)
         ),
     }
@@ -48,6 +54,7 @@ def extract_base_ptx_payloads():
         payloads[f"{name}_payload"] = {
             "ptx": ptx,
             "num_threads_x": kernel.num_warps * 32,
+            "tuning_config": kernel.best_config,
         }
     return payloads
 
@@ -55,7 +62,7 @@ def extract_base_ptx_payloads():
 def main():
     payloads = extract_base_ptx_payloads()
     llm = Apertus.from_custom_ptx(**payloads)
-    _, tokens_per_second = measure(
+    response, tokens_per_second = measure(
         llm,
         [
             {
@@ -64,15 +71,12 @@ def main():
             },
             {
                 "role": "user",
-                "content": (
-                    "Compte de 1 à 10 000, en écrivant chaque nombre sur une "
-                    "nouvelle ligne.\nNe t’arrête pas avant d’atteindre la limite "
-                    "de génération."
-                ),
+                "content": "What is the capital of Switzerland?",
             },
         ],
         max_new_tokens=100,
     )
+    print(response)
     print(f"Throughput: {tokens_per_second:.2f} tokens/s")
 
 

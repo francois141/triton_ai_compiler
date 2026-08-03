@@ -5,7 +5,7 @@ from pathlib import Path
 
 from triton_ptx.LLMs.apertus import Apertus
 from triton_ptx.helpers.environment import is_gpu_available
-from triton_ptx.helpers.triton import dump_kernel_ptx
+from triton_ptx.helpers.triton import dump_kernel_assembly
 from triton_ptx.kernels import kernel_list
 
 
@@ -14,6 +14,12 @@ SECTION_DIRECTIVE_PATTERN = re.compile(r"^\s*\.section\b")
 FUNCTION_DIRECTIVE_PATTERN = re.compile(
     r"^\s*(?:\.(?:visible|weak|extern)\s+)*\.(?:entry|func)\b"
 )
+ASSEMBLY_STAGE_EXTENSIONS = {
+    "ttir": ".ttir",
+    "ttgir": ".ttgir",
+    "llir": ".ll",
+    "ptx": ".ptx",
+}
 
 
 def clean_ptx(ptx):
@@ -94,9 +100,16 @@ def clean_ptx(ptx):
     return "".join(output)
 
 
-def dump_and_save_ptx_kernel(kernel, output_dir, clean=False):
+def dump_and_save_ptx_kernel(
+    kernel,
+    output_dir,
+    clean=False,
+    kernel_subdir=None,
+    stages=ASSEMBLY_STAGE_EXTENSIONS,
+):
     kernel_name = kernel.__class__.__name__
-    ptx = dump_kernel_ptx(kernel)
+    assembly = dump_kernel_assembly(kernel)
+    ptx = assembly.get("ptx")
 
     if not ptx:
         raise RuntimeError(f"Triton did not produce PTX for {kernel_name}")
@@ -104,31 +117,51 @@ def dump_and_save_ptx_kernel(kernel, output_dir, clean=False):
     if clean:
         ptx = clean_ptx(ptx)
 
-    output_path = output_dir / f"{kernel_name}.ptx"
-    output_path.write_text(ptx)
+    output_paths = {}
+    for stage, extension in stages.items():
+        source = ptx if stage == "ptx" else assembly.get(stage)
+        if source is None:
+            continue
 
-    return output_path
+        stage_dir = output_dir / stage
+        if kernel_subdir is not None:
+            stage_dir /= kernel_subdir
+        stage_dir.mkdir(parents=True, exist_ok=True)
+        output_path = stage_dir / f"{kernel_name}{extension}"
+        output_path.write_text(source)
+        output_paths[stage] = output_path
+
+    return output_paths
 
 
-def dump_apertus_ptx(output_dir, clean, failed_kernels):
-    """Extract Apertus PTX into its dedicated output directory."""
-    apertus_output_dir = output_dir / "APERTUS"
-    apertus_output_dir.mkdir(parents=True, exist_ok=True)
+def dump_apertus_ptx(output_dir, clean, failed_kernels, kernel_name=None, stages=None):
+    """Extract Apertus representations into their dedicated subdirectories."""
+    stages = ASSEMBLY_STAGE_EXTENSIONS if stages is None else stages
 
-    for name, kernel_class in Apertus.get_kernel_classes().items():
+    kernel_classes = Apertus.get_kernel_classes()
+    if kernel_name is not None:
+        kernel_classes = {kernel_name: kernel_classes[kernel_name]}
+
+    for name, kernel_class in kernel_classes.items():
         kernel = kernel_class()
         kernel_name = kernel.__class__.__name__
         print(f"Compiling APERTUS/{kernel_name}")
 
         try:
-            output_path = dump_and_save_ptx_kernel(kernel, apertus_output_dir, clean)
-            print(f"Dumped PTX to {output_path}")
+            output_paths = dump_and_save_ptx_kernel(
+                kernel,
+                output_dir,
+                clean,
+                kernel_subdir="APERTUS",
+                stages=stages,
+            )
+            print(f"Dumped PTX to {output_paths['ptx']}")
         except Exception as exc:
             print(f"Failed to dump APERTUS/{kernel_name}: {exc}")
             failed_kernels.append(f"APERTUS/{name}")
 
 
-def main(output_dir, clean=False):
+def main(output_dir, clean=False, apertus_kernel=None, ptx_only=False):
     if not is_gpu_available():
         raise RuntimeError("CUDA is required to compile and dump Triton PTX.")
 
@@ -136,21 +169,34 @@ def main(output_dir, clean=False):
     output_dir.mkdir(parents=True, exist_ok=True)
 
     failed_kernels = []
+    stages = {"ptx": ".ptx"} if ptx_only else ASSEMBLY_STAGE_EXTENSIONS
 
-    for op in kernel_list:
-        kernel = op()
-        kernel_name = kernel.__class__.__name__
+    if apertus_kernel is None:
+        for op in kernel_list:
+            kernel = op()
+            kernel_name = kernel.__class__.__name__
 
-        print(f"Compiling {kernel_name}")
+            print(f"Compiling {kernel_name}")
 
-        try:
-            output_path = dump_and_save_ptx_kernel(kernel, output_dir, clean)
-            print(f"Dumped PTX to {output_path}")
-        except Exception as exc:
-            print(f"Failed to dump PTX for {kernel_name}: {exc}")
-            failed_kernels.append(kernel_name)
+            try:
+                output_paths = dump_and_save_ptx_kernel(
+                    kernel,
+                    output_dir,
+                    clean,
+                    stages=stages,
+                )
+                print(f"Dumped PTX to {output_paths['ptx']}")
+            except Exception as exc:
+                print(f"Failed to dump PTX for {kernel_name}: {exc}")
+                failed_kernels.append(kernel_name)
 
-    dump_apertus_ptx(output_dir, clean, failed_kernels)
+    dump_apertus_ptx(
+        output_dir,
+        clean,
+        failed_kernels,
+        kernel_name=apertus_kernel,
+        stages=stages,
+    )
 
     if failed_kernels:
         print("\nFailed kernels:")
@@ -175,6 +221,16 @@ if __name__ == "__main__":
         action="store_true",
         help="Remove comments and .loc, .file, and .section directives from PTX.",
     )
+    parser.add_argument(
+        "--apertus-kernel",
+        choices=sorted(Apertus.get_kernel_classes()),
+        help="Extract only the specified Apertus kernel.",
+    )
+    parser.add_argument(
+        "--ptx-only",
+        action="store_true",
+        help="Write PTX only, without intermediate representations.",
+    )
 
     args = parser.parse_args()
-    main(args.output_dir, args.clean)
+    main(args.output_dir, args.clean, args.apertus_kernel, args.ptx_only)

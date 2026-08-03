@@ -464,7 +464,7 @@ def run_agent_loop(
                 else None
             )
         )
-    base_prompt = build_initial_prompt(kernel_name)
+    base_prompt = build_initial_prompt(kernel_name, evaluator.operator)
     responses = []
     recent_evaluations = []
     wrote_daily_summary = False

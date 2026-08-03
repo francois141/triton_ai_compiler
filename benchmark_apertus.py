@@ -31,7 +31,7 @@ def generate_kernel_payloads(llm_class, arguments):
             kernel_class.__name__,
             model=arguments.agent_model,
             provider=arguments.provider,
-            max_tool_rounds=0,
+            max_tool_rounds=3,
             max_repair_attempts=arguments.max_repair_attempts,
             reasoning_effort=arguments.reasoning_effort,
             trace_path=arguments.trace_path,
