@@ -87,11 +87,13 @@ def constexpr_values_block(spec):
     )
 
 
-def launch_configuration_block():
+def launch_configuration_block(num_warps):
+    num_threads = num_warps * 32
     return "\n\n".join(
         [
             "## Launch Configuration",
-            "Only launch the kernel with exactly 128 threads.",
+            f"The autotuner selected {num_warps} warps for this kernel.",
+            f"Only launch the kernel with exactly {num_threads} threads.",
         ]
     )
 
@@ -161,14 +163,15 @@ def shape_information_block(shape_information):
     )
 
 
-def correctness_rules():
-    return """
+def correctness_rules(num_warps):
+    num_threads = num_warps * 32
+    return f"""
 ## Correctness Rules
 - Implement the same computation and control flow as the Triton kernel.
 - Respect all masks and boundary conditions exactly.
 - Assume pointer inputs refer to contiguous GPU global memory unless the Triton code says otherwise.
 - Treat tl.constexpr values as compile-time constants supplied by the operator defaults.
-- If PTX uses one thread for one element in a constexpr-sized tile, map the 128 launched threads across that tile; otherwise explicitly loop the launched threads over the full constexpr tile.
+- If PTX uses one thread for one element in a constexpr-sized tile, map the {num_threads} launched threads across that tile; otherwise explicitly loop the launched threads over the full constexpr tile.
 - Do not add, remove, reorder, or reinterpret runtime arguments.
 """.strip()
 
@@ -184,8 +187,9 @@ def commenting_rules():
 """.strip()
 
 
-def performance_rules():
-    return """
+def performance_rules(num_warps):
+    num_threads = num_warps * 32
+    return f"""
 ## Performance Rules
 
 Optimize for the specific Triton kernel shown below. Use only optimizations that are semantically valid for this kernel.
@@ -193,7 +197,7 @@ Optimize for the specific Triton kernel shown below. Use only optimizations that
 Launch tuning guidance:
 - `num_threads_x` should be explicitly defined for this kernel.
 - If you need a multi-dimensional launch shape, you may also define `num_threads_y` and `num_threads_z`.
-- The product of the provided thread dimensions must be exactly 128, treating omitted `num_threads_y` and `num_threads_z` as 1.
+- The product of the provided thread dimensions must be exactly {num_threads} ({num_warps} warps), treating omitted `num_threads_y` and `num_threads_z` as 1.
 
 Hardware rule: 
 - Use modern GPU features as much as possible. Shared memory, ldmatrix, tensor cores, and async global-to-shared loads should be used when useful for the target.
@@ -210,20 +214,21 @@ def triton_kernel_block(source):
 
 
 def output_contract(spec):
-    return """
+    num_threads = spec.num_warps * 32
+    return f"""
 ## Output Contract
 
 Return only a Python snippet that defines one answer dictionary named `ptx_kernel`.
 
 The output must follow this format:
 
-{
+{{
     "ptx": \"\"\"<valid PTX code>\"\"\",
     "num_threads_x": <required_threads_x>,
     "num_threads_y": <optional_threads_y>,
     "num_threads_z": <optional_threads_z>,
     "difficulties": [],
-}
+}}
 
 - generate exactly one answer;
 - put the PTX code directly under the top-level `"ptx"` key;
@@ -233,7 +238,7 @@ The output must follow this format:
   verifier-reported constraints encountered while producing the candidate; do
   not use it for uncertainty, a disclaimer, or a reason to return a fallback;
   use an empty list when there are no such constraints;
-- the product of the included thread dimensions must equal 128, treating omitted `"num_threads_y"` and `"num_threads_z"` as 1;
+- the product of the included thread dimensions must equal {num_threads} ({spec.num_warps} warps), treating omitted `"num_threads_y"` and `"num_threads_z"` as 1;
 - do not include tl.constexpr parameters in the dictionary; the operator defaults are used when launching the PTX kernel;
 - make the PTX string valid PTX;
 - include concise human-readable PTX comments that explain the logic and each logical instruction group;

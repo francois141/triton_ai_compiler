@@ -125,12 +125,12 @@ def build_anthropic_tools():
     ]
 
 
-def build_initial_prompt(kernel_name):
-    kernel_cls = resolve_kernel(kernel_name)
+def build_initial_prompt(kernel_name, kernel=None):
+    kernel = resolve_kernel(kernel_name)() if kernel is None else kernel
     version, target, address_size = get_ptx_system_config()
-    signature = parse_ptx_signature(dump_kernel_ptx(kernel_cls()))
+    signature = parse_ptx_signature(dump_kernel_ptx(kernel))
     return build_prompt_for_operator(
-        kernel_cls,
+        kernel,
         version=version,
         target=target,
         address_size=address_size,

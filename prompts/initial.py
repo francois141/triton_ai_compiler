@@ -28,7 +28,7 @@ def prompt_builder(
         common_ptxas_issues_skill(),
         initial_task().strip(),
         constexpr_values_block(spec),
-        launch_configuration_block(),
+        launch_configuration_block(spec.num_warps),
         signature_template(
             spec.parameters,
             version=version,
@@ -38,9 +38,9 @@ def prompt_builder(
             ptx_signature=ptx_signature,
         ),
         shape_information_block(spec.shape_information),
-        correctness_rules(),
+        correctness_rules(spec.num_warps),
         commenting_rules(),
-        performance_rules(),
+        performance_rules(spec.num_warps),
         triton_kernel_block(spec.source),
         output_contract(spec),
     ]
