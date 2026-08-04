@@ -22,7 +22,7 @@ _REQNTID_PATTERN = re.compile(
 )
 
 
-def build_openai_tools(skill_id=None):
+def build_openai_tools(skill_ids=None):
     tools = [
         {
             "type": "function",
@@ -94,7 +94,9 @@ def build_openai_tools(skill_id=None):
             },
         ]
     )
-    if skill_id is not None:
+    if skill_ids is not None:
+        if isinstance(skill_ids, str):
+            skill_ids = [skill_ids]
         tools.append(
             {
                 "type": "shell",
@@ -106,6 +108,7 @@ def build_openai_tools(skill_id=None):
                             "skill_id": skill_id,
                             "version": "latest",
                         }
+                        for skill_id in skill_ids
                     ],
                 },
             }

@@ -6,12 +6,11 @@ from dataclasses import dataclass
 from functools import cache
 from pathlib import Path
 
+from prompts.blocks import system_prompt
 from triton_ptx import Payload, TritonPTXCandidateEvaluator, resolve_kernel
 
 from .cost import append_cost_log
-from prompts.blocks import system_prompt
 from .response_format import PtxKernel
-
 
 RESPONSE_RETRY_ATTEMPTS = 6
 ANTHROPIC_MAX_TOKENS = 16_384
@@ -21,6 +20,20 @@ ANTHROPIC_CODE_EXECUTION_TOOL = {
     "name": "code_execution",
 }
 PATCH_WORKFLOW_TOOL_NAMES = frozenset({"apply_ptx_patch", "verify_current_ptx"})
+FLOAT16_GEMM_WEB_SEARCH_TOOL = {
+    "type": "web_search",
+    "filters": {
+        "allowed_domains": [
+            "leimao.github.io",
+            "docs.nvidia.com",
+            "www.rimikawrites.com",
+            "qsysarch.com",
+            "siboehm.com",
+            "alexarmbr.github.io",
+            "hazyresearch.stanford.edu",
+        ]
+    },
+}
 
 
 @cache
@@ -199,7 +212,7 @@ def request_anthropic_json(
     response_format,
     tools,
     kernel_name,
-    skill_id,
+    skill_ids,
     current_candidate=None,
 ):
     verifier = verifier_for_kernel(kernel_name)
@@ -220,6 +233,7 @@ def request_anthropic_json(
                 "skill_id": skill_id,
                 "version": "latest",
             }
+            for skill_id in skill_ids
         ]
     }
     total_cost = None
@@ -335,6 +349,8 @@ def request_openai_json(
         PtxPatchWorkspace(current_candidate) if current_candidate is not None else None
     )
     available_tools = _tools_for_request(tools, current_candidate)
+    if kernel_name == "MatrixMultiplicationFloat16":
+        available_tools = [*available_tools, FLOAT16_GEMM_WEB_SEARCH_TOOL]
     kwargs = {
         "model": model,
         "instructions": system_prompt(),

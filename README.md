@@ -19,9 +19,12 @@ uv pip install -e triton_ptx
 uv pip install numpy
 ```
 
-Both providers upload the bundled PTX skill before each run. The Anthropic
-provider uses Anthropic's Skills API and code-execution tool; ensure the
-`skills/ptx_skills` submodule is initialized as part of the command above.
+Both providers upload the bundled PTX and NCU-report skills before each run.
+The NCU skill is the full upstream Nsight Compute diagnosis reference, stored
+as the `skills/external_skills/ncu-report-skill` submodule and packaged at
+`skills/external_skills/ncu-report-skill.zip`. The Anthropic provider uses
+Anthropic's Skills API and code-execution tool; initialize submodules before
+running the agent.
 
 ## Test installation
 
@@ -81,7 +84,8 @@ kernel uses a multidimensional launch.
 
 To choose improvements solely from the current Nsight Compute report, set
 `NCU_PATH` and use `--ncu-decision`. The run stops with an error if NCU does
-not produce a usable report.
+not produce a usable report. NCU decision plans use the full bundled NCU
+report skill and must cite only metrics present in the current report.
 
 ```bash
 python -m agent MatrixMultiplicationFloat16 --ncu-decision

@@ -15,6 +15,9 @@ efficient and optimised PTX code.
   environment. Use it to check syntax, instruction constraints, memory
   semantics, and target-architecture compatibility before using unfamiliar PTX
   features or diagnosing a PTX compilation failure.
+- The bundled `ncu-report-skill` contains the complete Nsight Compute
+  profiling and diagnosis reference. Use it only for NCU-backed improvement
+  planning, and ground every conclusion in metrics present in the report.
 
 ## Optimization loop
 
@@ -201,6 +204,39 @@ Launch tuning guidance:
 
 Hardware rule: 
 - Use modern GPU features as much as possible. Shared memory, ldmatrix, tensor cores, and async global-to-shared loads should be used when useful for the target.
+""".strip()
+
+
+FLOAT16_GEMM_RESEARCH_SOURCES = (
+    "https://leimao.github.io/article/CUDA-Matrix-Multiplication-Optimization/",
+    "https://docs.nvidia.com/cutlass/4.2.1/media/docs/cpp/efficient_gemm.html",
+    "https://www.rimikawrites.com/6-step-optimization-of-gemms-in-cuda/",
+    "https://qsysarch.com/posts/gemm-kernels/",
+    "https://siboehm.com/articles/22/CUDA-MMM",
+    (
+        "https://alexarmbr.github.io/2024/08/10/How-To-Write-A-Fast-"
+        "Matrix-Multiplication-From-Scratch-With-Tensor-Cores.htm"
+    ),
+    "https://hazyresearch.stanford.edu/blog/2024-05-12-tk",
+)
+
+
+def float16_gemm_research_rules():
+    sources = "\n".join(f"- {source}" for source in FLOAT16_GEMM_RESEARCH_SOURCES)
+    return f"""
+## FP16 GEMM Research and Tensor Core Requirements
+
+This is `MatrixMultiplicationFloat16`. Use the available web search tool before
+designing or improving a candidate to review the following sources:
+{sources}
+
+The FP16 GEMM implementation must use Tensor Cores. Select a Tensor Core
+instruction and data layout that are valid for the supplied target, and use
+the research to choose an optimal block, warp, and K tiling strategy for this
+exact 4096 x 4096 workload. Account for tensor-core tile alignment, shared
+memory capacity and bank conflicts, register pressure, occupancy, coalesced
+global accesses, and global-to-shared pipelining. Verify every candidate with
+the launch verifier; retain only the fastest correct measured implementation.
 """.strip()
 
 

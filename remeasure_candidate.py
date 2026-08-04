@@ -109,7 +109,9 @@ def main():
         record,
         kernel_name=args.kernel,
     )
-    output = result.to_json()
+    output_data = json.loads(result.to_json())
+    output_data.pop("ncu_report", None)
+    output = json.dumps(output_data, indent=2, ensure_ascii=False)
 
     if args.output is not None:
         args.output.parent.mkdir(parents=True, exist_ok=True)

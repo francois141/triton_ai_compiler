@@ -4,3 +4,6 @@
 [submodule "skills/ptx_skills"]
 	path = skills/ptx_skills
 	url = https://github.com/francois141/ptx_skill
+[submodule "skills/external_skills/ncu-report-skill"]
+	path = skills/external_skills/ncu-report-skill
+	url = https://github.com/mit-han-lab/ncu-report-skill.git

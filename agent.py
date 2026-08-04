@@ -544,7 +544,7 @@ def run_agent_loop(
             plan_prompt = (
                 build_ncu_improvement_prompt(
                     base_prompt,
-                    best_evaluation.ncu_report,
+                    best_evaluation,
                     kernel_name,
                 )
                 if ncu_decision

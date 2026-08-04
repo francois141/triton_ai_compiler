@@ -1,8 +1,15 @@
+from anthropic import Anthropic
+from openai import OpenAI
+
+from skills import (
+    load_anthropic_ncu_report,
+    load_anthropic_ptx,
+    load_ncu_report,
+    load_ptx,
+)
+
 from .response import request_anthropic_json, request_openai_json
 from .setup import build_anthropic_tools, build_openai_tools
-from openai import OpenAI
-from anthropic import Anthropic
-from skills import load_ptx, load_anthropic_ptx
 
 
 class ProviderSession:
@@ -47,9 +54,9 @@ class OpenAIProviderSession(ProviderSession):
 
 
 class AnthropicProviderSession(ProviderSession):
-    def __init__(self, client, tools, skill_id):
+    def __init__(self, client, tools, skill_ids):
         super().__init__(client, tools)
-        self.skill_id = skill_id
+        self.skill_ids = skill_ids
 
     def request_json(
         self,
@@ -69,7 +76,7 @@ class AnthropicProviderSession(ProviderSession):
             response_format=response_format,
             tools=self.tools,
             kernel_name=kernel_name,
-            skill_id=self.skill_id,
+            skill_ids=self.skill_ids,
             current_candidate=current_candidate,
         )
 
@@ -77,17 +84,17 @@ class AnthropicProviderSession(ProviderSession):
 def create_provider_session(provider):
     if provider == "openai":
         client = OpenAI()
-        skill_id = load_ptx(client)
-        print(f"=== Uploaded PTX skill {skill_id} ===", flush=True)
-        return OpenAIProviderSession(client, build_openai_tools(skill_id))
+        skill_ids = [load_ptx(client), load_ncu_report(client)]
+        print(f"=== Uploaded skills {', '.join(skill_ids)} ===", flush=True)
+        return OpenAIProviderSession(client, build_openai_tools(skill_ids))
     elif provider == "anthropic":
         client = Anthropic()
-        skill_id = load_anthropic_ptx(client)
-        print(f"=== Uploaded PTX skill {skill_id} ===", flush=True)
+        skill_ids = [load_anthropic_ptx(client), load_anthropic_ncu_report(client)]
+        print(f"=== Uploaded skills {', '.join(skill_ids)} ===", flush=True)
         return AnthropicProviderSession(
             client,
             build_anthropic_tools(),
-            skill_id,
+            skill_ids,
         )
 
     raise ValueError(f"Unsupported provider: {provider}")
