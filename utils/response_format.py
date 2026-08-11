@@ -75,7 +75,7 @@ IMPROVEMENT_PLAN_RESPONSE_FORMAT = {
         "properties": {
             "improvements": {
                 "type": "array",
-                "minItems": 3,
+                "minItems": 1,
                 "maxItems": 3,
                 "items": {
                     "type": "object",

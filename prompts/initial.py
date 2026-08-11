@@ -15,9 +15,6 @@ from .blocks import (
     signature_template,
     triton_kernel_block,
 )
-from .skills import common_ptxas_issues_skill
-
-
 def prompt_builder(
     spec,
     *,
@@ -28,7 +25,6 @@ def prompt_builder(
     include_float16_gemm_research=False,
 ):
     sections = [
-        common_ptxas_issues_skill(),
         initial_task().strip(),
         constexpr_values_block(spec),
         launch_configuration_block(spec.num_warps),

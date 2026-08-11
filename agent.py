@@ -11,7 +11,6 @@ from prompts.improvement import (
     build_failure_analysis_prompt,
     build_improvement_prompt,
     build_initial_repair_prompt,
-    build_ncu_improvement_prompt,
     build_repair_prompt,
 )
 from utils.response_format import (
@@ -134,10 +133,10 @@ def _should_repair_candidate(evaluation):
 
 def _require_ncu_report(evaluation):
     ncu_report = evaluation.ncu_report
-    if ncu_report.get("available") and ncu_report.get("summary"):
+    if ncu_report.get("available") and ncu_report.get("metrics"):
         return
     raise RuntimeError(
-        "--ncu-decision requires a successful Nsight Compute report. "
+        "The improvement planner requires kernel-wide Nsight Compute metrics. "
         f"NCU error: {ncu_report.get('error', '')}"
     )
 
@@ -421,7 +420,6 @@ def run_agent_loop(
     start_num_threads_y=1,
     start_num_threads_z=1,
     start_triton_generated_ptx=False,
-    ncu_decision=False,
 ):
     if max_repair_attempts < 0:
         raise ValueError("max_repair_attempts must be non-negative.")
@@ -466,7 +464,6 @@ def run_agent_loop(
         )
     base_prompt = build_initial_prompt(kernel_name, evaluator.operator)
     responses = []
-    recent_evaluations = []
     wrote_daily_summary = False
 
     def write_daily_summary():
@@ -530,38 +527,24 @@ def run_agent_loop(
         if not best_evaluation.passed:
             raise RuntimeError("Initial candidate must compile and pass verification.")
 
-        if ncu_decision:
-            _require_ncu_report(best_evaluation)
+        _require_ncu_report(best_evaluation)
 
         for round_index in range(1, max_tool_rounds + 1):
-            if ncu_decision:
-                _require_ncu_report(best_evaluation)
+            _require_ncu_report(best_evaluation)
             print(
-                f"=== TTS round {round_index}/{max_tool_rounds}: planning three "
-                "ordered improvements ===",
+                f"=== TTS round {round_index}/{max_tool_rounds}: planning one to "
+                "three ordered improvements ===",
                 flush=True,
             )
-            plan_prompt = (
-                build_ncu_improvement_prompt(
-                    base_prompt,
-                    best_evaluation,
-                    kernel_name,
-                )
-                if ncu_decision
-                else build_improvement_prompt(
-                    base_prompt,
-                    best_evaluation,
-                    recent_evaluations,
-                    kernel_name,
-                )
-            )
-            plan_prompt_name = (
-                "ncu_improvement_plan" if ncu_decision else "improvement_plan"
+            plan_prompt = build_improvement_prompt(
+                base_prompt,
+                best_evaluation,
+                kernel_name,
             )
             record_prompt(
                 responses,
                 trace_path,
-                prompt_name=plan_prompt_name,
+                prompt_name="improvement_plan",
                 prompt=plan_prompt,
                 round_index=round_index,
                 speedup_vs_triton=best_evaluation.speedup_vs_triton,
@@ -587,7 +570,7 @@ def run_agent_loop(
             record_generated_json(
                 trace_path,
                 {"improvements": ideas},
-                prompt_name=plan_prompt_name,
+                prompt_name="improvement_plan",
                 round_index=round_index,
                 attempt_index=0,
                 speedup_vs_triton=best_evaluation.speedup_vs_triton,
@@ -595,10 +578,11 @@ def run_agent_loop(
             )
             round_base = best_evaluation
 
+            total_ideas = len(ideas)
             for candidate_index, idea in enumerate(ideas, start=1):
                 print(
                     f"=== TTS round {round_index}: generating candidate "
-                    f"{candidate_index}/3 for {idea['name']!r} ===",
+                    f"{candidate_index}/{total_ideas} for {idea['name']!r} ===",
                     flush=True,
                 )
                 evaluated_candidate = _generate_tested_candidate(
@@ -616,7 +600,6 @@ def run_agent_loop(
                     reasoning_effort=reasoning_effort,
                     max_repair_attempts=max_repair_attempts,
                 )
-                recent_evaluations.append(evaluated_candidate)
                 if (
                     evaluated_candidate.passed
                     and evaluated_candidate.p50 < round_base.p50
@@ -624,7 +607,8 @@ def run_agent_loop(
                     round_base = evaluated_candidate
                     print(
                         f"=== TTS round {round_index}: accepted candidate "
-                        f"{candidate_index}/3 as the base for remaining ideas; "
+                        f"{candidate_index}/{total_ideas} as the base for "
+                        "remaining ideas; "
                         f"p50={round_base.p50}, speedup="
                         f"{round_base.speedup_vs_triton} ===",
                         flush=True,
@@ -684,11 +668,6 @@ def parse_args():
     )
     parser.add_argument("--reasoning-effort", default="medium")
     parser.add_argument(
-        "--ncu-decision",
-        action="store_true",
-        help="Plan improvements exclusively from the Nsight Compute report.",
-    )
-    parser.add_argument(
         "--trace-path",
         type=Path,
         default=Path("output_traces"),
@@ -735,7 +714,7 @@ def main():
     model = (
         args.model
         or {
-            "openai": "gpt-5.6-sol",
+            "openai": "gpt-5.6-terra",
             "anthropic": "claude-opus-4-8",
         }[args.provider]
     )
@@ -756,7 +735,6 @@ def main():
             start_num_threads_y=args.start_num_threads_y,
             start_num_threads_z=args.start_num_threads_z,
             start_triton_generated_ptx=args.start_triton_generated_ptx,
-            ncu_decision=args.ncu_decision,
         )
     )
 

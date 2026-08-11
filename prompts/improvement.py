@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 
 from utils.evaluation import evaluation_summary
 
@@ -10,7 +11,7 @@ from .blocks import float16_gemm_research_rules
 PTX_PATCH_WORKFLOW = """
 ## PTX File Editing Workflow
 
-For this task, this workflow overrides the base output contract.
+For this task, this workflow overrides the usual response contract.
 The current candidate PTX is the working source file. Do not regenerate or
 return the full file. To change it, call `apply_ptx_patch` with a standard
 unified diff whose paths are both `candidate.ptx`; this changes only the lines
@@ -20,6 +21,24 @@ only the required launch metadata after the fastest verified file is current.
 """.strip()
 
 
+_INITIAL_ONLY_SECTION_PATTERNS = (
+    r"^# Triton to Fastest PTX Conversion\n.*?(?=^## |\Z)",
+    r"^## Correctness Rules\n.*?(?=^## |\Z)",
+    r"^## PTX Commenting Rules\n.*?(?=^## |\Z)",
+    r"^## Output Contract\n.*?(?=^## |\Z)",
+)
+
+
+def _improvement_base_prompt(base_prompt):
+    for pattern in _INITIAL_ONLY_SECTION_PATTERNS:
+        base_prompt = re.sub(
+            pattern,
+            "",
+            base_prompt,
+            flags=re.MULTILINE | re.DOTALL,
+        )
+    return base_prompt.strip()
+
 
 def _float16_gemm_research_context(kernel_name):
     if kernel_name != "MatrixMultiplicationFloat16":
@@ -27,42 +46,8 @@ def _float16_gemm_research_context(kernel_name):
     return float16_gemm_research_rules()
 
 
-def build_improvement_prompt(
-    _base_prompt,
-    best_evaluation,
-    recent_evaluations,
-    kernel_name,
-):
-    recent_block = "\n\n".join(
-        evaluation_summary(evaluation, include_ptx=False)
-        for evaluation in recent_evaluations[-6:]
-    )
-    if not recent_block:
-        recent_block = "None yet."
-    research_context = _float16_gemm_research_context(kernel_name)
-
-    return f"""## Current Best Verified Candidate
-
-{evaluation_summary(best_evaluation, include_ptx=True)}
-
-## Recent Candidate Outcomes
-
-{recent_block}
-
-{research_context}
-
-## Planning Task
-
-First decide how to improve the current best kernel. Return exactly three specific, 
-ordered improvement ideas. Each idea must change one meaningful performance factor only, 
-explain why it could help, and be concrete enough to generate one PTX candidate from it. 
-Ideas two and three must be compatible with the preceding ideas: when an earlier candidate 
-is verified faster, its PTX is used as the base for the next idea.
-Do not include PTX in this planning answer.
-""".strip()
-
-
-def build_ncu_improvement_prompt(base_prompt, best_evaluation, kernel_name):
+def build_improvement_prompt(base_prompt, best_evaluation, kernel_name):
+    base_prompt = _improvement_base_prompt(base_prompt)
     ncu_report = best_evaluation.ncu_report
     research_context = _float16_gemm_research_context(kernel_name)
     research_constraint = ""
@@ -71,6 +56,20 @@ def build_ncu_improvement_prompt(base_prompt, best_evaluation, kernel_name):
 For this NCU task, use the research only to implement a metric-supported Tensor
 Core or tiling change. The report remains the sole basis for bottleneck
 selection, impact ordering, and performance claims.
+
+For `MatrixMultiplicationFloat16`, the candidate must first match the reference
+CUTLASS configuration encoded by the local direct kernel exactly: row-major
+FP16 A and B plus row-major FP16 output; FP32 `mma.sync` accumulation; a
+128x256x32 thread-block tile; 2x4 64x64x32 warp tiles (eight warps, 256
+threads); 16x8x16 `mma.sync.aligned.row.col.f32.f16.f16.f32` tiles; and an
+eight-element FP16 epilogue vector. It MUST use the direct kernel's three-stage
+asynchronous mainloop (`MMA_STAGES = 3`), 16-byte `cp.async.cg` loads with the
+`L2::128B` hint, CUTLASS-compatible shared-memory layouts, and 72 KiB of shared
+memory (36,864 FP16 elements). This is the best known direct-CUTLASS baseline:
+make the candidate conform before evaluating an optimization or comparing
+performance. Test deviations from this configuration only as a single,
+report-supported experiment, and retain the direct configuration if no
+deviation is faster.
 """.strip()
     return f"""Make every bottleneck selection and impact-ordering decision exclusively
 from the Nsight Compute report below. Do not infer a bottleneck from a missing
@@ -105,13 +104,12 @@ return status, diagnostics, summary, and every collected metric.
 
 ## Planning Task
 
-Return exactly three specific, ordered improvement ideas. Each remaining idea must target one
-measurable bottleneck reported above, cite the exact metric or derived ratio
-that justifies it, and prescribe one concrete PTX-level change. Order the
-remaining ideas by the expected impact supported by the report. If the report
-does not support two distinct additional changes, return conservative
-measurement-driven ideas that keep the kernel unchanged except for the
-smallest change needed to test the cited bottleneck.
+Return one to three specific, ordered improvement ideas. Each idea must target
+one measurable bottleneck reported above, cite the exact metric or derived
+ratio that justifies it, and prescribe one concrete PTX-level change. Order the
+ideas by the expected impact supported by the report. Do not invent
+micro-optimizations to fill a quota: if no further distinct, report-supported
+change exists, return fewer ideas.
 
 One candidate idea to assess is enlarging the per-thread accumulator tile to
 issue 64 Tensor Core `mma.sync` calls per tile. Consider it only if the report
@@ -126,6 +124,7 @@ def build_candidate_prompt(
     best_evaluation,
     idea,
 ):
+    base_prompt = _improvement_base_prompt(base_prompt)
     return f"""{base_prompt}
 
 ## Current Best Verified Candidate
@@ -145,13 +144,13 @@ current best. Preserve correctness and the required output schema.
 {PTX_PATCH_WORKFLOW}
 
 Before returning the final metadata, use the patch workflow to compile, verify,
-and benchmark every variation you choose
-to investigate. You may call the tool multiple times before returning: use it
-to compare technically distinct micro-variations of this same improvement and
-their performance. If a variation fails compilation or correctness, repair it
-using the diagnostics and call `launch_verifier` again. Return only the fastest
-verified variation you actually tested. If no repair passes, return the closest
-repaired candidate you tested so the outer loop can record diagnostics.
+and benchmark every variation requested by the improvement instruction. For a
+parameter sweep (for example, tiling or unrolling values), test every valid
+listed option. You may call the tool multiple times before returning. Compare
+the variations and return only the fastest verified candidate you actually
+tested. If a variation fails compilation or correctness, repair it using the
+diagnostics and call `launch_verifier` again. If no repair passes, return the
+closest repaired candidate you tested so the outer loop can record diagnostics.
 """.strip()
 
 
@@ -165,6 +164,7 @@ def build_repair_prompt(
     repair_index,
     max_repair_attempts,
 ):
+    base_prompt = _improvement_base_prompt(base_prompt)
     return f"""{base_prompt}
 
 ## Current Best Verified Candidate
@@ -221,6 +221,7 @@ def build_initial_repair_prompt(
     repair_index,
     max_repair_attempts,
 ):
+    base_prompt = _improvement_base_prompt(base_prompt)
     return f"""{base_prompt}
 
 ## Failed Initial Candidate And Diagnostics
@@ -266,6 +267,7 @@ def build_failure_analysis_prompt(
     max_repair_attempts,
     idea=None,
 ):
+    base_prompt = _improvement_base_prompt(base_prompt)
     improvement_context = ""
     if idea is not None:
         improvement_context = f"""

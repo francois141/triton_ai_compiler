@@ -24,6 +24,7 @@ FLOAT16_GEMM_WEB_SEARCH_TOOL = {
     "type": "web_search",
     "filters": {
         "allowed_domains": [
+            "github.com",
             "leimao.github.io",
             "docs.nvidia.com",
             "www.rimikawrites.com",

@@ -82,20 +82,15 @@ python -m agent MatrixMultiplicationFloat16 \
 Set `--start-num-threads-y` and `--start-num-threads-z` when the existing
 kernel uses a multidimensional launch.
 
-To choose improvements solely from the current Nsight Compute report, set
-`NCU_PATH` and use `--ncu-decision`. The run stops with an error if NCU does
-not produce a usable report. NCU decision plans use the full bundled NCU
-report skill and must cite only metrics present in the current report.
-
-```bash
-python -m agent MatrixMultiplicationFloat16 --ncu-decision
-```
+Improvement planning always uses the current Nsight Compute report. Set
+`NCU_PATH`; the run stops with an error if NCU does not produce a usable report.
+Plans use the full bundled NCU report skill and must cite only metrics present
+in the current report.
 
 Each run creates a timestamped directory under `output_traces/`, containing
 prompts, model responses, evaluated candidate JSON and PTX artifacts, and the
 final candidate. Configure the run with `--provider`, `--model`, `--max-tool-rounds`,
-`--max-repair-attempts`, `--reasoning-effort`, `--trace-path`, and
-`--ncu-decision`.
+`--max-repair-attempts`, `--reasoning-effort`, and `--trace-path`.
 `--reasoning-effort` applies to OpenAI models; Anthropic requests use the
 Messages API's standard tool-use flow.
 
