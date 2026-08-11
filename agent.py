@@ -666,7 +666,7 @@ def parse_args():
         default=10,
         help="Maximum outer LLM repair attempts per failed candidate.",
     )
-    parser.add_argument("--reasoning-effort", default="medium")
+    parser.add_argument("--reasoning-effort", default="max")
     parser.add_argument(
         "--trace-path",
         type=Path,
@@ -714,7 +714,7 @@ def main():
     model = (
         args.model
         or {
-            "openai": "gpt-5.6-terra",
+            "openai": "gpt-5.6-sol",
             "anthropic": "claude-opus-4-8",
         }[args.provider]
     )

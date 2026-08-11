@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-import json
 import re
 
+from metrics import compact_ncu_report
 from utils.evaluation import evaluation_summary
 
 from .blocks import float16_gemm_research_rules
@@ -23,6 +23,7 @@ only the required launch metadata after the fastest verified file is current.
 
 _INITIAL_ONLY_SECTION_PATTERNS = (
     r"^# Triton to Fastest PTX Conversion\n.*?(?=^## |\Z)",
+    r"^## PTX Entry Template\n.*?(?=^## |\Z)",
     r"^## Correctness Rules\n.*?(?=^## |\Z)",
     r"^## PTX Commenting Rules\n.*?(?=^## |\Z)",
     r"^## Output Contract\n.*?(?=^## |\Z)",
@@ -56,20 +57,6 @@ def build_improvement_prompt(base_prompt, best_evaluation, kernel_name):
 For this NCU task, use the research only to implement a metric-supported Tensor
 Core or tiling change. The report remains the sole basis for bottleneck
 selection, impact ordering, and performance claims.
-
-For `MatrixMultiplicationFloat16`, the candidate must first match the reference
-CUTLASS configuration encoded by the local direct kernel exactly: row-major
-FP16 A and B plus row-major FP16 output; FP32 `mma.sync` accumulation; a
-128x256x32 thread-block tile; 2x4 64x64x32 warp tiles (eight warps, 256
-threads); 16x8x16 `mma.sync.aligned.row.col.f32.f16.f16.f32` tiles; and an
-eight-element FP16 epilogue vector. It MUST use the direct kernel's three-stage
-asynchronous mainloop (`MMA_STAGES = 3`), 16-byte `cp.async.cg` loads with the
-`L2::128B` hint, CUTLASS-compatible shared-memory layouts, and 72 KiB of shared
-memory (36,864 FP16 elements). This is the best known direct-CUTLASS baseline:
-make the candidate conform before evaluating an optimization or comparing
-performance. Test deviations from this configuration only as a single,
-report-supported experiment, and retain the direct configuration if no
-deviation is faster.
 """.strip()
     return f"""Make every bottleneck selection and impact-ordering decision exclusively
 from the Nsight Compute report below. Do not infer a bottleneck from a missing
@@ -82,7 +69,7 @@ implementable PTX-level change for a report-supported bottleneck.
 
 ## Generated PTX Profiled By Nsight Compute
 
-{evaluation_summary(best_evaluation, include_ptx=True)}
+{evaluation_summary(best_evaluation, include_ptx=True, include_ncu=False)}
 
 Use the bundled `ncu-report-skill` as the full Nsight Compute analysis and
 diagnosis reference. Follow its report-to-diagnosis workflow and consult its
@@ -91,12 +78,14 @@ diagnosis reference. Follow its report-to-diagnosis workflow and consult its
 B200 metric-name mapping only when the supplied report identifies compatible
 hardware; the metrics below remain the sole evidence for this plan.
 
-## Full Nsight Compute Report
+## Nsight Compute Report
 
-The complete unmodified NCU report is included below, including availability,
-return status, diagnostics, summary, and every collected metric.
+The report is represented as compact `key: valueunit` lines. Every collected
+NCU value omitted from this representation is exactly zero. The `derived.*`
+lines are computed from report values; a missing derived ratio is unavailable.
+Use the derived ratios directly when applicable.
 
-{json.dumps(ncu_report, indent=2)}
+{compact_ncu_report(ncu_report)}
 
 {research_context}
 
