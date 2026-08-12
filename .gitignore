@@ -18,3 +18,4 @@ costs.txt
 /output_traces/
 matmul/matmul
 matmul/cublas
+matmul/direct_cutlass_kernel_fp16

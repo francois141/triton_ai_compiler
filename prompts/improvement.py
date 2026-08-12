@@ -1,12 +1,7 @@
-from __future__ import annotations
-
-import re
-
 from metrics import compact_ncu_report
 from utils.evaluation import evaluation_summary
 
-from .blocks import float16_gemm_research_rules
-
+from .initial import IMPROVEMENT_CONTEXT_SECTION_NAMES, render_prompt_sections
 
 PTX_PATCH_WORKFLOW = """
 ## PTX File Editing Workflow
@@ -21,36 +16,16 @@ only the required launch metadata after the fastest verified file is current.
 """.strip()
 
 
-_INITIAL_ONLY_SECTION_PATTERNS = (
-    r"^# Triton to Fastest PTX Conversion\n.*?(?=^## |\Z)",
-    r"^## PTX Entry Template\n.*?(?=^## |\Z)",
-    r"^## Correctness Rules\n.*?(?=^## |\Z)",
-    r"^## PTX Commenting Rules\n.*?(?=^## |\Z)",
-    r"^## Output Contract\n.*?(?=^## |\Z)",
-)
+def _improvement_context(prompt_sections):
+    return render_prompt_sections(
+        prompt_sections,
+        IMPROVEMENT_CONTEXT_SECTION_NAMES,
+    )
 
 
-def _improvement_base_prompt(base_prompt):
-    for pattern in _INITIAL_ONLY_SECTION_PATTERNS:
-        base_prompt = re.sub(
-            pattern,
-            "",
-            base_prompt,
-            flags=re.MULTILINE | re.DOTALL,
-        )
-    return base_prompt.strip()
-
-
-def _float16_gemm_research_context(kernel_name):
-    if kernel_name != "MatrixMultiplicationFloat16":
-        return ""
-    return float16_gemm_research_rules()
-
-
-def build_improvement_prompt(base_prompt, best_evaluation, kernel_name):
-    base_prompt = _improvement_base_prompt(base_prompt)
+def build_improvement_prompt(prompt_sections, best_evaluation):
     ncu_report = best_evaluation.ncu_report
-    research_context = _float16_gemm_research_context(kernel_name)
+    research_context = prompt_sections["float16_gemm_research"]
     research_constraint = ""
     if research_context:
         research_constraint = """
@@ -65,7 +40,7 @@ implementable PTX-level change for a report-supported bottleneck.
 
 ## Kernel Source, Constexpr Values, And Launch Contract
 
-{base_prompt}
+{_improvement_context(prompt_sections)}
 
 ## Generated PTX Profiled By Nsight Compute
 
@@ -87,8 +62,6 @@ Use the derived ratios directly when applicable.
 
 {compact_ncu_report(ncu_report)}
 
-{research_context}
-
 {research_constraint}
 
 ## Planning Task
@@ -109,12 +82,11 @@ that the resulting register-pressure and occupancy tradeoff is acceptable.
 
 
 def build_candidate_prompt(
-    base_prompt,
+    prompt_sections,
     best_evaluation,
     idea,
 ):
-    base_prompt = _improvement_base_prompt(base_prompt)
-    return f"""{base_prompt}
+    return f"""{_improvement_context(prompt_sections)}
 
 ## Current Best Verified Candidate
 {evaluation_summary(best_evaluation, include_ptx=True)}
@@ -144,7 +116,7 @@ closest repaired candidate you tested so the outer loop can record diagnostics.
 
 
 def build_repair_prompt(
-    base_prompt,
+    prompt_sections,
     best_evaluation,
     failed_evaluation,
     idea,
@@ -153,8 +125,7 @@ def build_repair_prompt(
     repair_index,
     max_repair_attempts,
 ):
-    base_prompt = _improvement_base_prompt(base_prompt)
-    return f"""{base_prompt}
+    return f"""{_improvement_context(prompt_sections)}
 
 ## Current Best Verified Candidate
 
@@ -203,15 +174,14 @@ return the closest tested repair so the outer loop can record its diagnostics.
 
 
 def build_initial_repair_prompt(
-    base_prompt,
+    prompt_sections,
     failed_evaluation,
     failure_analysis,
     *,
     repair_index,
     max_repair_attempts,
 ):
-    base_prompt = _improvement_base_prompt(base_prompt)
-    return f"""{base_prompt}
+    return f"""{_improvement_context(prompt_sections)}
 
 ## Failed Initial Candidate And Diagnostics
 
@@ -249,14 +219,13 @@ the outer loop can record its diagnostics.
 
 
 def build_failure_analysis_prompt(
-    base_prompt,
+    prompt_sections,
     failed_evaluation,
     *,
     repair_index,
     max_repair_attempts,
     idea=None,
 ):
-    base_prompt = _improvement_base_prompt(base_prompt)
     improvement_context = ""
     if idea is not None:
         improvement_context = f"""
@@ -267,7 +236,7 @@ Rationale: {idea["rationale"]}
 Instruction: {idea["instruction"]}
 """
 
-    return f"""{base_prompt}
+    return f"""{_improvement_context(prompt_sections)}
 
 ## Failed Candidate And Complete Diagnostics
 

@@ -75,12 +75,27 @@ small unified diffs, each edit is evaluated, and the final source is written to
 
 ```bash
 python -m agent MatrixMultiplicationFloat16 \
-  --start-ptx path/to/candidate.ptx \
-  --start-num-threads-x 128
+  --start-ptx path/to/candidate.ptx
 ```
 
-Set `--start-num-threads-y` and `--start-num-threads-z` when the existing
-kernel uses a multidimensional launch.
+### Local fixed-PTX mock
+
+To exercise the initial-candidate path without an API call, run the local
+OpenAI-compatible endpoint in one terminal:
+
+```bash
+.venv/bin/python fake_openai_endpoint.py --ptx /path/to/candidate.ptx
+```
+
+Then run the agent in another terminal with a placeholder key and the mock
+base URL. Use zero improvement rounds because this mock returns a fixed initial
+candidate only:
+
+```bash
+OPENAI_API_KEY=fake OPENAI_BASE_URL=http://127.0.0.1:8000/v1 \
+  .venv/bin/python -m agent MatrixMultiplicationFloat16 \
+  --model fake-ptx --max-tool-rounds 0
+```
 
 Improvement planning always uses the current Nsight Compute report. Set
 `NCU_PATH`; the run stops with an error if NCU does not produce a usable report.
@@ -89,8 +104,14 @@ in the current report.
 
 Each run creates a timestamped directory under `output_traces/`, containing
 prompts, model responses, evaluated candidate JSON and PTX artifacts, and the
-final candidate. Configure the run with `--provider`, `--model`, `--max-tool-rounds`,
+final candidate. Its JSON includes the selected `tl.constexpr` values and
+autotuner metrics alongside the final speed and latency. `prices.log` is
+appended as API responses arrive and includes a total cost for each completed
+agent pipeline. Configure the run with
+`--provider`, `--model`, `--max-tool-rounds`,
 `--max-repair-attempts`, `--reasoning-effort`, and `--trace-path`.
+When passed back with `--start-json`, these autotuner metrics are reused and
+the kernel skips autotuning.
 `--reasoning-effort` applies to OpenAI models; Anthropic requests use the
 Messages API's standard tool-use flow.
 

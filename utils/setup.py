@@ -2,7 +2,7 @@ import json
 import re
 from pathlib import Path
 
-from prompts import build_prompt_for_operator
+from prompts import build_prompt_sections_for_operator
 from triton_ptx import (
     dump_kernel_ptx,
     get_ptx_system_config,
@@ -127,11 +127,11 @@ def build_anthropic_tools():
     ]
 
 
-def build_initial_prompt(kernel_name, kernel=None):
+def build_prompt_sections(kernel_name, kernel=None):
     kernel = resolve_kernel(kernel_name)() if kernel is None else kernel
     version, target, address_size = get_ptx_system_config()
     signature = parse_ptx_signature(dump_kernel_ptx(kernel))
-    return build_prompt_for_operator(
+    return build_prompt_sections_for_operator(
         kernel,
         version=version,
         target=target,

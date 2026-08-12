@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 from time import perf_counter
 
+from prompts.blocks import system_prompt
 from prompts.improvement import (
     build_candidate_prompt,
     build_failure_analysis_prompt,
@@ -13,6 +14,7 @@ from prompts.improvement import (
     build_initial_repair_prompt,
     build_repair_prompt,
 )
+from prompts.initial import INITIAL_PROMPT_SECTION_NAMES, render_prompt_sections
 from triton_ptx import Payload
 from utils.cost import append_daily_cost_summary
 from utils.evaluation import (
@@ -31,7 +33,7 @@ from utils.response_format import (
     PtxKernelMetadata,
 )
 from utils.setup import (
-    build_initial_prompt,
+    build_prompt_sections,
     load_start_json_with_autotune,
     load_start_ptx,
     load_triton_generated_ptx,
@@ -150,7 +152,7 @@ def _generate_tested_candidate(
     *,
     model,
     kernel_name,
-    base_prompt,
+    prompt_sections,
     best_evaluation,
     idea,
     round_index,
@@ -159,7 +161,7 @@ def _generate_tested_candidate(
     max_repair_attempts,
 ):
     candidate_prompt = build_candidate_prompt(
-        base_prompt,
+        prompt_sections,
         best_evaluation,
         idea,
     )
@@ -215,7 +217,7 @@ def _generate_tested_candidate(
             flush=True,
         )
         analysis_prompt = build_failure_analysis_prompt(
-            base_prompt,
+            prompt_sections,
             best_attempt,
             repair_index=repair_index,
             max_repair_attempts=max_repair_attempts,
@@ -247,7 +249,7 @@ def _generate_tested_candidate(
             response_json_text(analysis_response)
         ).model_dump()
         repair_prompt = build_repair_prompt(
-            base_prompt,
+            prompt_sections,
             best_evaluation,
             best_attempt,
             idea,
@@ -314,7 +316,7 @@ def _repair_initial_candidate(
     *,
     model,
     kernel_name,
-    base_prompt,
+    prompt_sections,
     initial_evaluation,
     reasoning_effort,
     max_repair_attempts,
@@ -330,7 +332,7 @@ def _repair_initial_candidate(
             flush=True,
         )
         analysis_prompt = build_failure_analysis_prompt(
-            base_prompt,
+            prompt_sections,
             best_attempt,
             repair_index=repair_index,
             max_repair_attempts=max_repair_attempts,
@@ -360,7 +362,7 @@ def _repair_initial_candidate(
             response_json_text(analysis_response)
         ).model_dump()
         repair_prompt = build_initial_repair_prompt(
-            base_prompt,
+            prompt_sections,
             best_attempt,
             failure_analysis,
             repair_index=repair_index,
@@ -452,6 +454,10 @@ def run_agent_loop(
         model,
         reasoning_effort,
     )
+    (trace_path / "system_prompt.md").write_text(
+        system_prompt() + "\n",
+        encoding="utf-8",
+    )
     print(f"=== Writing trace artifacts to {trace_path} ===", flush=True)
 
     starting_candidate = load_start_ptx(
@@ -480,7 +486,11 @@ def run_agent_loop(
         provider,
         autotune_metrics=loaded_autotune_metrics,
     )
-    base_prompt = build_initial_prompt(kernel_name, evaluator.operator)
+    prompt_sections = build_prompt_sections(kernel_name, evaluator.operator)
+    initial_prompt = render_prompt_sections(
+        prompt_sections,
+        INITIAL_PROMPT_SECTION_NAMES,
+    )
     responses = []
     wrote_daily_summary = False
 
@@ -503,13 +513,13 @@ def run_agent_loop(
                 responses,
                 trace_path,
                 prompt_name="initial_candidate",
-                prompt=base_prompt,
+                prompt=initial_prompt,
                 round_index=0,
                 speedup_vs_triton=None,
             )
             response, _, _ = provider_session.request_json(
                 model=model,
-                prompt=base_prompt,
+                prompt=initial_prompt,
                 response_format=PTX_KERNEL_RESPONSE_FORMAT,
                 reasoning_effort=reasoning_effort,
                 kernel_name=kernel_name,
@@ -540,7 +550,7 @@ def run_agent_loop(
             trace_path,
             model=model,
             kernel_name=kernel_name,
-            base_prompt=base_prompt,
+            prompt_sections=prompt_sections,
             initial_evaluation=best_evaluation,
             reasoning_effort=reasoning_effort,
             max_repair_attempts=max_repair_attempts,
@@ -558,9 +568,8 @@ def run_agent_loop(
                 flush=True,
             )
             plan_prompt = build_improvement_prompt(
-                base_prompt,
+                prompt_sections,
                 best_evaluation,
-                kernel_name,
             )
             record_prompt(
                 responses,
@@ -615,7 +624,7 @@ def run_agent_loop(
                     trace_path,
                     model=model,
                     kernel_name=kernel_name,
-                    base_prompt=base_prompt,
+                    prompt_sections=prompt_sections,
                     best_evaluation=round_base,
                     idea=idea,
                     round_index=round_index,
@@ -714,24 +723,6 @@ def parse_args():
         action="store_true",
         help="Start from the saved Triton-generated PTX for this kernel.",
     )
-    parser.add_argument(
-        "--start-num-threads-x",
-        type=int,
-        default=128,
-        help="X launch dimension for --start-ptx (default: 128).",
-    )
-    parser.add_argument(
-        "--start-num-threads-y",
-        type=int,
-        default=1,
-        help="Y launch dimension for --start-ptx (default: 1).",
-    )
-    parser.add_argument(
-        "--start-num-threads-z",
-        type=int,
-        default=1,
-        help="Z launch dimension for --start-ptx (default: 1).",
-    )
     return parser.parse_args()
 
 
@@ -757,9 +748,6 @@ def main():
             trace_path=args.trace_path,
             start_json=args.start_json,
             start_ptx=args.start_ptx,
-            start_num_threads_x=args.start_num_threads_x,
-            start_num_threads_y=args.start_num_threads_y,
-            start_num_threads_z=args.start_num_threads_z,
             start_triton_generated_ptx=args.start_triton_generated_ptx,
         )
     )
