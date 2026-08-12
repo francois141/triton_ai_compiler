@@ -13,6 +13,14 @@ from prompts.improvement import (
     build_initial_repair_prompt,
     build_repair_prompt,
 )
+from triton_ptx import Payload
+from utils.cost import append_daily_cost_summary
+from utils.evaluation import (
+    candidate_from_evaluation,
+    json_default,
+)
+from utils.providers import create_provider_session
+from utils.response import response_json_text, verifier_for_kernel
 from utils.response_format import (
     FAILURE_ANALYSIS_RESPONSE_FORMAT,
     IMPROVEMENT_PLAN_RESPONSE_FORMAT,
@@ -22,21 +30,14 @@ from utils.response_format import (
     PtxKernel,
     PtxKernelMetadata,
 )
-from utils.evaluation import (
-    candidate_from_evaluation,
-    json_default,
-)
-from triton_ptx import Payload
-from utils.cost import append_daily_cost_summary
-from utils.providers import create_provider_session
-from utils.response import response_json_text, verifier_for_kernel
 from utils.setup import (
     build_initial_prompt,
-    load_start_json,
+    load_start_json_with_autotune,
     load_start_ptx,
     load_triton_generated_ptx,
 )
 from utils.traces import (
+    autotune_metrics,
     create_trace_directory,
     record_generated_candidate,
     record_generated_json,
@@ -178,6 +179,8 @@ def _generate_tested_candidate(
         response_format=PTX_KERNEL_METADATA_RESPONSE_FORMAT,
         reasoning_effort=reasoning_effort,
         kernel_name=kernel_name,
+        cost_log_path=trace_path / "prices.log",
+        pipeline="candidate",
         current_candidate=candidate_from_evaluation(best_evaluation),
     )
     responses.append(response.model_dump(mode="json"))
@@ -235,6 +238,8 @@ def _generate_tested_candidate(
             response_format=FAILURE_ANALYSIS_RESPONSE_FORMAT,
             reasoning_effort=reasoning_effort,
             kernel_name=kernel_name,
+            cost_log_path=trace_path / "prices.log",
+            pipeline="candidate_failure_analysis",
         )
         responses.append(analysis_response.model_dump(mode="json"))
         write_trace(trace_path, responses)
@@ -267,6 +272,8 @@ def _generate_tested_candidate(
             response_format=PTX_KERNEL_METADATA_RESPONSE_FORMAT,
             reasoning_effort=reasoning_effort,
             kernel_name=kernel_name,
+            cost_log_path=trace_path / "prices.log",
+            pipeline="candidate_repair",
             current_candidate=candidate_from_evaluation(best_attempt),
         )
         responses.append(response.model_dump(mode="json"))
@@ -344,6 +351,8 @@ def _repair_initial_candidate(
             response_format=FAILURE_ANALYSIS_RESPONSE_FORMAT,
             reasoning_effort=reasoning_effort,
             kernel_name=kernel_name,
+            cost_log_path=trace_path / "prices.log",
+            pipeline="initial_candidate_failure_analysis",
         )
         responses.append(analysis_response.model_dump(mode="json"))
         write_trace(trace_path, responses)
@@ -373,6 +382,8 @@ def _repair_initial_candidate(
             response_format=PTX_KERNEL_METADATA_RESPONSE_FORMAT,
             reasoning_effort=reasoning_effort,
             kernel_name=kernel_name,
+            cost_log_path=trace_path / "prices.log",
+            pipeline="initial_candidate_repair",
             current_candidate=candidate_from_evaluation(best_attempt),
         )
         responses.append(response.model_dump(mode="json"))
@@ -443,9 +454,6 @@ def run_agent_loop(
     )
     print(f"=== Writing trace artifacts to {trace_path} ===", flush=True)
 
-    evaluator = verifier_for_kernel(kernel_name)
-    provider_session = create_provider_session(provider)
-
     starting_candidate = load_start_ptx(
         start_ptx,
         num_threads_x=start_num_threads_x,
@@ -453,15 +461,25 @@ def run_agent_loop(
         num_threads_z=start_num_threads_z,
     )
     if starting_candidate is None:
-        starting_candidate = (
-            load_start_json(start_json)
-            if start_json is not None
-            else (
+        if start_json is not None:
+            starting_candidate, loaded_autotune_metrics = load_start_json_with_autotune(
+                start_json
+            )
+        else:
+            starting_candidate = (
                 load_triton_generated_ptx(kernel_name)
                 if start_triton_generated_ptx
                 else None
             )
-        )
+            loaded_autotune_metrics = None
+    else:
+        loaded_autotune_metrics = None
+
+    evaluator = verifier_for_kernel(kernel_name, loaded_autotune_metrics)
+    provider_session = create_provider_session(
+        provider,
+        autotune_metrics=loaded_autotune_metrics,
+    )
     base_prompt = build_initial_prompt(kernel_name, evaluator.operator)
     responses = []
     wrote_daily_summary = False
@@ -470,6 +488,7 @@ def run_agent_loop(
         nonlocal wrote_daily_summary
         if not wrote_daily_summary:
             append_daily_cost_summary()
+            append_daily_cost_summary(trace_path / "prices.log")
             wrote_daily_summary = True
 
     atexit.register(write_daily_summary)
@@ -494,6 +513,8 @@ def run_agent_loop(
                 response_format=PTX_KERNEL_RESPONSE_FORMAT,
                 reasoning_effort=reasoning_effort,
                 kernel_name=kernel_name,
+                cost_log_path=trace_path / "prices.log",
+                pipeline="initial_candidate",
             )
             responses.append(response.model_dump(mode="json"))
             write_trace(trace_path, responses)
@@ -556,6 +577,8 @@ def run_agent_loop(
                 response_format=IMPROVEMENT_PLAN_RESPONSE_FORMAT,
                 reasoning_effort=reasoning_effort,
                 kernel_name=kernel_name,
+                cost_log_path=trace_path / "prices.log",
+                pipeline="improvement_plan",
             )
             request_duration = perf_counter() - request_start
             cost_message = "cost unavailable" if cost is None else f"cost ${cost:.6f}"
@@ -633,6 +656,9 @@ def run_agent_loop(
         final_payload = final_candidate.model_dump(exclude_none=True)
         final_payload["speedup"] = best_evaluation.speedup_vs_triton
         final_payload["p50"] = best_evaluation.p50
+        final_payload["autotune_metrics"] = loaded_autotune_metrics or autotune_metrics(
+            evaluator.operator
+        )
         final_json = json.dumps(final_payload, indent=2, default=json_default)
         final_speedup = best_evaluation.speedup_vs_triton
         (trace_path / f"final_speedup_vs_triton_{final_speedup:.4f}x.json").write_text(
@@ -663,7 +689,7 @@ def parse_args():
     parser.add_argument(
         "--max-repair-attempts",
         type=int,
-        default=10,
+        default=2,
         help="Maximum outer LLM repair attempts per failed candidate.",
     )
     parser.add_argument("--reasoning-effort", default="max")

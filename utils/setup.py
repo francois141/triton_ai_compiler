@@ -11,7 +11,6 @@ from triton_ptx import (
 )
 from utils.response_format import PtxKernel
 
-
 TRITON_GENERATED_PTX_DIRECTORY = (
     Path(__file__).resolve().parent.parent / "triton_generated_ptx"
 )
@@ -142,8 +141,13 @@ def build_initial_prompt(kernel_name, kernel=None):
 
 
 def load_start_json(start_json):
+    candidate, _ = load_start_json_with_autotune(start_json)
+    return candidate
+
+
+def load_start_json_with_autotune(start_json):
     if start_json is None:
-        return None
+        return None, None
     value = str(start_json)
     serialized_candidate = (
         value
@@ -163,7 +167,10 @@ def load_start_json(start_json):
         for key, value in candidate_data.items()
         if key in PtxKernel.model_fields
     }
-    return PtxKernel.model_validate(candidate_data)
+    autotune_metrics = loaded_data.get("autotune_metrics")
+    if autotune_metrics is not None and not isinstance(autotune_metrics, dict):
+        raise ValueError("autotune_metrics must contain an object.")
+    return PtxKernel.model_validate(candidate_data), autotune_metrics
 
 
 def load_start_ptx(start_ptx, *, num_threads_x, num_threads_y, num_threads_z):

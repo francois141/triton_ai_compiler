@@ -9,7 +9,7 @@ from pathlib import Path
 from prompts.blocks import system_prompt
 from triton_ptx import Payload, TritonPTXCandidateEvaluator, resolve_kernel
 
-from .cost import append_cost_log
+from .cost import COST_LOG_PATH, append_cost_log, append_pipeline_cost_summary
 from .response_format import PtxKernel
 
 RESPONSE_RETRY_ATTEMPTS = 6
@@ -38,8 +38,27 @@ FLOAT16_GEMM_WEB_SEARCH_TOOL = {
 
 
 @cache
-def verifier_for_kernel(kernel_name):
+def _default_verifier_for_kernel(kernel_name):
     return TritonPTXCandidateEvaluator(resolve_kernel(kernel_name))
+
+
+def verifier_for_kernel(kernel_name, autotune_metrics=None):
+    if autotune_metrics is None:
+        return _default_verifier_for_kernel(kernel_name)
+
+    selected_config = autotune_metrics.get("selected_config")
+    if not isinstance(selected_config, dict):
+        raise ValueError("autotune_metrics must include a selected_config object.")
+    if not all(
+        isinstance(name, str) and isinstance(value, int)
+        for name, value in selected_config.items()
+    ):
+        raise ValueError("autotune_metrics selected_config must map names to integers.")
+
+    operator_cls = resolve_kernel(kernel_name)
+    operator = operator_cls(ptx={"tuning_config": selected_config})
+    operator.tuning_result = autotune_metrics.get("tuning_result")
+    return TritonPTXCandidateEvaluator(operator_cls, operator=operator)
 
 
 def _get_field(value, field_name):
@@ -51,11 +70,7 @@ def _get_field(value, field_name):
 def _tools_for_request(tools, current_candidate):
     if current_candidate is not None:
         return tools
-    return [
-        tool
-        for tool in tools
-        if tool.get("name") not in PATCH_WORKFLOW_TOOL_NAMES
-    ]
+    return [tool for tool in tools if tool.get("name") not in PATCH_WORKFLOW_TOOL_NAMES]
 
 
 def _format_tool_call(output_item):
@@ -87,6 +102,37 @@ def print_tool_calls(response):
         tool_call = _format_tool_call(output_item)
         if tool_call is not None:
             print(f"=== LLM called tool: {tool_call} ===", flush=True)
+
+
+def _append_response_cost(*, model, response, cost_log_path, pipeline):
+    cost = append_cost_log(
+        model=model,
+        response=response,
+        cost_log_path=COST_LOG_PATH,
+        pipeline=pipeline,
+    )
+    if cost_log_path is not None and Path(cost_log_path) != COST_LOG_PATH:
+        append_cost_log(
+            model=model,
+            response=response,
+            cost_log_path=cost_log_path,
+            pipeline=pipeline,
+        )
+    return cost
+
+
+def _append_pipeline_cost(*, pipeline, cost, cost_log_path):
+    append_pipeline_cost_summary(
+        pipeline=pipeline,
+        cost=cost,
+        cost_log_path=COST_LOG_PATH,
+    )
+    if Path(cost_log_path) != COST_LOG_PATH:
+        append_pipeline_cost_summary(
+            pipeline=pipeline,
+            cost=cost,
+            cost_log_path=cost_log_path,
+        )
 
 
 def _message_output_text(output_item):
@@ -214,9 +260,12 @@ def request_anthropic_json(
     tools,
     kernel_name,
     skill_ids,
+    cost_log_path=None,
+    pipeline=None,
     current_candidate=None,
+    autotune_metrics=None,
 ):
-    verifier = verifier_for_kernel(kernel_name)
+    verifier = verifier_for_kernel(kernel_name, autotune_metrics)
     workspace = (
         PtxPatchWorkspace(current_candidate) if current_candidate is not None else None
     )
@@ -249,7 +298,12 @@ def request_anthropic_json(
             container=container,
             betas=[ANTHROPIC_SKILLS_BETA],
         )
-        cost = append_cost_log(model=model, response=response)
+        cost = _append_response_cost(
+            model=model,
+            response=response,
+            cost_log_path=cost_log_path,
+            pipeline=pipeline,
+        )
         if cost is not None:
             total_cost = (total_cost or 0) + cost
 
@@ -268,6 +322,12 @@ def request_anthropic_json(
         )
         if submitted_response is not None:
             response_text = json.dumps(_get_field(submitted_response, "input"))
+            if cost_log_path is not None:
+                _append_pipeline_cost(
+                    pipeline=pipeline or "unnamed",
+                    cost=total_cost,
+                    cost_log_path=cost_log_path,
+                )
             return (
                 _AnthropicResponse(response_text, response.usage, response),
                 total_cost,
@@ -341,11 +401,14 @@ def request_openai_json(
     reasoning_effort,
     tools,
     kernel_name,
+    cost_log_path=None,
+    pipeline=None,
     current_candidate=None,
+    autotune_metrics=None,
 ):
     from openai import NotFoundError
 
-    verifier = verifier_for_kernel(kernel_name)
+    verifier = verifier_for_kernel(kernel_name, autotune_metrics)
     workspace = (
         PtxPatchWorkspace(current_candidate) if current_candidate is not None else None
     )
@@ -382,7 +445,12 @@ def request_openai_json(
                 time.sleep(delay_seconds)
 
         print_tool_calls(response)
-        cost = append_cost_log(model=model, response=response)
+        cost = _append_response_cost(
+            model=model,
+            response=response,
+            cost_log_path=cost_log_path,
+            pipeline=pipeline,
+        )
         if cost is not None:
             total_cost = (total_cost or 0) + cost
 
@@ -392,6 +460,12 @@ def request_openai_json(
             if _get_field(item, "type") == "function_call"
         ]
         if not function_calls:
+            if cost_log_path is not None:
+                _append_pipeline_cost(
+                    pipeline=pipeline or "unnamed",
+                    cost=total_cost,
+                    cost_log_path=cost_log_path,
+                )
             return response, total_cost, workspace.candidate if workspace else None
 
         tool_outputs = []

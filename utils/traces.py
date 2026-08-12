@@ -1,9 +1,20 @@
 import json
 import re
+from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 
 from .evaluation import json_default
+
+
+def autotune_metrics(operator):
+    tuning_result = getattr(operator, "tuning_result", None)
+    return {
+        "operator": type(operator).__name__,
+        "constexpr_values": dict(getattr(operator, "constexpr_values", {})),
+        "selected_config": dict(getattr(operator, "best_config", {})),
+        "tuning_result": asdict(tuning_result) if tuning_result is not None else None,
+    }
 
 
 def create_trace_directory(trace_root, kernel_name, model, reasoning_effort):

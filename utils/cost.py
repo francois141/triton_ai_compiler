@@ -187,16 +187,23 @@ def read_daily_total(cost_log_path, date_text):
     return total
 
 
-def append_cost_log(*, model, response, cost_log_path=COST_LOG_PATH):
+def append_cost_log(
+    *,
+    model,
+    response,
+    cost_log_path=COST_LOG_PATH,
+    pipeline=None,
+):
     timestamp = datetime.now().astimezone()
     cost, token_counts = estimate_response_cost(response, model)
     daily_total = read_daily_total(cost_log_path, timestamp.date().isoformat())
     daily_total += cost or 0.0
     cost_log_path.parent.mkdir(parents=True, exist_ok=True)
     cost_text = "unavailable" if cost is None else f"{cost:.8f}"
+    pipeline_text = "" if pipeline is None else f" pipeline={pipeline}"
     with cost_log_path.open("a", encoding="utf-8") as cost_log:
         cost_log.write(
-            f"{timestamp.isoformat()} model={model} "
+            f"{timestamp.isoformat()} event=api_response{pipeline_text} model={model} "
             f"input_tokens={token_counts['input_tokens']} "
             f"cached_input_tokens={token_counts['cached_input_tokens']} "
             f"cache_write_tokens={token_counts['cache_write_tokens']} "
@@ -205,6 +212,35 @@ def append_cost_log(*, model, response, cost_log_path=COST_LOG_PATH):
             f"cost_usd={cost_text} daily_total_usd={daily_total:.8f}\n"
         )
     return cost
+
+
+def read_cost_total(cost_log_path):
+    if not cost_log_path.exists():
+        return 0.0
+
+    total = 0.0
+    with cost_log_path.open(encoding="utf-8") as cost_log:
+        for line in cost_log:
+            if "event=api_response" not in line or " cost_usd=" not in line:
+                continue
+            cost_text = line.split(" cost_usd=", maxsplit=1)[1].split()[0]
+            try:
+                total += float(cost_text)
+            except ValueError:
+                continue
+    return total
+
+
+def append_pipeline_cost_summary(*, pipeline, cost, cost_log_path):
+    timestamp = datetime.now().astimezone()
+    run_total = read_cost_total(cost_log_path)
+    cost_log_path.parent.mkdir(parents=True, exist_ok=True)
+    cost_text = "unavailable" if cost is None else f"{cost:.8f}"
+    with cost_log_path.open("a", encoding="utf-8") as cost_log:
+        cost_log.write(
+            f"{timestamp.isoformat()} event=pipeline_total pipeline={pipeline} "
+            f"total_cost_usd={cost_text} run_total_usd={run_total:.8f}\n"
+        )
 
 
 def append_daily_cost_summary(cost_log_path=COST_LOG_PATH, *, label="run_end"):
