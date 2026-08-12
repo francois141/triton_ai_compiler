@@ -11,6 +11,7 @@ from triton_ptx import Payload, TritonPTXCandidateEvaluator, resolve_kernel
 
 from .cost import COST_LOG_PATH, append_cost_log, append_pipeline_cost_summary
 from .response_format import PtxKernel
+from .traces import record_tool_call
 
 RESPONSE_RETRY_ATTEMPTS = 6
 ANTHROPIC_MAX_TOKENS = 16_384
@@ -361,7 +362,7 @@ def request_anthropic_json(
             arguments = _get_field(tool_use, "input")
             if tool_name == "launch_verifier":
                 evaluation = verifier.evaluate(Payload.from_input(arguments))
-                result = evaluation.to_json(indent=2)
+                result = evaluation.to_llm()
             elif tool_name == "apply_ptx_patch" and workspace is not None:
                 try:
                     result = json.dumps(workspace.apply_patch(arguments))
@@ -371,9 +372,18 @@ def request_anthropic_json(
                 evaluation = verifier.evaluate(
                     Payload.from_input(workspace.candidate.model_dump())
                 )
-                result = evaluation.to_json(indent=2)
+                result = evaluation.to_llm()
             else:
                 raise RuntimeError(f"Unsupported Anthropic tool call: {tool_name}")
+            if cost_log_path is not None:
+                record_tool_call(
+                    Path(cost_log_path).parent,
+                    provider="anthropic",
+                    tool_name=tool_name,
+                    call_id=tool_id,
+                    payload=arguments,
+                    answer=result,
+                )
             tool_results.append(
                 {
                     "type": "tool_result",
@@ -474,7 +484,7 @@ def request_openai_json(
             arguments = json.loads(_get_field(function_call, "arguments"))
             if tool_name == "launch_verifier":
                 evaluation = verifier.evaluate(Payload.from_input(arguments))
-                output = evaluation.to_json(indent=2)
+                output = evaluation.to_llm()
             elif tool_name == "apply_ptx_patch" and workspace is not None:
                 try:
                     output = json.dumps(workspace.apply_patch(arguments))
@@ -484,9 +494,18 @@ def request_openai_json(
                 evaluation = verifier.evaluate(
                     Payload.from_input(workspace.candidate.model_dump())
                 )
-                output = evaluation.to_json(indent=2)
+                output = evaluation.to_llm()
             else:
                 raise RuntimeError(f"Unsupported function call: {tool_name}")
+            if cost_log_path is not None:
+                record_tool_call(
+                    Path(cost_log_path).parent,
+                    provider="openai",
+                    tool_name=tool_name,
+                    call_id=_get_field(function_call, "call_id"),
+                    payload=arguments,
+                    answer=output,
+                )
             tool_outputs.append(
                 {
                     "type": "function_call_output",

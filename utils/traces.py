@@ -36,6 +36,36 @@ def write_trace(trace_path, events):
         )
 
 
+def record_tool_call(
+    trace_path,
+    *,
+    provider,
+    tool_name,
+    call_id,
+    payload,
+    answer,
+):
+    tool_output_path = Path(trace_path) / "tool_output"
+    tool_output_path.mkdir(parents=True, exist_ok=True)
+    safe_tool_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(tool_name)).strip("._")
+    artifact_index = sum(1 for _ in tool_output_path.glob("*.json")) + 1
+    artifact_name = f"{artifact_index:03d}_{safe_tool_name or 'tool'}.json"
+    (tool_output_path / artifact_name).write_text(
+        json.dumps(
+            {
+                "provider": provider,
+                "tool_name": tool_name,
+                "call_id": call_id,
+                "payload": payload,
+                "answer": answer,
+            },
+            indent=2,
+            default=json_default,
+        ),
+        encoding="utf-8",
+    )
+
+
 def _artifact_stem(
     *,
     prompt_name,
