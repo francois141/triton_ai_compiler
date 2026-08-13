@@ -640,7 +640,8 @@ def run_agent_loop(
                 )
                 if (
                     evaluated_candidate.passed
-                    and evaluated_candidate.p50 < round_base.p50
+                    and evaluated_candidate.speedup_vs_triton
+                    > round_base.speedup_vs_triton
                 ):
                     round_base = evaluated_candidate
                     print(
