@@ -265,6 +265,7 @@ def request_anthropic_json(
     pipeline=None,
     current_candidate=None,
     autotune_metrics=None,
+    system_instruction=None,
 ):
     verifier = verifier_for_kernel(kernel_name, autotune_metrics)
     workspace = (
@@ -293,7 +294,9 @@ def request_anthropic_json(
         response = client.beta.messages.create(
             model=model,
             max_tokens=ANTHROPIC_MAX_TOKENS,
-            system=system_prompt(),
+            system=system_prompt()
+            if system_instruction is None
+            else system_instruction,
             messages=messages,
             tools=anthropic_tools,
             container=container,
@@ -355,6 +358,7 @@ def request_anthropic_json(
         for tool_use in tool_uses:
             tool_name = _get_field(tool_use, "name")
             tool_id = _get_field(tool_use, "id")
+            resulting_payload = None
             print(
                 f"=== LLM called tool: tool={tool_name}, id={tool_id} ===",
                 flush=True,
@@ -366,6 +370,9 @@ def request_anthropic_json(
             elif tool_name == "apply_ptx_patch" and workspace is not None:
                 try:
                     result = json.dumps(workspace.apply_patch(arguments))
+                    resulting_payload = workspace.candidate.model_dump(
+                        exclude_none=False
+                    )
                 except ValueError as error:
                     result = json.dumps({"error": str(error)})
             elif tool_name == "verify_current_ptx" and workspace is not None:
@@ -383,6 +390,7 @@ def request_anthropic_json(
                     call_id=tool_id,
                     payload=arguments,
                     answer=result,
+                    resulting_payload=resulting_payload,
                 )
             tool_results.append(
                 {
@@ -415,6 +423,7 @@ def request_openai_json(
     pipeline=None,
     current_candidate=None,
     autotune_metrics=None,
+    system_instruction=None,
 ):
     from openai import NotFoundError
 
@@ -427,7 +436,9 @@ def request_openai_json(
         available_tools = [*available_tools, FLOAT16_GEMM_WEB_SEARCH_TOOL]
     kwargs = {
         "model": model,
-        "instructions": system_prompt(),
+        "instructions": (
+            system_prompt() if system_instruction is None else system_instruction
+        ),
         "input": [{"role": "user", "content": prompt}],
         "tools": available_tools,
         "text": {"format": response_format},
@@ -482,12 +493,16 @@ def request_openai_json(
         for function_call in function_calls:
             tool_name = _get_field(function_call, "name")
             arguments = json.loads(_get_field(function_call, "arguments"))
+            resulting_payload = None
             if tool_name == "launch_verifier":
                 evaluation = verifier.evaluate(Payload.from_input(arguments))
                 output = evaluation.to_llm()
             elif tool_name == "apply_ptx_patch" and workspace is not None:
                 try:
                     output = json.dumps(workspace.apply_patch(arguments))
+                    resulting_payload = workspace.candidate.model_dump(
+                        exclude_none=False
+                    )
                 except ValueError as error:
                     output = json.dumps({"error": str(error)})
             elif tool_name == "verify_current_ptx" and workspace is not None:
@@ -505,6 +520,7 @@ def request_openai_json(
                     call_id=_get_field(function_call, "call_id"),
                     payload=arguments,
                     answer=output,
+                    resulting_payload=resulting_payload,
                 )
             tool_outputs.append(
                 {

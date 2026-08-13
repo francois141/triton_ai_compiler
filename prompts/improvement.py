@@ -1,5 +1,6 @@
 from metrics import compact_ncu_report
-from utils.evaluation import evaluation_summary
+from utils.evaluation import candidate_from_evaluation, evaluation_summary
+from utils.traces import render_annotated_ptx_report
 
 from .initial import IMPROVEMENT_CONTEXT_SECTION_NAMES, render_prompt_sections
 
@@ -23,6 +24,17 @@ def _improvement_context(prompt_sections):
     )
 
 
+def _annotated_evaluation_summary(evaluation, *, include_ncu=True):
+    summary = evaluation_summary(
+        evaluation,
+        include_ptx=False,
+        include_ncu=include_ncu,
+    )
+    candidate = candidate_from_evaluation(evaluation)
+    annotated_ptx = render_annotated_ptx_report(candidate.ptx, evaluation.ncu_report)
+    return f"{summary}\n\n{annotated_ptx}"
+
+
 def build_improvement_prompt(prompt_sections, best_evaluation):
     ncu_report = best_evaluation.ncu_report
     research_context = prompt_sections["float16_gemm_research"]
@@ -33,10 +45,7 @@ For this NCU task, use the research only to implement a metric-supported Tensor
 Core or tiling change. The report remains the sole basis for bottleneck
 selection, impact ordering, and performance claims.
 """.strip()
-    return f"""Make every bottleneck selection and impact-ordering decision exclusively
-from the Nsight Compute report below. Do not infer a bottleneck from a missing
-metric. Use the source and PTX context only to formulate a concrete,
-implementable PTX-level change for a report-supported bottleneck.
+    return f"""
 
 ## Kernel Source, Constexpr Values, And Launch Contract
 
@@ -44,7 +53,7 @@ implementable PTX-level change for a report-supported bottleneck.
 
 ## Generated PTX Profiled By Nsight Compute
 
-{evaluation_summary(best_evaluation, include_ptx=True, include_ncu=False)}
+{_annotated_evaluation_summary(best_evaluation, include_ncu=False)}
 
 Use the bundled `ncu-report-skill` as the full Nsight Compute analysis and
 diagnosis reference. Follow its report-to-diagnosis workflow and consult its
@@ -71,12 +80,10 @@ one measurable bottleneck reported above, cite the exact metric or derived
 ratio that justifies it, and prescribe one concrete PTX-level change. Order the
 ideas by the expected impact supported by the report. Do not invent
 micro-optimizations to fill a quota: if no further distinct, report-supported
-change exists, return fewer ideas.
+change exists, return fewer ideas. You should propose a way to optimise this, 
+explicitly mention what is the issue  and explicitly tell multiple variants 
+to explore if it makes sense.
 
-One candidate idea to assess is enlarging the per-thread accumulator tile to
-issue 64 Tensor Core `mma.sync` calls per tile. Consider it only if the report
-shows that additional Tensor Core work per shared-memory tile could help and
-that the resulting register-pressure and occupancy tradeoff is acceptable.
 
 """.strip()
 
@@ -89,7 +96,7 @@ def build_candidate_prompt(
     return f"""{_improvement_context(prompt_sections)}
 
 ## Current Best Verified Candidate
-{evaluation_summary(best_evaluation, include_ptx=True)}
+{_annotated_evaluation_summary(best_evaluation)}
 
 
 ## Single Improvement To Try
@@ -129,7 +136,7 @@ def build_repair_prompt(
 
 ## Current Best Verified Candidate
 
-{evaluation_summary(best_evaluation, include_ptx=True)}
+{_annotated_evaluation_summary(best_evaluation)}
 
 ## Original Improvement Being Tried
 
@@ -139,7 +146,7 @@ Instruction: {idea["instruction"]}
 
 ## Failed Candidate And Diagnostics
 
-{evaluation_summary(failed_evaluation, include_ptx=True)}
+{_annotated_evaluation_summary(failed_evaluation)}
 
 ## Failure Analysis And Required Fix
 
@@ -185,7 +192,7 @@ def build_initial_repair_prompt(
 
 ## Failed Initial Candidate And Diagnostics
 
-{evaluation_summary(failed_evaluation, include_ptx=True)}
+{_annotated_evaluation_summary(failed_evaluation)}
 
 ## Failure Analysis And Required Fix
 
@@ -240,7 +247,7 @@ Instruction: {idea["instruction"]}
 
 ## Failed Candidate And Complete Diagnostics
 
-{evaluation_summary(failed_evaluation, include_ptx=True)}
+{_annotated_evaluation_summary(failed_evaluation)}
 {improvement_context}
 ## Failure Analysis Task
 

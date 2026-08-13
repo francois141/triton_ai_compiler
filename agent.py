@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from time import perf_counter
 
-from prompts.blocks import system_prompt
+from prompts.blocks import improvement_planning_system_prompt, system_prompt
 from prompts.improvement import (
     build_candidate_prompt,
     build_failure_analysis_prompt,
@@ -44,6 +44,7 @@ from utils.traces import (
     record_generated_candidate,
     record_generated_json,
     record_prompt,
+    write_line_by_line_ncu_report,
     write_trace,
 )
 
@@ -120,6 +121,7 @@ def _evaluate_and_record(
         attempt_index=attempt_index,
         candidate_index=candidate_index,
     )
+    write_line_by_line_ncu_report(trace_path, candidate, evaluated_candidate)
     write_trace(trace_path, responses)
     return evaluated_candidate
 
@@ -434,6 +436,8 @@ def run_agent_loop(
     start_num_threads_z=1,
     start_triton_generated_ptx=False,
 ):
+    print("=== Start of the agent loop ===")
+
     if max_repair_attempts < 0:
         raise ValueError("max_repair_attempts must be non-negative.")
     if (
@@ -584,10 +588,11 @@ def run_agent_loop(
                 model=model,
                 prompt=plan_prompt,
                 response_format=IMPROVEMENT_PLAN_RESPONSE_FORMAT,
-                reasoning_effort=reasoning_effort,
+                reasoning_effort="high",
                 kernel_name=kernel_name,
                 cost_log_path=trace_path / "prices.log",
                 pipeline="improvement_plan",
+                system_instruction=improvement_planning_system_prompt(),
             )
             request_duration = perf_counter() - request_start
             cost_message = "cost unavailable" if cost is None else f"cost ${cost:.6f}"

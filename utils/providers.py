@@ -29,6 +29,7 @@ class ProviderSession:
         cost_log_path=None,
         pipeline=None,
         current_candidate=None,
+        system_instruction=None,
     ):
         raise NotImplementedError
 
@@ -45,6 +46,7 @@ class OpenAIProviderSession(ProviderSession):
         cost_log_path=None,
         pipeline=None,
         current_candidate=None,
+        system_instruction=None,
     ):
         return request_openai_json(
             self.client,
@@ -58,6 +60,7 @@ class OpenAIProviderSession(ProviderSession):
             pipeline=pipeline,
             current_candidate=current_candidate,
             autotune_metrics=self.autotune_metrics,
+            system_instruction=system_instruction,
         )
 
 
@@ -77,6 +80,7 @@ class AnthropicProviderSession(ProviderSession):
         cost_log_path=None,
         pipeline=None,
         current_candidate=None,
+        system_instruction=None,
     ):
         del reasoning_effort
         return request_anthropic_json(
@@ -91,6 +95,7 @@ class AnthropicProviderSession(ProviderSession):
             pipeline=pipeline,
             current_candidate=current_candidate,
             autotune_metrics=self.autotune_metrics,
+            system_instruction=system_instruction,
         )
 
 

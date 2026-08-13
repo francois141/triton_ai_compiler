@@ -70,21 +70,15 @@ def _derived_ratios(report):
     max_warps = _number(report, "summary", "hardware", "max_warps_per_sm")
     sm_count = _number(report, "summary", "hardware", "sm_count")
     block_dimensions = tuple(
-        _number(report, "summary", "kernel", f"block_dim_{axis}")
-        for axis in "xyz"
+        _number(report, "summary", "kernel", f"block_dim_{axis}") for axis in "xyz"
     )
     grid_dimensions = tuple(
-        _number(report, "summary", "kernel", f"grid_dim_{axis}")
-        for axis in "xyz"
+        _number(report, "summary", "kernel", f"grid_dim_{axis}") for axis in "xyz"
     )
     theoretical = _number(report, "summary", "occupancy", "theoretical_pct")
     achieved = _number(report, "summary", "occupancy", "achieved_pct")
-    active_warps = _number(
-        report, "summary", "scheduler", "active_warps_per_cycle"
-    )
-    eligible_warps = _number(
-        report, "summary", "scheduler", "eligible_warps_per_cycle"
-    )
+    active_warps = _number(report, "summary", "scheduler", "active_warps_per_cycle")
+    eligible_warps = _number(report, "summary", "scheduler", "eligible_warps_per_cycle")
     issued_warps = _metric_number(
         report,
         "smsp__issue_active.avg.per_cycle_active",
@@ -157,9 +151,7 @@ def _derived_ratios(report):
     branch_instruction_pct = _metric_number(
         report, "derived__smsp__inst_executed_op_branch_pct"
     )
-    branch_instructions = _metric_number(
-        report, "smsp__inst_executed_op_branch.sum"
-    )
+    branch_instructions = _metric_number(report, "smsp__inst_executed_op_branch.sum")
     load_store_instructions = sum(
         _metric_number(report, name) or 0
         for name in (
@@ -188,9 +180,7 @@ def _derived_ratios(report):
         report, "summary", "memory", "shared_bank_conflicts"
     )
     register_count = _number(report, "summary", "kernel", "registers_per_thread")
-    max_registers = _metric_number(
-        report, "device__attribute_max_registers_per_thread"
-    )
+    max_registers = _metric_number(report, "device__attribute_max_registers_per_thread")
     shared_memory = sum(
         value or 0
         for value in (
@@ -347,6 +337,6 @@ def compact_ncu_report(ncu_report):
     report_lines.extend(
         f"{path}: {value}"
         for path, value in _flatten_report(ncu_report)
-        if path not in {"available", "error", "return_code"}
+        if path not in {"available", "error", "return_code", "source_report"}
     )
     return "\n".join(report_lines)

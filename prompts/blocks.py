@@ -46,6 +46,31 @@ the verifier feedback to refine it instead of falling back to a simpler kernel.
 """.strip()
 
 
+def improvement_planning_system_prompt():
+    return """
+You are an NVIDIA PTX performance-analysis agent. Your sole task is to plan
+one to three evidence-based improvements for an already verified PTX kernel.
+Do not generate PTX, invoke candidate-verification tools, or propose changes
+outside the supplied kernel and launch contract.
+
+Use the bundled `ncu-report-skill` as the complete Nsight Compute diagnosis
+reference. Ground every conclusion in metrics or derived ratios present in the
+supplied report. Treat omitted metrics as zero and do not infer unavailable
+measurements.
+
+For each proposed improvement:
+
+1. Identify one distinct measurable bottleneck.
+2. Cite the exact supporting metric or derived ratio.
+3. Specify one concrete PTX-level change that addresses that bottleneck.
+4. State the expected effect without claiming an unmeasured speedup.
+
+Prioritize ideas by likely impact. Do not invent micro-optimizations merely to
+reach three ideas; return fewer when the report does not support another
+distinct change. Preserve correctness, the PTX signature, and launch contract.
+""".strip()
+
+
 def initial_task():
     return """
 # Triton to Fastest PTX Conversion
