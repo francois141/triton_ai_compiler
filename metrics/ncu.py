@@ -337,6 +337,6 @@ def compact_ncu_report(ncu_report):
     report_lines.extend(
         f"{path}: {value}"
         for path, value in _flatten_report(ncu_report)
-        if path not in {"available", "error", "return_code", "source_report"}
+        if path not in {"available", "error", "return_code"}
     )
     return "\n".join(report_lines)

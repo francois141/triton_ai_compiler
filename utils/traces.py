@@ -1,4 +1,5 @@
 import json
+import math
 import re
 from csv import reader
 from dataclasses import asdict
@@ -6,7 +7,7 @@ from datetime import datetime
 from io import StringIO
 from pathlib import Path
 
-from .evaluation import json_default
+from .evaluation import json_default, normalize_nested_json
 
 NCU_KERNEL_NAME = "kernel"
 STALL_COLUMNS = {
@@ -43,7 +44,11 @@ def create_trace_directory(trace_root, kernel_name, model, reasoning_effort):
 def write_trace(trace_path, events):
     if trace_path is not None:
         (trace_path / "events_speedup_vs_triton_pending.json").write_text(
-            json.dumps(events, indent=2, default=json_default),
+            json.dumps(
+                normalize_nested_json(events),
+                indent=2,
+                default=json_default,
+            ),
             encoding="utf-8",
         )
 
@@ -445,10 +450,14 @@ def record_tool_call(
     provider,
     tool_name,
     call_id,
-    payload,
     answer,
     resulting_payload=None,
+    verified_ptx=None,
+    speedup_vs_triton=None,
 ):
+    if tool_name == "apply_ptx_patch":
+        return
+
     tool_output_path = Path(trace_path) / "tool_output"
     tool_output_path.mkdir(parents=True, exist_ok=True)
     safe_tool_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(tool_name)).strip("._")
@@ -458,15 +467,35 @@ def record_tool_call(
         "provider": provider,
         "tool_name": tool_name,
         "call_id": call_id,
-        "payload": payload,
-        "answer": answer,
+        "answer": normalize_nested_json(answer),
     }
+    verified = tool_name == "verify_current_ptx" and verified_ptx is not None
+    if verified and speedup_vs_triton is not None:
+        record["speedup_vs_triton"] = speedup_vs_triton
     if resulting_payload is not None:
-        record["resulting_payload"] = resulting_payload
+        record["resulting_payload"] = normalize_nested_json(resulting_payload)
     (tool_output_path / artifact_name).write_text(
-        json.dumps(record, indent=2, default=json_default),
+        json.dumps(
+            record,
+            indent=2,
+            default=json_default,
+        ),
         encoding="utf-8",
     )
+    if verified:
+        speedup_suffix = "unverified"
+        if isinstance(speedup_vs_triton, (int, float)) and math.isfinite(
+            speedup_vs_triton
+        ):
+            speedup_suffix = f"speedup_vs_triton_{speedup_vs_triton:.4f}x"
+        ptx_path = (
+            tool_output_path
+            / f"{artifact_index:03d}_verify_current_ptx_{speedup_suffix}.ptx"
+        )
+        ptx_path.write_text(
+            verified_ptx,
+            encoding="utf-8",
+        )
 
 
 def _artifact_stem(
@@ -550,7 +579,11 @@ def record_generated_json(
         include_speedup=include_speedup,
     )
     (trace_path / f"{artifact_stem}.json").write_text(
-        json.dumps(generated_value, indent=2, default=json_default),
+        json.dumps(
+            normalize_nested_json(generated_value),
+            indent=2,
+            default=json_default,
+        ),
         encoding="utf-8",
     )
 
@@ -582,7 +615,11 @@ def record_generated_candidate(
         "evaluation": json.loads(evaluation.to_json(indent=2)),
     }
     (trace_path / f"{artifact_stem}.json").write_text(
-        json.dumps(payload, indent=2, default=json_default),
+        json.dumps(
+            normalize_nested_json(payload),
+            indent=2,
+            default=json_default,
+        ),
         encoding="utf-8",
     )
     (trace_path / f"{artifact_stem}.ptx").write_text(

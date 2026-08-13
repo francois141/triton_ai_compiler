@@ -5,6 +5,8 @@ import argparse
 import json
 from pathlib import Path
 
+from utils.evaluation import normalize_nested_json
+
 
 def load_candidate_record(path):
     print("Loading the JSON")
@@ -65,7 +67,7 @@ def resolve_kernel_name(record, explicit_kernel):
 def remeasure_candidate(
     record,
     *,
-    kernel_name = None,
+    kernel_name=None,
 ):
     from triton_ptx.evaluation import Payload, TritonPTXCandidateEvaluator
     from triton_ptx.kernels import resolve_kernel
@@ -111,7 +113,11 @@ def main():
     )
     output_data = json.loads(result.to_json())
     output_data.pop("ncu_report", None)
-    output = json.dumps(output_data, indent=2, ensure_ascii=False)
+    output = json.dumps(
+        normalize_nested_json(output_data),
+        indent=2,
+        ensure_ascii=False,
+    )
 
     if args.output is not None:
         args.output.parent.mkdir(parents=True, exist_ok=True)

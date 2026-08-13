@@ -359,6 +359,8 @@ def request_anthropic_json(
             tool_name = _get_field(tool_use, "name")
             tool_id = _get_field(tool_use, "id")
             resulting_payload = None
+            verified_ptx = None
+            speedup_vs_triton = None
             print(
                 f"=== LLM called tool: tool={tool_name}, id={tool_id} ===",
                 flush=True,
@@ -380,6 +382,9 @@ def request_anthropic_json(
                     Payload.from_input(workspace.candidate.model_dump())
                 )
                 result = evaluation.to_llm()
+                verified_ptx = workspace.candidate.ptx
+                if evaluation.passed:
+                    speedup_vs_triton = evaluation.speedup_vs_triton
             else:
                 raise RuntimeError(f"Unsupported Anthropic tool call: {tool_name}")
             if cost_log_path is not None:
@@ -388,9 +393,10 @@ def request_anthropic_json(
                     provider="anthropic",
                     tool_name=tool_name,
                     call_id=tool_id,
-                    payload=arguments,
                     answer=result,
                     resulting_payload=resulting_payload,
+                    verified_ptx=verified_ptx,
+                    speedup_vs_triton=speedup_vs_triton,
                 )
             tool_results.append(
                 {
@@ -494,6 +500,8 @@ def request_openai_json(
             tool_name = _get_field(function_call, "name")
             arguments = json.loads(_get_field(function_call, "arguments"))
             resulting_payload = None
+            verified_ptx = None
+            speedup_vs_triton = None
             if tool_name == "launch_verifier":
                 evaluation = verifier.evaluate(Payload.from_input(arguments))
                 output = evaluation.to_llm()
@@ -510,6 +518,9 @@ def request_openai_json(
                     Payload.from_input(workspace.candidate.model_dump())
                 )
                 output = evaluation.to_llm()
+                verified_ptx = workspace.candidate.ptx
+                if evaluation.passed:
+                    speedup_vs_triton = evaluation.speedup_vs_triton
             else:
                 raise RuntimeError(f"Unsupported function call: {tool_name}")
             if cost_log_path is not None:
@@ -518,9 +529,10 @@ def request_openai_json(
                     provider="openai",
                     tool_name=tool_name,
                     call_id=_get_field(function_call, "call_id"),
-                    payload=arguments,
                     answer=output,
                     resulting_payload=resulting_payload,
+                    verified_ptx=verified_ptx,
+                    speedup_vs_triton=speedup_vs_triton,
                 )
             tool_outputs.append(
                 {

@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 import json
+import weakref
 
-from triton_ptx import Payload
-
-from .response_format import PtxKernel
+_CANDIDATES_BY_EVALUATION_ID = {}
 
 
 def json_default(value):
@@ -19,20 +18,50 @@ def json_default(value):
         }
         if tensor.numel() <= 16:
             summary["values"] = tensor.cpu().tolist()
-        return summary
+        return normalize_nested_json(summary)
 
     if hasattr(value, "tolist"):
-        return value.tolist()
+        return normalize_nested_json(value.tolist())
 
     if isinstance(value, set):
-        return sorted(value)
+        return normalize_nested_json(sorted(value))
 
-    return str(value)
+    return normalize_nested_json(str(value))
+
+
+def normalize_nested_json(value):
+    if isinstance(value, dict):
+        return {key: normalize_nested_json(item) for key, item in value.items()}
+
+    if isinstance(value, (list, tuple)):
+        return [normalize_nested_json(item) for item in value]
+
+    if not isinstance(value, str):
+        return value
+
+    try:
+        decoded_value = json.loads(value)
+    except json.JSONDecodeError:
+        return value
+
+    return (
+        normalize_nested_json(decoded_value)
+        if isinstance(decoded_value, (dict, list))
+        else value
+    )
+
+
+def register_evaluated_candidate(evaluation, candidate):
+    evaluation_id = id(evaluation)
+    _CANDIDATES_BY_EVALUATION_ID[evaluation_id] = candidate
+    weakref.finalize(evaluation, _CANDIDATES_BY_EVALUATION_ID.pop, evaluation_id, None)
 
 
 def candidate_from_evaluation(evaluation):
-    payload = Payload.from_input(evaluation.payload).to_launch_dict()
-    return PtxKernel.model_validate(payload)
+    try:
+        return _CANDIDATES_BY_EVALUATION_ID[id(evaluation)]
+    except KeyError as error:
+        raise ValueError("The evaluated candidate is unavailable.") from error
 
 
 def evaluation_summary(evaluation, *, include_ptx, include_ncu=True):
@@ -55,7 +84,11 @@ def evaluation_summary(evaluation, *, include_ptx, include_ncu=True):
             "",
             "## Candidate Launch Metadata",
             "```json",
-            json.dumps(payload, indent=2, default=json_default),
+            json.dumps(
+                normalize_nested_json(payload),
+                indent=2,
+                default=json_default,
+            ),
             "```",
         ]
     )
@@ -68,7 +101,11 @@ def evaluation_summary(evaluation, *, include_ptx, include_ncu=True):
                 "",
                 "## Verifier Report",
                 "```json",
-                json.dumps(evaluation.verifier_report, indent=2, default=json_default),
+                json.dumps(
+                    normalize_nested_json(evaluation.verifier_report),
+                    indent=2,
+                    default=json_default,
+                ),
                 "```",
             ]
         )
@@ -88,7 +125,11 @@ def evaluation_summary(evaluation, *, include_ptx, include_ncu=True):
                 "",
                 "## Nsight Compute Status",
                 "```json",
-                json.dumps(ncu_status, indent=2, default=json_default),
+                json.dumps(
+                    normalize_nested_json(ncu_status),
+                    indent=2,
+                    default=json_default,
+                ),
                 "```",
             ]
         )
@@ -98,7 +139,11 @@ def evaluation_summary(evaluation, *, include_ptx, include_ncu=True):
                 "",
                 "## Sanitizer Report",
                 "```json",
-                json.dumps(evaluation.sanitizer_report, indent=2, default=json_default),
+                json.dumps(
+                    normalize_nested_json(evaluation.sanitizer_report),
+                    indent=2,
+                    default=json_default,
+                ),
                 "```",
             ]
         )

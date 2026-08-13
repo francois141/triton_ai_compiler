@@ -20,6 +20,8 @@ from utils.cost import append_daily_cost_summary
 from utils.evaluation import (
     candidate_from_evaluation,
     json_default,
+    normalize_nested_json,
+    register_evaluated_candidate,
 )
 from utils.providers import create_provider_session
 from utils.response import response_json_text, verifier_for_kernel
@@ -44,7 +46,6 @@ from utils.traces import (
     record_generated_candidate,
     record_generated_json,
     record_prompt,
-    write_line_by_line_ncu_report,
     write_trace,
 )
 
@@ -96,6 +97,7 @@ def _evaluate_and_record(
     evaluated_candidate = evaluator.evaluate(
         Payload.from_input(candidate.model_dump(exclude_none=False))
     )
+    register_evaluated_candidate(evaluated_candidate, candidate)
     print(
         f"Candidate result: compiles={evaluated_candidate.compiles}, "
         f"correct={evaluated_candidate.correct}, "
@@ -121,7 +123,6 @@ def _evaluate_and_record(
         attempt_index=attempt_index,
         candidate_index=candidate_index,
     )
-    write_line_by_line_ncu_report(trace_path, candidate, evaluated_candidate)
     write_trace(trace_path, responses)
     return evaluated_candidate
 
@@ -673,7 +674,11 @@ def run_agent_loop(
         final_payload["autotune_metrics"] = loaded_autotune_metrics or autotune_metrics(
             evaluator.operator
         )
-        final_json = json.dumps(final_payload, indent=2, default=json_default)
+        final_json = json.dumps(
+            normalize_nested_json(final_payload),
+            indent=2,
+            default=json_default,
+        )
         final_speedup = best_evaluation.speedup_vs_triton
         (trace_path / f"final_speedup_vs_triton_{final_speedup:.4f}x.json").write_text(
             f"{final_json}\n",
