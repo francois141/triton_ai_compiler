@@ -98,6 +98,8 @@ def build_candidate_prompt(
 ## Current Best Verified Candidate
 {_annotated_evaluation_summary(best_evaluation)}
 
+Leading `// Tried optimization:` comments record changes that were benchmarked
+but did not improve the current PTX. Do not retry those changes.
 
 ## Single Improvement To Try
 

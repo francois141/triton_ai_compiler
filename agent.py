@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import atexit
 import json
+import re
 from pathlib import Path
 from time import perf_counter
 
@@ -135,6 +136,20 @@ def _should_repair_candidate(evaluation):
     if not evaluation.correct:
         return True
     return bool(evaluation.timing_error)
+
+
+def _record_unsuccessful_optimization(evaluation, idea):
+    optimization_name = re.sub(r"\s+", " ", idea["name"]).strip()
+    comment = (
+        f"// Tried optimization: {optimization_name}; it did not improve performance."
+    )
+    candidate = candidate_from_evaluation(evaluation)
+    if comment in candidate.ptx.splitlines():
+        return
+    annotated_candidate = candidate.model_copy(
+        update={"ptx": f"{comment}\n{candidate.ptx}"}
+    )
+    register_evaluated_candidate(evaluation, annotated_candidate)
 
 
 def _require_ncu_report(evaluation):
@@ -652,6 +667,8 @@ def run_agent_loop(
                         f"{round_base.speedup_vs_triton} ===",
                         flush=True,
                     )
+                else:
+                    _record_unsuccessful_optimization(round_base, idea)
 
             if round_base is best_evaluation:
                 print(
