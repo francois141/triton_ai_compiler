@@ -11,6 +11,7 @@ from triton_ptx import Payload, TritonPTXCandidateEvaluator, resolve_kernel
 
 from .cost import COST_LOG_PATH, append_cost_log, append_pipeline_cost_summary
 from .response_format import PtxKernel
+from .traces import autotune_metrics as collect_autotune_metrics
 from .traces import record_tool_call
 
 RESPONSE_RETRY_ATTEMPTS = 6
@@ -268,6 +269,11 @@ def request_anthropic_json(
     system_instruction=None,
 ):
     verifier = verifier_for_kernel(kernel_name, autotune_metrics)
+    run_autotune_metrics = (
+        autotune_metrics
+        if autotune_metrics is not None
+        else collect_autotune_metrics(verifier.operator)
+    )
     workspace = (
         PtxPatchWorkspace(current_candidate) if current_candidate is not None else None
     )
@@ -369,12 +375,17 @@ def request_anthropic_json(
             if tool_name == "launch_verifier":
                 evaluation = verifier.evaluate(Payload.from_input(arguments))
                 result = evaluation.to_llm()
+                if evaluation.passed:
+                    resulting_payload = arguments
+                    verified_ptx = arguments["ptx"]
+                    speedup_vs_triton = evaluation.speedup_vs_triton
             elif tool_name == "apply_ptx_patch" and workspace is not None:
                 try:
                     result = json.dumps(workspace.apply_patch(arguments))
                     resulting_payload = workspace.candidate.model_dump(
                         exclude_none=False
                     )
+                    verified_ptx = workspace.candidate.ptx
                 except ValueError as error:
                     result = json.dumps({"error": str(error)})
             elif tool_name == "verify_current_ptx" and workspace is not None:
@@ -383,8 +394,11 @@ def request_anthropic_json(
                 )
                 result = evaluation.to_llm()
                 verified_ptx = workspace.candidate.ptx
+                resulting_payload = workspace.candidate.model_dump(exclude_none=False)
                 if evaluation.passed:
                     speedup_vs_triton = evaluation.speedup_vs_triton
+                else:
+                    verified_ptx = None
             else:
                 raise RuntimeError(f"Unsupported Anthropic tool call: {tool_name}")
             if cost_log_path is not None:
@@ -397,6 +411,7 @@ def request_anthropic_json(
                     resulting_payload=resulting_payload,
                     verified_ptx=verified_ptx,
                     speedup_vs_triton=speedup_vs_triton,
+                    autotune_metrics=run_autotune_metrics,
                 )
             tool_results.append(
                 {
@@ -434,6 +449,11 @@ def request_openai_json(
     from openai import NotFoundError
 
     verifier = verifier_for_kernel(kernel_name, autotune_metrics)
+    run_autotune_metrics = (
+        autotune_metrics
+        if autotune_metrics is not None
+        else collect_autotune_metrics(verifier.operator)
+    )
     workspace = (
         PtxPatchWorkspace(current_candidate) if current_candidate is not None else None
     )
@@ -505,12 +525,17 @@ def request_openai_json(
             if tool_name == "launch_verifier":
                 evaluation = verifier.evaluate(Payload.from_input(arguments))
                 output = evaluation.to_llm()
+                if evaluation.passed:
+                    resulting_payload = arguments
+                    verified_ptx = arguments["ptx"]
+                    speedup_vs_triton = evaluation.speedup_vs_triton
             elif tool_name == "apply_ptx_patch" and workspace is not None:
                 try:
                     output = json.dumps(workspace.apply_patch(arguments))
                     resulting_payload = workspace.candidate.model_dump(
                         exclude_none=False
                     )
+                    verified_ptx = workspace.candidate.ptx
                 except ValueError as error:
                     output = json.dumps({"error": str(error)})
             elif tool_name == "verify_current_ptx" and workspace is not None:
@@ -519,8 +544,11 @@ def request_openai_json(
                 )
                 output = evaluation.to_llm()
                 verified_ptx = workspace.candidate.ptx
+                resulting_payload = workspace.candidate.model_dump(exclude_none=False)
                 if evaluation.passed:
                     speedup_vs_triton = evaluation.speedup_vs_triton
+                else:
+                    verified_ptx = None
             else:
                 raise RuntimeError(f"Unsupported function call: {tool_name}")
             if cost_log_path is not None:
@@ -533,6 +561,7 @@ def request_openai_json(
                     resulting_payload=resulting_payload,
                     verified_ptx=verified_ptx,
                     speedup_vs_triton=speedup_vs_triton,
+                    autotune_metrics=run_autotune_metrics,
                 )
             tool_outputs.append(
                 {

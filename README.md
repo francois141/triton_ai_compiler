@@ -104,10 +104,16 @@ in the current report.
 
 Each run creates a timestamped directory under `output_traces/`, containing
 prompts, model responses, evaluated candidate JSON and PTX artifacts, and the
-final candidate. Its JSON includes the selected `tl.constexpr` values and
-autotuner metrics alongside the final speed and latency. `prices.log` is
+final candidate. Speedup JSON artifacts include `run_cost_usd_so_far`, the
+cumulative API cost in USD at the time they were written. The final JSON
+includes the selected `tl.constexpr` values and autotuner metrics alongside
+the final speed and latency. `prices.log` is
 appended as API responses arrive and includes a total cost for each completed
-agent pipeline. Configure the run with
+agent pipeline. At startup, `triton_generated.ptx` records the PTX compiled by
+Triton, while `autotune_metrics.json` preserves the selected
+autotuning configuration. Each successful PTX tool call writes matching JSON
+and PTX artifacts under `tool_output/`; its JSON includes the launch
+hyperparameters. Configure the run with
 `--provider`, `--model`, `--max-tool-rounds`,
 `--max-repair-attempts`, `--reasoning-effort`, and `--trace-path`.
 When passed back with `--start-json`, these autotuner metrics are reused and

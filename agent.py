@@ -16,8 +16,8 @@ from prompts.improvement import (
     build_repair_prompt,
 )
 from prompts.initial import INITIAL_PROMPT_SECTION_NAMES, render_prompt_sections
-from triton_ptx import Payload
-from utils.cost import append_daily_cost_summary
+from triton_ptx import Payload, dump_kernel_ptx
+from utils.cost import append_daily_cost_summary, read_cost_total
 from utils.evaluation import (
     candidate_from_evaluation,
     json_default,
@@ -47,6 +47,7 @@ from utils.traces import (
     record_generated_candidate,
     record_generated_json,
     record_prompt,
+    write_autotune_metrics,
     write_trace,
 )
 
@@ -123,6 +124,7 @@ def _evaluate_and_record(
         round_index=round_index,
         attempt_index=attempt_index,
         candidate_index=candidate_index,
+        autotune_metrics=autotune_metrics(evaluator.operator),
     )
     write_trace(trace_path, responses)
     return evaluated_candidate
@@ -502,6 +504,19 @@ def run_agent_loop(
         loaded_autotune_metrics = None
 
     evaluator = verifier_for_kernel(kernel_name, loaded_autotune_metrics)
+    run_autotune_metrics = (
+        loaded_autotune_metrics
+        if loaded_autotune_metrics is not None
+        else autotune_metrics(evaluator.operator)
+    )
+    write_autotune_metrics(trace_path, run_autotune_metrics)
+    triton_generated_ptx = dump_kernel_ptx(evaluator.operator)
+    if not triton_generated_ptx:
+        raise RuntimeError(f"Triton did not produce PTX for {kernel_name}.")
+    (trace_path / "triton_generated.ptx").write_text(
+        triton_generated_ptx.rstrip() + "\n",
+        encoding="utf-8",
+    )
     provider_session = create_provider_session(
         provider,
         autotune_metrics=loaded_autotune_metrics,
@@ -628,6 +643,7 @@ def run_agent_loop(
                 attempt_index=0,
                 speedup_vs_triton=best_evaluation.speedup_vs_triton,
                 include_speedup=False,
+                autotune_metrics=run_autotune_metrics,
             )
             round_base = best_evaluation
 
@@ -689,8 +705,9 @@ def run_agent_loop(
         final_payload = final_candidate.model_dump(exclude_none=True)
         final_payload["speedup"] = best_evaluation.speedup_vs_triton
         final_payload["p50"] = best_evaluation.p50
-        final_payload["autotune_metrics"] = loaded_autotune_metrics or autotune_metrics(
-            evaluator.operator
+        final_payload["autotune_metrics"] = run_autotune_metrics
+        final_payload["run_cost_usd_so_far"] = read_cost_total(
+            trace_path / "prices.log"
         )
         final_json = json.dumps(
             normalize_nested_json(final_payload),
@@ -729,7 +746,7 @@ def parse_args():
         default=2,
         help="Maximum outer LLM repair attempts per failed candidate.",
     )
-    parser.add_argument("--reasoning-effort", default="max")
+    parser.add_argument("--reasoning-effort", default="medium")
     parser.add_argument(
         "--trace-path",
         type=Path,

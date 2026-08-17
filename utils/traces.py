@@ -7,6 +7,7 @@ from datetime import datetime
 from io import StringIO
 from pathlib import Path
 
+from .cost import read_cost_total
 from .evaluation import json_default, normalize_nested_json
 
 NCU_KERNEL_NAME = "kernel"
@@ -22,12 +23,26 @@ MINIMUM_STALL_SAMPLES = 100
 
 def autotune_metrics(operator):
     tuning_result = getattr(operator, "tuning_result", None)
+    if tuning_result is not None and not isinstance(tuning_result, dict):
+        tuning_result = asdict(tuning_result)
     return {
         "operator": type(operator).__name__,
         "constexpr_values": dict(getattr(operator, "constexpr_values", {})),
         "selected_config": dict(getattr(operator, "best_config", {})),
-        "tuning_result": asdict(tuning_result) if tuning_result is not None else None,
+        "tuning_result": tuning_result,
     }
+
+
+def write_autotune_metrics(trace_path, metrics):
+    (Path(trace_path) / "autotune_metrics.json").write_text(
+        json.dumps(
+            normalize_nested_json(metrics),
+            indent=2,
+            default=json_default,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 
 
 def create_trace_directory(trace_root, kernel_name, model, reasoning_effort):
@@ -51,6 +66,10 @@ def write_trace(trace_path, events):
             ),
             encoding="utf-8",
         )
+
+
+def _run_cost_usd_so_far(trace_path):
+    return read_cost_total(Path(trace_path) / "prices.log")
 
 
 def write_line_by_line_ncu_report(trace_path, candidate, evaluation):
@@ -454,10 +473,8 @@ def record_tool_call(
     resulting_payload=None,
     verified_ptx=None,
     speedup_vs_triton=None,
+    autotune_metrics=None,
 ):
-    if tool_name == "apply_ptx_patch":
-        return
-
     tool_output_path = Path(trace_path) / "tool_output"
     tool_output_path.mkdir(parents=True, exist_ok=True)
     safe_tool_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(tool_name)).strip("._")
@@ -468,12 +485,21 @@ def record_tool_call(
         "tool_name": tool_name,
         "call_id": call_id,
         "answer": normalize_nested_json(answer),
+        "run_cost_usd_so_far": _run_cost_usd_so_far(trace_path),
     }
-    verified = tool_name == "verify_current_ptx" and verified_ptx is not None
-    if verified and speedup_vs_triton is not None:
+    if autotune_metrics is not None:
+        record["autotune_metrics"] = normalize_nested_json(autotune_metrics)
+    successful = verified_ptx is not None
+    if successful and speedup_vs_triton is not None:
         record["speedup_vs_triton"] = speedup_vs_triton
     if resulting_payload is not None:
         record["resulting_payload"] = normalize_nested_json(resulting_payload)
+    if successful:
+        record["ptx_hyperparameters"] = {
+            name: resulting_payload.get(name)
+            for name in ("num_threads_x", "num_threads_y", "num_threads_z")
+            if resulting_payload is not None and resulting_payload.get(name) is not None
+        }
     (tool_output_path / artifact_name).write_text(
         json.dumps(
             record,
@@ -482,15 +508,14 @@ def record_tool_call(
         ),
         encoding="utf-8",
     )
-    if verified:
+    if successful:
         speedup_suffix = "unverified"
         if isinstance(speedup_vs_triton, (int, float)) and math.isfinite(
             speedup_vs_triton
         ):
             speedup_suffix = f"speedup_vs_triton_{speedup_vs_triton:.4f}x"
-        ptx_path = (
-            tool_output_path
-            / f"{artifact_index:03d}_verify_current_ptx_{speedup_suffix}.ptx"
+        ptx_path = tool_output_path / (
+            f"{artifact_index:03d}_{safe_tool_name or 'tool'}_{speedup_suffix}.ptx"
         )
         ptx_path.write_text(
             verified_ptx,
@@ -569,6 +594,7 @@ def record_generated_json(
     speedup_vs_triton,
     candidate_index=None,
     include_speedup=True,
+    autotune_metrics=None,
 ):
     artifact_stem = _artifact_stem(
         prompt_name=prompt_name,
@@ -580,7 +606,13 @@ def record_generated_json(
     )
     (trace_path / f"{artifact_stem}.json").write_text(
         json.dumps(
-            normalize_nested_json(generated_value),
+            normalize_nested_json(
+                {
+                    **generated_value,
+                    "autotune_metrics": autotune_metrics,
+                    "run_cost_usd_so_far": _run_cost_usd_so_far(trace_path),
+                }
+            ),
             indent=2,
             default=json_default,
         ),
@@ -597,6 +629,7 @@ def record_generated_candidate(
     round_index,
     attempt_index,
     candidate_index=None,
+    autotune_metrics=None,
 ):
     artifact_stem = _artifact_stem(
         prompt_name=prompt_name,
@@ -613,6 +646,8 @@ def record_generated_candidate(
         "prompt_name": prompt_name,
         "candidate": json.loads(candidate_json),
         "evaluation": json.loads(evaluation.to_json(indent=2)),
+        "autotune_metrics": autotune_metrics,
+        "run_cost_usd_so_far": _run_cost_usd_so_far(trace_path),
     }
     (trace_path / f"{artifact_stem}.json").write_text(
         json.dumps(

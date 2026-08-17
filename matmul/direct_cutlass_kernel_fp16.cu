@@ -11,6 +11,8 @@
 
 #include "assert.h"
 
+// /usr/local/cuda-12.8/bin/nvcc -O3 -std=c++17 -arch=sm_89 --expt-relaxed-constexpr -I/tmp/cutlass/include matmul/direct_cutlass_kernel_fp16.cu -lcublas -o matmul/direct_cutlass_kernel_fp16 && ./matmul/direct_cutlass_kernel_fp16
+
 #define CUDA_CHECK(call)                                                               \
     do                                                                                 \
     {                                                                                  \
