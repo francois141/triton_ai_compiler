@@ -18,12 +18,26 @@ LLM_CLASSES = {
 DEFAULT_PROMPT = "What is the capital of France?"
 
 
+def get_ptx_inputs(llm_class, kernel):
+    """Return representative kernel inputs using the model's inference dtype."""
+    inputs = kernel.get_random_input(fixed=True)
+    dtype = getattr(llm_class, "ptx_input_dtype", None)
+    if dtype is None:
+        return inputs
+    return tuple(
+        input_tensor.to(dtype=dtype)
+        if isinstance(input_tensor, torch.Tensor) and input_tensor.is_floating_point()
+        else input_tensor
+        for input_tensor in inputs
+    )
+
+
 @torch.inference_mode()
 def extract_ptx_payloads(llm_class):
     payloads = {}
     for name, kernel_class in llm_class.get_kernel_classes().items():
         kernel = kernel_class()
-        inputs = kernel.get_random_input(fixed=True)
+        inputs = get_ptx_inputs(llm_class, kernel)
         ptx = dump_kernel_ptx(kernel, inputs)
         if not ptx:
             raise RuntimeError(
@@ -41,7 +55,7 @@ def extract_ptx_payloads(llm_class):
 def verify_ptx_payloads(llm_class, payloads):
     for name, kernel_class in llm_class.get_kernel_classes().items():
         kernel = kernel_class(ptx=payloads[f"{name}_payload"])
-        inputs = kernel.get_random_input(fixed=True)
+        inputs = get_ptx_inputs(llm_class, kernel)
         expected = kernel.forward_torch(inputs)
         actual, _ = kernel.forward_triton(inputs, ptx=True)
         torch.testing.assert_close(actual, expected, rtol=0.05, atol=0.05)
