@@ -33,18 +33,6 @@ def autotune_metrics(operator):
     }
 
 
-def write_autotune_metrics(trace_path, metrics):
-    (Path(trace_path) / "autotune_metrics.json").write_text(
-        json.dumps(
-            normalize_nested_json(metrics),
-            indent=2,
-            default=json_default,
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-
-
 def create_trace_directory(trace_root, kernel_name, model, reasoning_effort):
     timestamp = datetime.now().strftime("%y%m%d%H%M%S")
     safe_values = [

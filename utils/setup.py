@@ -158,16 +158,22 @@ def load_start_json_with_autotune(start_json):
     if not isinstance(loaded_data, dict):
         raise ValueError("Starting candidate JSON must contain an object.")
     candidate_data = loaded_data.get(
-        "payload", loaded_data.get("candidate", loaded_data)
+        "payload",
+        loaded_data.get(
+            "candidate",
+            loaded_data.get("resulting_payload", loaded_data),
+        ),
     )
     if not isinstance(candidate_data, dict):
         raise ValueError("Starting candidate payload must contain an object.")
+    autotune_metrics = loaded_data.get("autotune_metrics")
+    if autotune_metrics is None:
+        autotune_metrics = candidate_data.get("autotune_metrics")
     candidate_data = {
         key: value
         for key, value in candidate_data.items()
         if key in PtxKernel.model_fields
     }
-    autotune_metrics = loaded_data.get("autotune_metrics")
     if autotune_metrics is not None and not isinstance(autotune_metrics, dict):
         raise ValueError("autotune_metrics must contain an object.")
     return PtxKernel.model_validate(candidate_data), autotune_metrics

@@ -110,9 +110,8 @@ includes the selected `tl.constexpr` values and autotuner metrics alongside
 the final speed and latency. `prices.log` is
 appended as API responses arrive and includes a total cost for each completed
 agent pipeline. At startup, `triton_generated.ptx` records the PTX compiled by
-Triton, while `autotune_metrics.json` preserves the selected
-autotuning configuration. Each successful PTX tool call writes matching JSON
-and PTX artifacts under `tool_output/`; its JSON includes the launch
+Triton. Every candidate JSON, including successful PTX tool-call artifacts
+under `tool_output/`, embeds the selected autotuning configuration and launch
 hyperparameters. Configure the run with
 `--provider`, `--model`, `--max-tool-rounds`,
 `--max-repair-attempts`, `--reasoning-effort`, and `--trace-path`.

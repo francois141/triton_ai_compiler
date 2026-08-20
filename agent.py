@@ -47,7 +47,6 @@ from utils.traces import (
     record_generated_candidate,
     record_generated_json,
     record_prompt,
-    write_autotune_metrics,
     write_trace,
 )
 
@@ -509,7 +508,6 @@ def run_agent_loop(
         if loaded_autotune_metrics is not None
         else autotune_metrics(evaluator.operator)
     )
-    write_autotune_metrics(trace_path, run_autotune_metrics)
     triton_generated_ptx = dump_kernel_ptx(evaluator.operator)
     if not triton_generated_ptx:
         raise RuntimeError(f"Triton did not produce PTX for {kernel_name}.")
@@ -746,7 +744,7 @@ def parse_args():
         default=2,
         help="Maximum outer LLM repair attempts per failed candidate.",
     )
-    parser.add_argument("--reasoning-effort", default="medium")
+    parser.add_argument("--reasoning-effort", default="max")
     parser.add_argument(
         "--trace-path",
         type=Path,
