@@ -18,7 +18,7 @@ STALL_COLUMNS = {
     "barrier": "stall_barrier",
 }
 EXCLUDED_STALL_COLUMNS = {"stall_selected"}
-MINIMUM_STALL_SAMPLES = 100
+MINIMUM_STALL_SAMPLES = 15
 
 
 def autotune_metrics(operator):

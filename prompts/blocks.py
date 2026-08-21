@@ -243,6 +243,8 @@ FLOAT16_GEMM_RESEARCH_SOURCES = (
         "Matrix-Multiplication-From-Scratch-With-Tensor-Cores.htm"
     ),
     "https://hazyresearch.stanford.edu/blog/2024-05-12-tk",
+    "https://maharshi.bearblog.dev/optimizing-sgemv-cuda/",
+    "https://tilelang.com/deeplearning_operators/gemv.html",
 )
 
 
@@ -251,8 +253,8 @@ def float16_gemm_research_rules():
     return f"""
 ## FP16 GEMM Research and Tensor Core Requirements
 
-This is `MatrixMultiplicationFloat16`. Use the available web search tool before
-designing or improving a candidate to review the following sources:
+Use the available web search tool before designing or improving a candidate to
+review the following sources:
 {sources}
 
 The FP16 GEMM implementation must use Tensor Cores. Select a Tensor Core
@@ -260,8 +262,22 @@ instruction and data layout that are valid for the supplied target, and use
 the research to choose an optimal block, warp, and K tiling strategy for this
 exact 4096 x 4096 workload. Account for tensor-core tile alignment, shared
 memory capacity and bank conflicts, register pressure, occupancy, coalesced
-global accesses, and global-to-shared pipelining. Verify every candidate with
-the launch verifier; retain only the fastest correct measured implementation.
+global accesses, and global-to-shared pipelining.
+
+Treat the Tensor Core epilogue as a first-class performance-critical design,
+not a final afterthought. Ensure its accumulator-to-output mapping produces
+coalesced, aligned global stores with full sector utilization. When the native
+accumulator layout yields strided or underutilized output stores, evaluate a
+shared-memory striped epilogue: pack the FP32 accumulators to FP16, scatter a
+slab into shared memory, synchronize, then issue contiguous vectorized global
+stores. Reuse input-stage shared memory only after its final use. Balance any
+reduced global-store transactions against the extra shared-memory traffic,
+bank-conflict risk, synchronization, register pressure, and occupancy impact;
+also consider a smaller slab variant when it reduces those costs. Verify every
+candidate with the launch verifier; retain only the fastest correct measured
+implementation.
+
+For GEMV, tensor cores are optional. You don't have to use the if you believe we don't need.
 """.strip()
 
 

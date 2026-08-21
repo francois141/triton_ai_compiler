@@ -75,6 +75,11 @@ def _tools_for_request(tools, current_candidate):
     return [tool for tool in tools if tool.get("name") not in PATCH_WORKFLOW_TOOL_NAMES]
 
 
+def _is_float16_kernel(kernel_name):
+    operator_cls = resolve_kernel(kernel_name)
+    return operator_cls.__module__.startswith("triton_ptx.kernels.level2_float16")
+
+
 def _format_tool_call(output_item):
     item_type = _get_field(output_item, "type")
     if not isinstance(item_type, str) or not item_type.endswith("_call"):
@@ -458,7 +463,7 @@ def request_openai_json(
         PtxPatchWorkspace(current_candidate) if current_candidate is not None else None
     )
     available_tools = _tools_for_request(tools, current_candidate)
-    if kernel_name == "MatrixMultiplicationFloat16":
+    if _is_float16_kernel(kernel_name):
         available_tools = [*available_tools, FLOAT16_GEMM_WEB_SEARCH_TOOL]
     kwargs = {
         "model": model,

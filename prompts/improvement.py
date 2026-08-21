@@ -1,5 +1,11 @@
-from metrics import compact_ncu_report
-from utils.evaluation import candidate_from_evaluation, evaluation_summary
+import json
+
+from utils.evaluation import (
+    candidate_from_evaluation,
+    evaluation_summary,
+    json_default,
+    normalize_nested_json,
+)
 from utils.traces import render_annotated_ptx_report
 
 from .initial import IMPROVEMENT_CONTEXT_SECTION_NAMES, render_prompt_sections
@@ -24,19 +30,40 @@ def _improvement_context(prompt_sections):
     )
 
 
-def _annotated_evaluation_summary(evaluation, *, include_ncu=True):
+def _annotated_evaluation_summary(evaluation):
     summary = evaluation_summary(
         evaluation,
         include_ptx=False,
-        include_ncu=include_ncu,
+        include_ncu=False,
     )
     candidate = candidate_from_evaluation(evaluation)
     annotated_ptx = render_annotated_ptx_report(candidate.ptx, evaluation.ncu_report)
-    return f"{summary}\n\n{annotated_ptx}"
+    ncu_report = {
+        key: value
+        for key, value in evaluation.ncu_report.items()
+        if key != "source_report"
+    }
+    return "\n\n".join(
+        (
+            summary,
+            "\n".join(
+                (
+                    "## Nsight Compute Report",
+                    "```json",
+                    json.dumps(
+                        normalize_nested_json(ncu_report),
+                        indent=2,
+                        default=json_default,
+                    ),
+                    "```",
+                )
+            ),
+            annotated_ptx,
+        )
+    )
 
 
 def build_improvement_prompt(prompt_sections, best_evaluation):
-    ncu_report = best_evaluation.ncu_report
     research_context = prompt_sections["float16_gemm_research"]
     research_constraint = ""
     if research_context:
@@ -53,23 +80,11 @@ selection, impact ordering, and performance claims.
 
 ## Generated PTX Profiled By Nsight Compute
 
-{_annotated_evaluation_summary(best_evaluation, include_ncu=False)}
+{_annotated_evaluation_summary(best_evaluation)}
 
-Use the bundled `ncu-report-skill` as the full Nsight Compute analysis and
-diagnosis reference. Follow its report-to-diagnosis workflow and consult its
-`reference/05-analysis-dimensions.md` and
-`reference/06-diagnosis-playbook.md` before selecting a bottleneck. Use its
-B200 metric-name mapping only when the supplied report identifies compatible
-hardware; the metrics below remain the sole evidence for this plan.
-
-## Nsight Compute Report
-
-The report is represented as compact `key: valueunit` lines. Every collected
-NCU value omitted from this representation is exactly zero. The `derived.*`
-lines are computed from report values; a missing derived ratio is unavailable.
-Use the derived ratios directly when applicable.
-
-{compact_ncu_report(ncu_report)}
+Use the structured Nsight Compute JSON and the `// NCU ...` comments attached
+to the PTX above as the only Nsight Compute evidence. The source-page CSV is
+intentionally excluded; do not expect, request, or infer its missing rows.
 
 {research_constraint}
 

@@ -40,6 +40,10 @@ IMPROVEMENT_CONTEXT_SECTION_NAMES = (
 )
 
 
+def _is_float16_operator(operator):
+    return type(operator).__module__.startswith("triton_ptx.kernels.level2_float16")
+
+
 def render_prompt_sections(prompt_sections, section_names):
     return "\n\n".join(
         prompt_sections[section_name]
@@ -116,9 +120,7 @@ def build_prompt_for_operator(
         target=target,
         address_size=address_size,
         ptx_signature=ptx_signature,
-        include_float16_gemm_research=(
-            type(operator).__name__ == "MatrixMultiplicationFloat16"
-        ),
+        include_float16_gemm_research=_is_float16_operator(operator),
     )
 
 
@@ -137,7 +139,5 @@ def build_prompt_sections_for_operator(
         target=target,
         address_size=address_size,
         ptx_signature=ptx_signature,
-        include_float16_gemm_research=(
-            type(operator).__name__ == "MatrixMultiplicationFloat16"
-        ),
+        include_float16_gemm_research=_is_float16_operator(operator),
     )
