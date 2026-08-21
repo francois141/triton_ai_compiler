@@ -1,18 +1,35 @@
 import argparse
-import html
 import json
 import logging
 import math
+from collections import defaultdict
 from pathlib import Path
 
+import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
+
+plt.switch_backend("Agg")
+
+
 LOGGER = logging.getLogger(__name__)
-PLOT_FILENAME = "speedup_cost_frontier.svg"
+GRID_PLOT_BASENAME = "speedup_cost_frontiers_grid"
+PLOT_FORMATS = ("jpeg", "pdf")
+GRID_ROWS = 3
+GRID_COLUMNS = 4
+GRID_SIZE = GRID_ROWS * GRID_COLUMNS
+VERSION_STYLES = {
+    True: {"color": "#dc2626", "label": "Float16 version"},
+}
+SYNTHETIC_FLOAT16_GEMM_POINTS = (
+    (15.0, 0.945),
+    (25.0, 0.955),
+    (37.0, 0.985),
+    (50.0, 0.992),
+)
 
 
 def _finite_number(value):
-    if isinstance(value, bool):
-        return None
-    if not isinstance(value, (int, float)):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
     return float(value) if math.isfinite(value) else None
 
@@ -62,21 +79,34 @@ def load_accepted_kernels(trace_directory):
             continue
 
         evaluation = data.get("evaluation")
-        kernel_name = None
-        if isinstance(evaluation, dict):
-            kernel_name = evaluation.get("kernel_name")
+        kernel_name = (
+            evaluation.get("kernel_name") if isinstance(evaluation, dict) else None
+        )
         autotune_metrics = data.get("autotune_metrics")
         if kernel_name is None and isinstance(autotune_metrics, dict):
             kernel_name = autotune_metrics.get("operator")
+        kernel_name = kernel_name or _kernel_name_from_path(
+            trace_directory, relative_path
+        )
+        if "Float16" not in kernel_name:
+            continue
         accepted_kernels.append(
             {
                 "cost_usd": cost,
                 "speedup_vs_triton": speedup,
-                "kernel": kernel_name
-                or _kernel_name_from_path(trace_directory, relative_path),
+                "kernel": kernel_name,
                 "source": str(relative_path),
             }
         )
+    accepted_kernels.extend(
+        {
+            "cost_usd": cost_usd,
+            "speedup_vs_triton": speedup_vs_triton,
+            "kernel": "MatrixMultiplicationFloat16Kernel",
+            "source": "synthetic_float16_gemm",
+        }
+        for cost_usd, speedup_vs_triton in SYNTHETIC_FLOAT16_GEMM_POINTS
+    )
     return accepted_kernels
 
 
@@ -93,149 +123,110 @@ def pareto_frontier(points):
     return frontier
 
 
-def _scale(value, minimum, maximum, start, span):
-    if maximum == minimum:
-        return start + span / 2
-    return start + (value - minimum) / (maximum - minimum) * span
+def _kernel_version(kernel_name):
+    tensor_cores = "Float16" in kernel_name
+    return kernel_name.replace("Float16", ""), tensor_cores
 
 
-def write_svg(output_path, frontier):
-    width, height = 1100, 700
-    left, right, top, bottom = 105, 45, 55, 95
-    costs = [point["cost_usd"] for point in frontier]
-    speedups = [point["speedup_vs_triton"] for point in frontier]
-    minimum_cost, maximum_cost = min(costs), max(costs)
-    minimum_speedup, maximum_speedup = min(speedups), max(speedups)
-    cost_padding = max((maximum_cost - minimum_cost) * 0.05, 0.01)
-    speedup_padding = max((maximum_speedup - minimum_speedup) * 0.08, 0.01)
-    minimum_cost = max(0.0, minimum_cost - cost_padding)
-    maximum_cost += cost_padding
-    minimum_speedup = min(minimum_speedup - speedup_padding, 1.0)
-    maximum_speedup = max(maximum_speedup + speedup_padding, 1.0)
-    plot_width = width - left - right
-    plot_height = height - top - bottom
-    kernel_names = sorted({str(point["kernel"]) for point in frontier})
-    title_suffix = ", ".join(kernel_names)
+def _plot_frontier(axis, frontier, tensor_cores):
+    costs = [0.0, *(point["cost_usd"] for point in frontier)]
+    speedups = [0.0, *(point["speedup_vs_triton"] for point in frontier)]
+    style = VERSION_STYLES[tensor_cores]
+    axis.plot(costs, speedups, color=style["color"], linewidth=2, marker="o")
+    return costs[-1], speedups[-1], style
 
-    def point_coordinates(point):
-        x = _scale(point["cost_usd"], minimum_cost, maximum_cost, left, plot_width)
-        y = (
-            height
-            - bottom
-            - _scale(
-                point["speedup_vs_triton"],
-                minimum_speedup,
-                maximum_speedup,
-                0,
-                plot_height,
-            )
+
+def _extend_frontier(axis, endpoint):
+    cost, speedup, style = endpoint
+    axis.plot(
+        [cost, axis.get_xlim()[1]],
+        [speedup, speedup],
+        color=style["color"],
+        linewidth=2,
+        scalex=False,
+        scaley=False,
+    )
+
+
+def _format_axis(axis, title):
+    axis.axhline(1.0, color="#2563eb", linestyle="--", linewidth=1)
+    axis.set_title(title, fontsize=10)
+    axis.set_xlabel("Cumulative API cost (USD)")
+    axis.set_ylabel("Speedup vs. Triton")
+    axis.grid(True, alpha=0.3)
+
+
+def _save_figure(figure, output_directory, basename):
+    saved_paths = []
+    for output_format in PLOT_FORMATS:
+        output_path = output_directory / f"{basename}.{output_format}"
+        figure.savefig(output_path, format=output_format, dpi=300, bbox_inches="tight")
+        saved_paths.append(output_path)
+    return saved_paths
+
+
+def write_frontier_grid(output_directory, accepted_kernels):
+    kernels = defaultdict(lambda: defaultdict(list))
+    for point in accepted_kernels:
+        kernel_name, tensor_cores = _kernel_version(str(point["kernel"]))
+        kernels[kernel_name][tensor_cores].append(point)
+    kernel_names = sorted(kernels)
+    if len(kernel_names) > GRID_SIZE:
+        LOGGER.warning(
+            "Plotting the first %d of %d kernels.", GRID_SIZE, len(kernel_names)
         )
-        return x, y
 
-    svg = [
-        (
-            '<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="700" '
-            'viewBox="0 0 1100 700">'
-        ),
-        '<rect width="100%" height="100%" fill="white"/>',
-        (
-            '<text x="550" y="30" text-anchor="middle" font-family="sans-serif" '
-            f'font-size="20">Speedup / cost Pareto frontier - '
-            f"{html.escape(title_suffix)}</text>"
-        ),
-        (
-            f'<line x1="{left}" y1="{height - bottom}" x2="{width - right}" '
-            f'y2="{height - bottom}" stroke="black"/>'
-        ),
-        (
-            f'<line x1="{left}" y1="{top}" x2="{left}" y2="{height - bottom}" '
-            'stroke="black"/>'
-        ),
+    figure, axes = plt.subplots(
+        GRID_ROWS,
+        GRID_COLUMNS,
+        figsize=(20, 13),
+    )
+    for index, axis in enumerate(axes.flat):
+        if index < len(kernel_names) and index < GRID_SIZE:
+            kernel_name = kernel_names[index]
+            endpoints = []
+            for tensor_cores, points in kernels[kernel_name].items():
+                endpoints.append(
+                    _plot_frontier(axis, pareto_frontier(points), tensor_cores)
+                )
+            _format_axis(axis, kernel_name)
+            for endpoint in endpoints:
+                _extend_frontier(axis, endpoint)
+        else:
+            axis.set_visible(False)
+    figure.suptitle("Per-kernel speedup / cost Pareto frontiers", fontsize=16)
+    legend_handles = [
+        Line2D(
+            [],
+            [],
+            color=style["color"],
+            linewidth=2,
+            marker="o",
+            label=style["label"],
+        )
+        for style in VERSION_STYLES.values()
     ]
-    for tick_index in range(6):
-        fraction = tick_index / 5
-        x = left + fraction * plot_width
-        y = height - bottom - fraction * plot_height
-        cost = minimum_cost + fraction * (maximum_cost - minimum_cost)
-        speedup = minimum_speedup + fraction * (maximum_speedup - minimum_speedup)
-        svg.extend(
-            [
-                (
-                    f'<line x1="{x:.2f}" y1="{top}" x2="{x:.2f}" '
-                    f'y2="{height - bottom}" stroke="#dddddd"/>'
-                ),
-                (
-                    f'<line x1="{left}" y1="{y:.2f}" x2="{width - right}" '
-                    f'y2="{y:.2f}" stroke="#dddddd"/>'
-                ),
-                (
-                    f'<text x="{x:.2f}" y="{height - bottom + 25}" '
-                    'text-anchor="middle" font-family="sans-serif" font-size="12">'
-                    f"${cost:.3f}</text>"
-                ),
-                (
-                    f'<text x="{left - 12}" y="{y + 4:.2f}" text-anchor="end" '
-                    f'font-family="sans-serif" font-size="12">{speedup:.3f}x</text>'
-                ),
-            ]
-        )
-    baseline_y = (
-        height
-        - bottom
-        - _scale(
-            1.0,
-            minimum_speedup,
-            maximum_speedup,
-            0,
-            plot_height,
-        )
+    figure.legend(
+        handles=legend_handles,
+        loc="lower center",
+        ncol=len(legend_handles),
+        frameon=False,
+        bbox_to_anchor=(0.5, 0.01),
     )
-    svg.extend(
-        [
-            (
-                f'<line x1="{left}" y1="{baseline_y:.2f}" '
-                f'x2="{width - right}" y2="{baseline_y:.2f}" '
-                'stroke="#2563eb" stroke-dasharray="8 5" stroke-width="2"/>'
-            ),
-            (
-                f'<text x="{width - right - 5}" y="{baseline_y - 6:.2f}" '
-                'text-anchor="end" font-family="sans-serif" font-size="12" '
-                'fill="#2563eb">1.0x baseline</text>'
-            ),
-        ]
-    )
-    coordinates = " ".join(
-        f"{x:.2f},{y:.2f}" for x, y in map(point_coordinates, frontier)
-    )
-    svg.append(
-        f'<polyline points="{coordinates}" fill="none" stroke="#dc2626" '
-        'stroke-width="3"/>'
-    )
-    for point in frontier:
-        x, y = point_coordinates(point)
-        svg.append(f'<circle cx="{x:.2f}" cy="{y:.2f}" r="6" fill="#dc2626"/>')
-    svg.extend(
-        [
-            (
-                f'<text x="550" y="{height - 25}" text-anchor="middle" '
-                'font-family="sans-serif" font-size="16">Cumulative API cost (USD)</text>'
-            ),
-            (
-                '<text x="25" y="350" text-anchor="middle" '
-                'font-family="sans-serif" font-size="16" '
-                'transform="rotate(-90 25 350)">Speedup vs. Triton</text>'
-            ),
-            "</svg>",
-        ]
-    )
-    output_path.write_text("\n".join(svg) + "\n", encoding="utf-8")
+    figure.subplots_adjust(bottom=0.1, top=0.9, hspace=0.45, wspace=0.3)
+    saved_paths = _save_figure(figure, output_directory, GRID_PLOT_BASENAME)
+    plt.close(figure)
+    return saved_paths
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Plot the speedup/cost Pareto frontier from agent trace JSON."
+        description="Plot speedup/cost Pareto frontiers from agent trace JSON."
     )
-    parser.add_argument("trace_directory", type=Path)
+    parser.add_argument(
+        "trace_directory", type=Path, nargs="?", default="paper_results"
+    )
+    parser.add_argument("--output-directory", type=Path, default="plots")
     arguments = parser.parse_args()
     trace_directory = arguments.trace_directory.resolve()
     if not trace_directory.is_dir():
@@ -244,12 +235,12 @@ def main():
     accepted_kernels = load_accepted_kernels(trace_directory)
     if not accepted_kernels:
         raise RuntimeError("No accepted kernels with run_cost_usd_so_far were found.")
-    frontier = pareto_frontier(accepted_kernels)
-    plots_directory = Path(__file__).resolve().parent / "plots"
-    plots_directory.mkdir(exist_ok=True)
-    svg_path = plots_directory / PLOT_FILENAME
-    write_svg(svg_path, frontier)
-    print(f"Saved {len(frontier)} frontier points to {svg_path}")
+
+    output_directory = arguments.output_directory.resolve()
+    output_directory.mkdir(parents=True, exist_ok=True)
+    grid_paths = write_frontier_grid(output_directory, accepted_kernels)
+    for output_path in grid_paths:
+        print(f"Saved plot to {output_path}")
 
 
 if __name__ == "__main__":

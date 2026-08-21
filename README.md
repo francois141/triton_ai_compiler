@@ -16,7 +16,7 @@ export UV_LINK_MODE=copy
 git submodule update --init --recursive
 uv venv .venv
 uv pip install -e triton_ptx
-uv pip install numpy
+uv pip install numpy matplotlib
 ```
 
 Both providers upload the bundled PTX and NCU-report skills before each run.
@@ -85,6 +85,8 @@ OpenAI-compatible endpoint in one terminal:
 
 ```bash
 .venv/bin/python fake_openai_endpoint.py --ptx /path/to/candidate.ptx
+# For francois to test
+.venv/bin/python fake_openai_endpoint.py --ptx output_traces/260813050848_MatrixMultiplicationFloat16_gpt-5.6-sol_max/iteration_001_candidate_02_try_00_candidate_speedup_vs_triton_0.9860x.ptx
 ```
 
 Then run the agent in another terminal with a placeholder key and the mock
