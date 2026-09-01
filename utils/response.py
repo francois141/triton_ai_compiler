@@ -12,7 +12,7 @@ from triton_ptx import Payload, TritonPTXCandidateEvaluator, resolve_kernel
 from .cost import COST_LOG_PATH, append_cost_log, append_pipeline_cost_summary
 from .response_format import PtxKernel
 from .traces import autotune_metrics as collect_autotune_metrics
-from .traces import record_tool_call
+from .traces import ncu_instruction_issues, record_tool_call
 
 RESPONSE_RETRY_ATTEMPTS = 6
 ANTHROPIC_MAX_TOKENS = 16_384
@@ -78,6 +78,12 @@ def _tools_for_request(tools, current_candidate):
 def _is_float16_kernel(kernel_name):
     operator_cls = resolve_kernel(kernel_name)
     return operator_cls.__module__.startswith("triton_ptx.kernels.level2_float16")
+
+
+def _launch_verifier_output(evaluation, payload):
+    """Add compact source-correlated NCU diagnostics to verifier feedback."""
+    line_by_line = ncu_instruction_issues(payload.ptx, evaluation.ncu_report)
+    return evaluation.to_llm(ncu_line_by_line=line_by_line)
 
 
 def _format_tool_call(output_item):
@@ -378,8 +384,9 @@ def request_anthropic_json(
             )
             arguments = _get_field(tool_use, "input")
             if tool_name == "launch_verifier":
-                evaluation = verifier.evaluate(Payload.from_input(arguments))
-                result = evaluation.to_llm()
+                payload = Payload.from_input(arguments)
+                evaluation = verifier.evaluate(payload)
+                result = _launch_verifier_output(evaluation, payload)
                 if evaluation.passed:
                     resulting_payload = arguments
                     verified_ptx = arguments["ptx"]
@@ -394,10 +401,9 @@ def request_anthropic_json(
                 except ValueError as error:
                     result = json.dumps({"error": str(error)})
             elif tool_name == "verify_current_ptx" and workspace is not None:
-                evaluation = verifier.evaluate(
-                    Payload.from_input(workspace.candidate.model_dump())
-                )
-                result = evaluation.to_llm()
+                payload = Payload.from_input(workspace.candidate.model_dump())
+                evaluation = verifier.evaluate(payload)
+                result = _launch_verifier_output(evaluation, payload)
                 verified_ptx = workspace.candidate.ptx
                 resulting_payload = workspace.candidate.model_dump(exclude_none=False)
                 if evaluation.passed:
@@ -528,8 +534,9 @@ def request_openai_json(
             verified_ptx = None
             speedup_vs_triton = None
             if tool_name == "launch_verifier":
-                evaluation = verifier.evaluate(Payload.from_input(arguments))
-                output = evaluation.to_llm()
+                payload = Payload.from_input(arguments)
+                evaluation = verifier.evaluate(payload)
+                output = _launch_verifier_output(evaluation, payload)
                 if evaluation.passed:
                     resulting_payload = arguments
                     verified_ptx = arguments["ptx"]
@@ -544,10 +551,9 @@ def request_openai_json(
                 except ValueError as error:
                     output = json.dumps({"error": str(error)})
             elif tool_name == "verify_current_ptx" and workspace is not None:
-                evaluation = verifier.evaluate(
-                    Payload.from_input(workspace.candidate.model_dump())
-                )
-                output = evaluation.to_llm()
+                payload = Payload.from_input(workspace.candidate.model_dump())
+                evaluation = verifier.evaluate(payload)
+                output = _launch_verifier_output(evaluation, payload)
                 verified_ptx = workspace.candidate.ptx
                 resulting_payload = workspace.candidate.model_dump(exclude_none=False)
                 if evaluation.passed:

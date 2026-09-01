@@ -18,7 +18,7 @@ STALL_COLUMNS = {
     "barrier": "stall_barrier",
 }
 EXCLUDED_STALL_COLUMNS = {"stall_selected"}
-MINIMUM_STALL_SAMPLES = 15
+TOP_STALL_LINES = 20
 
 
 def autotune_metrics(operator):
@@ -109,10 +109,55 @@ def render_annotated_ptx_report(ptx, ncu_report):
         _ptx_line_record(line_number, ptx_line, rows_by_line.get(line_number, []))
         for line_number, ptx_line in enumerate(ptx_lines, start=1)
     ]
+    top_records = _top_stall_records(records)
+    rank_by_line_number = {
+        record["line_number"]: rank
+        for rank, record in enumerate(top_records, start=1)
+    }
+    lines.insert(
+        4,
+        f"The {len(top_records)} PTX lines with the most total stall samples are "
+        "annotated below.",
+    )
     for record in records:
-        lines.append(_format_annotated_ptx_line(record))
+        lines.append(
+            _format_annotated_ptx_line(
+                record,
+                rank=rank_by_line_number.get(record["line_number"]),
+            )
+        )
     lines.extend(["```", ""])
     return "\n".join(lines)
+
+
+def ncu_instruction_issues(ptx, ncu_report):
+    """Return compact NCU diagnostics for the PTX lines shown to the model."""
+    source_report = ncu_report.get("source_report", "")
+    if not source_report:
+        return []
+
+    ptx_lines = ptx.splitlines()
+    rows_by_line = _correlate_source_rows(
+        ptx_lines,
+        _read_ncu_source_rows(source_report),
+    )
+    records = [
+        _ptx_line_record(line_number, ptx_line, rows_by_line.get(line_number, []))
+        for line_number, ptx_line in enumerate(ptx_lines, start=1)
+    ]
+    top_records = _top_stall_records(records)
+    return [
+        {
+            "rank": rank,
+            "instruction": record["ptx"].strip(),
+            "lines": [record["line_number"]],
+            "total_stall_samples": _total_stall_samples(record),
+            "stall_breakdown": {
+                name: value for name, value in record["stalls"].items() if value
+            },
+        }
+        for rank, record in enumerate(top_records, start=1)
+    ]
 
 
 def _read_ncu_source_rows(source_report):
@@ -377,22 +422,26 @@ def _mark_frequent_lines(records):
             )
 
 
-def _format_annotated_ptx_line(record):
+def _format_annotated_ptx_line(record, *, rank=None):
     line = record["ptx"]
-    if (
-        not record["executable"]
-        or not record["sass"]
-        or record["sample_count"] < MINIMUM_STALL_SAMPLES
-    ):
+    if rank is None:
         return line
 
     sample_count = record["sample_count"]
     reasons = [
-        f"{name}: {value:g} ({value / sample_count * 100:.1f}%)"
+        (
+            f"{name}: {value:g} ({value / sample_count * 100:.1f}%)"
+            if sample_count
+            else f"{name}: {value:g}"
+        )
         for name, value in record["stalls"].items()
         if value
     ]
-    comment_parts = [f"NCU stalls_not_issued: {sample_count:g}"]
+    comment_parts = [
+        f"NCU stall rank: {rank}",
+        f"total_stall_samples: {_total_stall_samples(record):g}",
+        f"stalls_not_issued: {sample_count:g}",
+    ]
     if reasons:
         comment_parts.append(", ".join(reasons))
 
@@ -432,6 +481,26 @@ def _format_annotated_ptx_line(record):
             memory_description += f"; bank_conflicts: {memory['bank_conflicts']:g}"
         comment_parts.append(memory_description)
     return line + " // " + "; ".join(comment_parts)
+
+
+def _top_stall_records(records):
+    ranked_records = [
+        record
+        for record in records
+        if (
+            record["executable"]
+            and record["sass"]
+            and _total_stall_samples(record) > 0
+        )
+    ]
+    return sorted(
+        ranked_records,
+        key=lambda record: (-_total_stall_samples(record), record["line_number"]),
+    )[:TOP_STALL_LINES]
+
+
+def _total_stall_samples(record):
+    return sum(record["stalls"].values())
 
 
 def _problem_summary(records):

@@ -78,6 +78,15 @@ python -m agent MatrixMultiplicationFloat16 \
   --start-ptx path/to/candidate.ptx
 ```
 
+To provide a PTX implementation as reference while still generating a new
+initial candidate, use `--initial-prompt-ptx`. Its content is included only in
+the first generation prompt; it does not become the working candidate.
+
+```bash
+python -m agent MatrixMultiplicationFloat16 \
+  --initial-prompt-ptx path/to/reference.ptx
+```
+
 ### Local fixed-PTX mock
 
 To exercise the initial-candidate path without an API call, run the local

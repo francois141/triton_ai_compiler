@@ -452,6 +452,7 @@ def run_agent_loop(
     start_num_threads_y=1,
     start_num_threads_z=1,
     start_triton_generated_ptx=False,
+    initial_prompt_ptx=None,
 ):
     print("=== Start of the agent loop ===")
 
@@ -524,6 +525,17 @@ def run_agent_loop(
         prompt_sections,
         INITIAL_PROMPT_SECTION_NAMES,
     )
+    if initial_prompt_ptx is not None:
+        ptx_content = Path(initial_prompt_ptx).read_text(encoding="utf-8")
+        initial_prompt = (
+            f"{initial_prompt}\n\n"
+            "## Reference PTX\n\n"
+            "Use the following PTX as reference when generating the initial "
+            "candidate.\n\n"
+            "```ptx\n"
+            f"{ptx_content.rstrip()}\n"
+            "```"
+        )
     responses = []
     wrote_daily_summary = False
 
@@ -766,6 +778,14 @@ def parse_args():
         action="store_true",
         help="Start from the saved Triton-generated PTX for this kernel.",
     )
+    parser.add_argument(
+        "--initial-prompt-ptx",
+        type=Path,
+        help=(
+            "Path to a PTX file whose content is included only in the initial "
+            "generation prompt."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -792,6 +812,7 @@ def main():
             start_json=args.start_json,
             start_ptx=args.start_ptx,
             start_triton_generated_ptx=args.start_triton_generated_ptx,
+            initial_prompt_ptx=args.initial_prompt_ptx,
         )
     )
 

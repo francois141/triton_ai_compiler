@@ -2,6 +2,7 @@ import argparse
 import json
 import logging
 import math
+import re
 from collections import defaultdict
 from pathlib import Path
 
@@ -26,6 +27,7 @@ SYNTHETIC_FLOAT16_GEMM_POINTS = (
     (37.0, 0.985),
     (50.0, 0.992),
 )
+RUN_DIRECTORY_PATTERN = re.compile(r"^\d{12}_")
 
 
 def _finite_number(value):
@@ -60,8 +62,40 @@ def _kernel_name_from_path(trace_directory, relative_path):
     return run_directory
 
 
+def _run_directory(relative_path):
+    for index, path_part in enumerate(relative_path.parts):
+        if RUN_DIRECTORY_PATTERN.match(path_part):
+            return Path(*relative_path.parts[: index + 1])
+    return Path(relative_path.parts[0])
+
+
+def _kernel_name(data, trace_directory, relative_path):
+    evaluation = data.get("evaluation")
+    kernel_name = (
+        evaluation.get("kernel_name") if isinstance(evaluation, dict) else None
+    )
+    autotune_metrics = data.get("autotune_metrics")
+    if kernel_name is None and isinstance(autotune_metrics, dict):
+        kernel_name = autotune_metrics.get("operator")
+    return kernel_name or _kernel_name_from_path(trace_directory, relative_path)
+
+
+def _add_prior_run_costs(accepted_kernels, run_costs):
+    points_by_kernel_and_run = defaultdict(lambda: defaultdict(list))
+    for point in accepted_kernels:
+        points_by_kernel_and_run[point["kernel"]][point["run_directory"]].append(point)
+
+    for kernel_name, costs_by_run in run_costs.items():
+        prior_cost = 0.0
+        for run_directory in sorted(costs_by_run):
+            for point in points_by_kernel_and_run[kernel_name][run_directory]:
+                point["cost_usd"] += prior_cost
+            prior_cost += costs_by_run[run_directory]
+
+
 def load_accepted_kernels(trace_directory):
     accepted_kernels = []
+    run_costs = defaultdict(lambda: defaultdict(float))
     for json_path in trace_directory.rglob("*.json"):
         relative_path = json_path.relative_to(trace_directory)
         try:
@@ -73,22 +107,20 @@ def load_accepted_kernels(trace_directory):
         if not isinstance(data, dict):
             continue
 
-        speedup = _accepted_speedup(data, json_path)
         cost = _finite_number(data.get("run_cost_usd_so_far"))
-        if speedup is None or cost is None or cost < 0:
+        if cost is None or cost < 0:
             continue
 
-        evaluation = data.get("evaluation")
-        kernel_name = (
-            evaluation.get("kernel_name") if isinstance(evaluation, dict) else None
-        )
-        autotune_metrics = data.get("autotune_metrics")
-        if kernel_name is None and isinstance(autotune_metrics, dict):
-            kernel_name = autotune_metrics.get("operator")
-        kernel_name = kernel_name or _kernel_name_from_path(
-            trace_directory, relative_path
-        )
+        kernel_name = _kernel_name(data, trace_directory, relative_path)
         if "Float16" not in kernel_name:
+            continue
+        run_directory = _run_directory(relative_path)
+        run_costs[kernel_name][run_directory] = max(
+            run_costs[kernel_name][run_directory], cost
+        )
+
+        speedup = _accepted_speedup(data, json_path)
+        if speedup is None:
             continue
         accepted_kernels.append(
             {
@@ -96,8 +128,12 @@ def load_accepted_kernels(trace_directory):
                 "speedup_vs_triton": speedup,
                 "kernel": kernel_name,
                 "source": str(relative_path),
+                "run_directory": run_directory,
             }
         )
+    _add_prior_run_costs(accepted_kernels, run_costs)
+    for point in accepted_kernels:
+        point.pop("run_directory")
     accepted_kernels.extend(
         {
             "cost_usd": cost_usd,

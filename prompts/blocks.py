@@ -253,14 +253,18 @@ def float16_gemm_research_rules():
     return f"""
 ## FP16 GEMM Research and Tensor Core Requirements
 
+This is generic FP16 GEMM optimization advice. Apply it only when it is
+consistent with the operator's supplied shapes, indexing, and memory layout.
+It does not change the computation, imply a 4096 x 4096 problem, or permit
+treating a non-contiguous operand as a contiguous matrix.
+
 Use the available web search tool before designing or improving a candidate to
 review the following sources:
 {sources}
 
-The FP16 GEMM implementation must use Tensor Cores. Select a Tensor Core
-instruction and data layout that are valid for the supplied target, and use
-the research to choose an optimal block, warp, and K tiling strategy for this
-exact 4096 x 4096 workload. Account for tensor-core tile alignment, shared
+For a true FP16 GEMM, use Tensor Cores when they are valid for the supplied
+target and exact operand layout. Choose block, warp, and K tiling from the
+actual problem dimensions, accounting for tensor-core tile alignment, shared
 memory capacity and bank conflicts, register pressure, occupancy, coalesced
 global accesses, and global-to-shared pipelining.
 
@@ -277,15 +281,70 @@ also consider a smaller slab variant when it reduces those costs. Verify every
 candidate with the launch verifier; retain only the fastest correct measured
 implementation.
 
-For GEMV, tensor cores are optional. You don't have to use the if you believe we don't need.
+For GEMV, tensor cores are optional. Do not use them when they are not useful.
 """.strip()
 
 
-def triton_kernel_block(source):
+def convolution_2d_float16_rules():
+    return """
+## Convolution Memory Layout
+
+This operator is a 2D NCHW convolution, not a contiguous pre-materialized
+GEMM input. It can be viewed logically as M=32*54*54=93312, N=128, K=576,
+but the logical A[m, k] values are gathered from x_ptr and are not contiguous
+in memory across the im2col K dimension. Do not use x_ptr + (m * 576 + k) or
+otherwise assume an im2col buffer exists.
+
+For output coordinates (n, oc, oh, ow), input channel c, and filter
+coordinates (kh, kw), use these element offsets:
+- x_ptr: ((n * 64 + c) * 56 + oh + kh) * 56 + ow + kw
+- weight_ptr: ((oc * 64 + c) * 3 + kh) * 3 + kw
+- output_ptr: ((n * 128 + oc) * 54 + oh) * 54 + ow
+
+When mapping flattened m, first decode n=m/2916, then oh=(m%2916)/54 and
+ow=m%54. Preserve these gathers when using shared memory or Tensor Cores;
+explicitly stage the required input patch rather than assuming contiguous A
+tiles. Establish a correct implementation before changing the tiling.
+""".strip()
+
+
+def flash_attention_float16_rules():
+    return """
+## Flash Attention Semantics and Layout
+
+This is causal scaled dot-product attention over contiguous float16 tensors
+with shape (batch=8, heads=16, sequence=256, head_dim=64). Each program
+handles one batch-head pair and a BLOCK_M=128-row query tile. The output has
+the same shape as query.
+
+For each query row i, compute only keys j where 0 <= j <= i:
+- score[i, j] = dot(query[i, :], key[j, :]) / sqrt(64)
+- probability[i, :] = softmax(score[i, :]) over the valid keys only
+- output[i, :] = sum(probability[i, j] * value[j, :] for valid j)
+
+Preserve the causal mask exactly: keys above the diagonal must contribute zero
+probability. Do not materialize the 256 x 256 score or probability matrix.
+Use numerically stable online softmax while processing key/value tiles: retain
+the running row maximum, renormalize the running output accumulator when that
+maximum changes, retain the running exponential sum, then divide the final
+accumulator by that sum. Accumulate dot products and softmax state in float32;
+the stored output remains float16.
+
+The supplied Triton uses an unmasked pass over earlier key blocks followed by
+a masked pass over the query tile's own key block. Any PTX implementation may
+use a different tiling, but it must produce the same causal attention result
+for every row and batch-head pair.
+""".strip()
+
+
+def triton_kernel_block(source, supporting_source=""):
+    source_parts = [source]
+    if supporting_source:
+        source_parts.insert(0, supporting_source)
     return "\n\n".join(
         [
             "## Triton Kernel",
-            f"```python\n{source}\n```",
+            f"```python\n{'\n\n'.join(source_parts)}\n```",
         ]
     )
 
