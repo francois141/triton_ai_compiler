@@ -44,9 +44,21 @@ def _default_verifier_for_kernel(kernel_name):
     return TritonPTXCandidateEvaluator(resolve_kernel(kernel_name))
 
 
-def verifier_for_kernel(kernel_name, autotune_metrics=None):
+def verifier_for_kernel(
+    kernel_name,
+    autotune_metrics=None,
+    *,
+    enable_ncu_report=True,
+    enable_sanitizer=True,
+):
     if autotune_metrics is None:
-        return _default_verifier_for_kernel(kernel_name)
+        if enable_ncu_report and enable_sanitizer:
+            return _default_verifier_for_kernel(kernel_name)
+        return TritonPTXCandidateEvaluator(
+            resolve_kernel(kernel_name),
+            enable_ncu_report=enable_ncu_report,
+            enable_sanitizer=enable_sanitizer,
+        )
 
     selected_config = autotune_metrics.get("selected_config")
     if not isinstance(selected_config, dict):
@@ -60,7 +72,12 @@ def verifier_for_kernel(kernel_name, autotune_metrics=None):
     operator_cls = resolve_kernel(kernel_name)
     operator = operator_cls(ptx={"tuning_config": selected_config})
     operator.tuning_result = autotune_metrics.get("tuning_result")
-    return TritonPTXCandidateEvaluator(operator_cls, operator=operator)
+    return TritonPTXCandidateEvaluator(
+        operator_cls,
+        operator=operator,
+        enable_ncu_report=enable_ncu_report,
+        enable_sanitizer=enable_sanitizer,
+    )
 
 
 def _get_field(value, field_name):
@@ -278,8 +295,15 @@ def request_anthropic_json(
     current_candidate=None,
     autotune_metrics=None,
     system_instruction=None,
+    enable_ncu_report=True,
+    enable_sanitizer=True,
 ):
-    verifier = verifier_for_kernel(kernel_name, autotune_metrics)
+    verifier = verifier_for_kernel(
+        kernel_name,
+        autotune_metrics,
+        enable_ncu_report=enable_ncu_report,
+        enable_sanitizer=enable_sanitizer,
+    )
     run_autotune_metrics = (
         autotune_metrics
         if autotune_metrics is not None
@@ -456,10 +480,18 @@ def request_openai_json(
     current_candidate=None,
     autotune_metrics=None,
     system_instruction=None,
+    enable_ncu_report=True,
+    enable_sanitizer=True,
+    enable_web_search=True,
 ):
     from openai import NotFoundError
 
-    verifier = verifier_for_kernel(kernel_name, autotune_metrics)
+    verifier = verifier_for_kernel(
+        kernel_name,
+        autotune_metrics,
+        enable_ncu_report=enable_ncu_report,
+        enable_sanitizer=enable_sanitizer,
+    )
     run_autotune_metrics = (
         autotune_metrics
         if autotune_metrics is not None
@@ -469,7 +501,7 @@ def request_openai_json(
         PtxPatchWorkspace(current_candidate) if current_candidate is not None else None
     )
     available_tools = _tools_for_request(tools, current_candidate)
-    if _is_float16_kernel(kernel_name):
+    if enable_web_search and _is_float16_kernel(kernel_name):
         available_tools = [*available_tools, FLOAT16_GEMM_WEB_SEARCH_TOOL]
     kwargs = {
         "model": model,

@@ -453,6 +453,11 @@ def run_agent_loop(
     start_num_threads_z=1,
     start_triton_generated_ptx=False,
     initial_prompt_ptx=None,
+    disable_ncu_skill=False,
+    disable_ncu_report=False,
+    disable_sanitizer=False,
+    disable_ptx_skill=False,
+    disable_websearch=False,
 ):
     print("=== Start of the agent loop ===")
 
@@ -503,7 +508,12 @@ def run_agent_loop(
     else:
         loaded_autotune_metrics = None
 
-    evaluator = verifier_for_kernel(kernel_name, loaded_autotune_metrics)
+    evaluator = verifier_for_kernel(
+        kernel_name,
+        loaded_autotune_metrics,
+        enable_ncu_report=not disable_ncu_report,
+        enable_sanitizer=not disable_sanitizer,
+    )
     run_autotune_metrics = (
         loaded_autotune_metrics
         if loaded_autotune_metrics is not None
@@ -519,8 +529,17 @@ def run_agent_loop(
     provider_session = create_provider_session(
         provider,
         autotune_metrics=loaded_autotune_metrics,
+        enable_ncu_skill=not disable_ncu_skill,
+        enable_ptx_skill=not disable_ptx_skill,
+        enable_ncu_report=not disable_ncu_report,
+        enable_sanitizer=not disable_sanitizer,
+        enable_web_search=not disable_websearch,
     )
-    prompt_sections = build_prompt_sections(kernel_name, evaluator.operator)
+    prompt_sections = build_prompt_sections(
+        kernel_name,
+        evaluator.operator,
+        enable_web_search=not disable_websearch,
+    )
     initial_prompt = render_prompt_sections(
         prompt_sections,
         INITIAL_PROMPT_SECTION_NAMES,
@@ -603,9 +622,16 @@ def run_agent_loop(
         if not best_evaluation.passed:
             raise RuntimeError("Initial candidate must compile and pass verification.")
 
-        _require_ncu_report(best_evaluation)
+        if not disable_ncu_report:
+            _require_ncu_report(best_evaluation)
 
-        for round_index in range(1, max_tool_rounds + 1):
+        if disable_ncu_report and max_tool_rounds:
+            print(
+                "=== Skipping improvement rounds because NCU reporting is disabled ===",
+                flush=True,
+            )
+
+        for round_index in range(1, 1 if disable_ncu_report else max_tool_rounds + 1):
             _require_ncu_report(best_evaluation)
             print(
                 f"=== TTS round {round_index}/{max_tool_rounds}: planning one to "
@@ -751,6 +777,31 @@ def parse_args():
     )
     parser.add_argument("--max-tool-rounds", type=int, default=3)
     parser.add_argument(
+        "--disable-ncu-skill",
+        action="store_true",
+        help="Do not upload the Nsight Compute diagnosis skill to the provider.",
+    )
+    parser.add_argument(
+        "--disable-ncu-report",
+        action="store_true",
+        help="Do not run Nsight Compute profiling; improvement rounds are skipped.",
+    )
+    parser.add_argument(
+        "--disable-sanitizer",
+        action="store_true",
+        help="Do not run compute-sanitizer before correctness verification.",
+    )
+    parser.add_argument(
+        "--disable-ptx-skill",
+        action="store_true",
+        help="Do not upload the PTX ISA reference skill to the provider.",
+    )
+    parser.add_argument(
+        "--disable-websearch",
+        action="store_true",
+        help="Do not enable web search for FP16 kernel requests.",
+    )
+    parser.add_argument(
         "--max-repair-attempts",
         type=int,
         default=2,
@@ -813,6 +864,11 @@ def main():
             start_ptx=args.start_ptx,
             start_triton_generated_ptx=args.start_triton_generated_ptx,
             initial_prompt_ptx=args.initial_prompt_ptx,
+            disable_ncu_skill=args.disable_ncu_skill,
+            disable_ncu_report=args.disable_ncu_report,
+            disable_sanitizer=args.disable_sanitizer,
+            disable_ptx_skill=args.disable_ptx_skill,
+            disable_websearch=args.disable_websearch,
         )
     )
 

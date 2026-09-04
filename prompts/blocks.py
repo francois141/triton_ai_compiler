@@ -248,8 +248,15 @@ FLOAT16_GEMM_RESEARCH_SOURCES = (
 )
 
 
-def float16_gemm_research_rules():
+def float16_gemm_research_rules(*, enable_web_search=True):
     sources = "\n".join(f"- {source}" for source in FLOAT16_GEMM_RESEARCH_SOURCES)
+    research_instruction = (
+        "Use the available web search tool before designing or improving a candidate "
+        "to review the following sources:"
+        if enable_web_search
+        else "Web search is unavailable. Use the following sources only as optional "
+        "background references:"
+    )
     return f"""
 ## FP16 GEMM Research and Tensor Core Requirements
 
@@ -258,8 +265,7 @@ consistent with the operator's supplied shapes, indexing, and memory layout.
 It does not change the computation, imply a 4096 x 4096 problem, or permit
 treating a non-contiguous operand as a contiguous matrix.
 
-Use the available web search tool before designing or improving a candidate to
-review the following sources:
+{research_instruction}
 {sources}
 
 For a true FP16 GEMM, use Tensor Cores when they are valid for the supplied

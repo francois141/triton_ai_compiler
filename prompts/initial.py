@@ -82,6 +82,7 @@ def build_prompt_sections(
     include_float16_gemm_research=False,
     include_flash_attention=False,
     include_convolution_memory_layout=False,
+    enable_web_search=True,
 ):
     return {
         "initial_task": initial_task().strip(),
@@ -103,7 +104,9 @@ def build_prompt_sections(
             flash_attention_float16_rules() if include_flash_attention else ""
         ),
         "float16_gemm_research": (
-            float16_gemm_research_rules() if include_float16_gemm_research else ""
+            float16_gemm_research_rules(enable_web_search=enable_web_search)
+            if include_float16_gemm_research
+            else ""
         ),
         "convolution_memory_layout": (
             convolution_2d_float16_rules() if include_convolution_memory_layout else ""
@@ -123,6 +126,7 @@ def prompt_builder(
     include_float16_gemm_research=False,
     include_flash_attention=False,
     include_convolution_memory_layout=False,
+    enable_web_search=True,
 ):
     prompt_sections = build_prompt_sections(
         spec,
@@ -133,6 +137,7 @@ def prompt_builder(
         include_float16_gemm_research=include_float16_gemm_research,
         include_flash_attention=include_flash_attention,
         include_convolution_memory_layout=include_convolution_memory_layout,
+        enable_web_search=enable_web_search,
     )
     return render_prompt_sections(prompt_sections, INITIAL_PROMPT_SECTION_NAMES)
 
@@ -165,6 +170,7 @@ def build_prompt_sections_for_operator(
     target,
     address_size,
     ptx_signature=None,
+    enable_web_search=True,
 ):
     spec = extract_specification_from_operator(operator)
     return build_prompt_sections(
@@ -176,4 +182,5 @@ def build_prompt_sections_for_operator(
         include_float16_gemm_research=_is_float16_operator(operator),
         include_flash_attention=_is_flash_attention_float16_operator(operator),
         include_convolution_memory_layout=_is_convolution_2d_float16_operator(operator),
+        enable_web_search=enable_web_search,
     )

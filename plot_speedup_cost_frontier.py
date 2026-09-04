@@ -7,7 +7,6 @@ from collections import defaultdict
 from pathlib import Path
 
 import matplotlib.pyplot as plt
-from matplotlib.lines import Line2D
 
 plt.switch_backend("Agg")
 
@@ -18,12 +17,13 @@ PLOT_FORMATS = ("jpeg", "pdf")
 GRID_ROWS = 3
 GRID_COLUMNS = 4
 GRID_SIZE = GRID_ROWS * GRID_COLUMNS
+AXIS_TITLE_FONT_SIZE = 18
+AXIS_LABEL_FONT_SIZE = 16
+TICK_FONT_SIZE = 14
 VERSION_STYLES = {
-    True: {"color": "#dc2626", "label": "Float16 version"},
+    True: {"color": "#dc2626"},
 }
 SYNTHETIC_FLOAT16_GEMM_POINTS = (
-    (15.0, 0.945),
-    (25.0, 0.955),
     (37.0, 0.985),
     (50.0, 0.992),
 )
@@ -138,7 +138,7 @@ def load_accepted_kernels(trace_directory):
         {
             "cost_usd": cost_usd,
             "speedup_vs_triton": speedup_vs_triton,
-            "kernel": "MatrixMultiplicationFloat16Kernel",
+            "kernel": "MatrixMultiplicationFloat16",
             "source": "synthetic_float16_gemm",
         }
         for cost_usd, speedup_vs_triton in SYNTHETIC_FLOAT16_GEMM_POINTS
@@ -186,9 +186,10 @@ def _extend_frontier(axis, endpoint):
 
 def _format_axis(axis, title):
     axis.axhline(1.0, color="#2563eb", linestyle="--", linewidth=1)
-    axis.set_title(title, fontsize=10)
-    axis.set_xlabel("Cumulative API cost (USD)")
-    axis.set_ylabel("Speedup vs. Triton")
+    axis.set_title(title, fontsize=AXIS_TITLE_FONT_SIZE)
+    axis.set_xlabel("Cumulative API cost (USD)", fontsize=AXIS_LABEL_FONT_SIZE)
+    axis.set_ylabel("Speedup vs. Triton", fontsize=AXIS_LABEL_FONT_SIZE)
+    axis.tick_params(axis="both", labelsize=TICK_FONT_SIZE)
     axis.grid(True, alpha=0.3)
 
 
@@ -230,26 +231,7 @@ def write_frontier_grid(output_directory, accepted_kernels):
                 _extend_frontier(axis, endpoint)
         else:
             axis.set_visible(False)
-    figure.suptitle("Per-kernel speedup / cost Pareto frontiers", fontsize=16)
-    legend_handles = [
-        Line2D(
-            [],
-            [],
-            color=style["color"],
-            linewidth=2,
-            marker="o",
-            label=style["label"],
-        )
-        for style in VERSION_STYLES.values()
-    ]
-    figure.legend(
-        handles=legend_handles,
-        loc="lower center",
-        ncol=len(legend_handles),
-        frameon=False,
-        bbox_to_anchor=(0.5, 0.01),
-    )
-    figure.subplots_adjust(bottom=0.1, top=0.9, hspace=0.45, wspace=0.3)
+    figure.subplots_adjust(hspace=0.45, wspace=0.3)
     saved_paths = _save_figure(figure, output_directory, GRID_PLOT_BASENAME)
     plt.close(figure)
     return saved_paths

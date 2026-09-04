@@ -93,7 +93,7 @@ def build_openai_tools(skill_ids=None):
             },
         ]
     )
-    if skill_ids is not None:
+    if skill_ids:
         if isinstance(skill_ids, str):
             skill_ids = [skill_ids]
         tools.append(
@@ -127,7 +127,7 @@ def build_anthropic_tools():
     ]
 
 
-def build_prompt_sections(kernel_name, kernel=None):
+def build_prompt_sections(kernel_name, kernel=None, *, enable_web_search=True):
     kernel = resolve_kernel(kernel_name)() if kernel is None else kernel
     version, target, address_size = get_ptx_system_config()
     signature = parse_ptx_signature(dump_kernel_ptx(kernel))
@@ -137,6 +137,7 @@ def build_prompt_sections(kernel_name, kernel=None):
         target=target,
         address_size=address_size,
         ptx_signature=signature,
+        enable_web_search=enable_web_search,
     )
 
 

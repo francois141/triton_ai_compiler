@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 from __future__ import annotations
 
 import argparse
@@ -6,6 +5,7 @@ import json
 from pathlib import Path
 
 from utils.evaluation import normalize_nested_json
+from utils.response import verifier_for_kernel
 
 
 def load_candidate_record(path):
@@ -17,7 +17,7 @@ def load_candidate_record(path):
         raise ValueError(f"Invalid JSON in {path}: {exc}") from exc
 
     if not isinstance(data, dict):
-        raise ValueError(f"Expected a JSON object in {path}")
+        raise TypeError(f"Expected a JSON object in {path}")
 
     print("Json loaded")
 
@@ -51,6 +51,19 @@ def extract_payload(record):
     )
 
 
+def extract_autotune_metrics(record):
+    autotune_metrics = record.get("autotune_metrics")
+    if autotune_metrics is not None:
+        return autotune_metrics
+
+    for payload_key in ("payload", "candidate", "resulting_payload"):
+        payload = record.get(payload_key)
+        if isinstance(payload, dict) and "autotune_metrics" in payload:
+            return payload["autotune_metrics"]
+
+    return None
+
+
 def resolve_kernel_name(record, explicit_kernel):
     evaluation = record.get("evaluation")
     archived_kernel_name = (
@@ -69,14 +82,14 @@ def remeasure_candidate(
     *,
     kernel_name=None,
 ):
-    from triton_ptx.evaluation import Payload, TritonPTXCandidateEvaluator
-    from triton_ptx.kernels import resolve_kernel
+    from triton_ptx.evaluation import Payload
 
     resolved_kernel_name = resolve_kernel_name(record, kernel_name)
-    kernel_cls = resolve_kernel(resolved_kernel_name)
     payload = Payload.from_input(extract_payload(record))
-
-    evaluator = TritonPTXCandidateEvaluator(kernel_cls)
+    evaluator = verifier_for_kernel(
+        resolved_kernel_name,
+        extract_autotune_metrics(record),
+    )
     return evaluator.evaluate(payload)
 
 
