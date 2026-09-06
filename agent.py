@@ -845,7 +845,7 @@ def main():
     model = (
         args.model
         or {
-            "openai": "gpt-5.6-sol",
+            "openai": "gpt-6-astra",
             "anthropic": "claude-opus-4-8",
         }[args.provider]
     )

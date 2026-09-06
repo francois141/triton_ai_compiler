@@ -12,6 +12,12 @@ PriceTable = Mapping[str, Mapping[str, float]]
 _PRICING_PER_1M_TOKENS = {
     # Price estimates in USD per 1M tokens.
     # Keep these aligned with provider pricing pages.
+    "gpt-6-astra": {
+        "input": 10.00,
+        "cached_input": 1.00,
+        "cache_write": 12.50,
+        "output": 50.00,
+    },
     "gpt-5.6-sol": {
         "input": 5.00,
         "cached_input": 0.50,
