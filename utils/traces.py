@@ -4,8 +4,11 @@ import re
 from csv import reader
 from dataclasses import asdict
 from datetime import datetime
+from functools import lru_cache
 from io import StringIO
 from pathlib import Path
+
+import torch
 
 from .cost import read_cost_total
 from .evaluation import json_default, normalize_nested_json
@@ -19,6 +22,13 @@ STALL_COLUMNS = {
 }
 EXCLUDED_STALL_COLUMNS = {"stall_selected"}
 TOP_STALL_LINES = 20
+
+
+@lru_cache(maxsize=1)
+def gpu_type():
+    if not torch.cuda.is_available():
+        return None
+    return torch.cuda.get_device_name(torch.cuda.current_device())
 
 
 def autotune_metrics(operator):
@@ -48,7 +58,9 @@ def write_trace(trace_path, events):
     if trace_path is not None:
         (trace_path / "events_speedup_vs_triton_pending.json").write_text(
             json.dumps(
-                normalize_nested_json(events),
+                normalize_nested_json(
+                    [{**event, "gpu_type": gpu_type()} for event in events]
+                ),
                 indent=2,
                 default=json_default,
             ),
@@ -667,6 +679,7 @@ def record_generated_json(
                 {
                     **generated_value,
                     "autotune_metrics": autotune_metrics,
+                    "gpu_type": gpu_type(),
                     "run_cost_usd_so_far": _run_cost_usd_so_far(trace_path),
                 }
             ),
@@ -704,6 +717,7 @@ def record_generated_candidate(
         "candidate": json.loads(candidate_json),
         "evaluation": json.loads(evaluation.to_json(indent=2)),
         "autotune_metrics": autotune_metrics,
+        "gpu_type": gpu_type(),
         "run_cost_usd_so_far": _run_cost_usd_so_far(trace_path),
     }
     (trace_path / f"{artifact_stem}.json").write_text(

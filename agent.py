@@ -44,6 +44,7 @@ from utils.setup import (
 from utils.traces import (
     autotune_metrics,
     create_trace_directory,
+    gpu_type,
     record_generated_candidate,
     record_generated_json,
     record_prompt,
@@ -742,6 +743,7 @@ def run_agent_loop(
         final_payload["speedup"] = best_evaluation.speedup_vs_triton
         final_payload["p50"] = best_evaluation.p50
         final_payload["autotune_metrics"] = run_autotune_metrics
+        final_payload["gpu_type"] = gpu_type()
         final_payload["run_cost_usd_so_far"] = read_cost_total(
             trace_path / "prices.log"
         )
