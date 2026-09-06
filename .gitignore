@@ -21,3 +21,6 @@ matmul/cublas
 matmul/direct_cutlass_kernel_fp16
 /plots/
 /paper_results/
+/ablation/
+/random/
+/astra/
