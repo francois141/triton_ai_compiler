@@ -1,6 +1,8 @@
 # Activate the environment
 source .venv/bin/activate
 
+python agent.py ReLUFloat16Kernel --reasoning-effort medium --max-tool-rounds 0 --trace-path astra --model gpt-5.6-terra
+
 # tmux new -s dev  
 # tmux attach -t dev  
 # tmux kill-session -t dev

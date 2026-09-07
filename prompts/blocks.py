@@ -164,12 +164,15 @@ def signature_template(
     return f"""
 ## PTX Entry Template
 
-Use this exact entry template and fill the body with your PTX
+Use this exact entry template and fill the body with your PTX.
+Do not allocate or use any static shared memory, use dynamic shared memory instead.
 
 ```ptx
 .version {version}
 .target {target}
 .address_size {address_size}
+
+.extern .shared .align 16 .b8 global_smem[];
 
 .visible .entry {kernel_name}(
 {params_block}
