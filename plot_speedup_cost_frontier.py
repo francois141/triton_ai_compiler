@@ -10,7 +10,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import tiktoken
 
-from extract_ptx import clean_ptx
+from clean_ptx import clean_ptx
 
 plt.switch_backend("Agg")
 

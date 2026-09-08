@@ -16,7 +16,7 @@ export UV_LINK_MODE=copy
 git submodule update --init --recursive
 uv venv .venv
 uv pip install -e triton_ptx
-uv pip install numpy matplotlib
+uv pip install numpy matplotlib tiktoken
 ```
 
 Both providers upload the bundled PTX and NCU-report skills before each run.
