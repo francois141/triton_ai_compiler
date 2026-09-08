@@ -20,13 +20,7 @@ GRID_SIZE = GRID_ROWS * GRID_COLUMNS
 AXIS_TITLE_FONT_SIZE = 18
 AXIS_LABEL_FONT_SIZE = 16
 TICK_FONT_SIZE = 14
-VERSION_STYLES = {
-    True: {"color": "#dc2626"},
-}
-SYNTHETIC_FLOAT16_GEMM_POINTS = (
-    (37.0, 0.985),
-    (50.0, 0.992),
-)
+GPU_COLORS = plt.rcParams["axes.prop_cycle"].by_key()["color"]
 RUN_DIRECTORY_PATTERN = re.compile(r"^\d{12}_")
 
 
@@ -80,22 +74,45 @@ def _kernel_name(data, trace_directory, relative_path):
     return kernel_name or _kernel_name_from_path(trace_directory, relative_path)
 
 
-def _add_prior_run_costs(accepted_kernels, run_costs):
-    points_by_kernel_and_run = defaultdict(lambda: defaultdict(list))
-    for point in accepted_kernels:
-        points_by_kernel_and_run[point["kernel"]][point["run_directory"]].append(point)
+def _gpu_type(data):
+    evaluation = data.get("evaluation")
+    ncu_report = data.get("ncu_report")
+    if ncu_report is None and isinstance(evaluation, dict):
+        ncu_report = evaluation.get("ncu_report")
+    summary = ncu_report.get("summary") if isinstance(ncu_report, dict) else None
+    hardware = summary.get("hardware") if isinstance(summary, dict) else None
+    display_name = hardware.get("display_name") if isinstance(hardware, dict) else None
+    return display_name if isinstance(display_name, str) else None
 
-    for kernel_name, costs_by_run in run_costs.items():
+
+def _add_prior_run_costs(accepted_kernels, run_costs, gpu_types_by_run):
+    points_by_kernel_gpu_and_run = defaultdict(lambda: defaultdict(list))
+    run_costs_by_kernel_and_gpu = defaultdict(dict)
+    for point in accepted_kernels:
+        gpu_type = gpu_types_by_run.get(point["run_directory"], "Unknown GPU")
+        point["gpu_type"] = gpu_type
+        points_by_kernel_gpu_and_run[(point["kernel"], gpu_type)][
+            point["run_directory"]
+        ].append(point)
+
+    for (kernel_name, run_directory), cost in run_costs.items():
+        gpu_type = gpu_types_by_run.get(run_directory, "Unknown GPU")
+        run_costs_by_kernel_and_gpu[(kernel_name, gpu_type)][run_directory] = cost
+
+    for (kernel_name, gpu_type), costs_by_run in run_costs_by_kernel_and_gpu.items():
         prior_cost = 0.0
         for run_directory in sorted(costs_by_run):
-            for point in points_by_kernel_and_run[kernel_name][run_directory]:
+            for point in points_by_kernel_gpu_and_run[(kernel_name, gpu_type)][
+                run_directory
+            ]:
                 point["cost_usd"] += prior_cost
             prior_cost += costs_by_run[run_directory]
 
 
 def load_accepted_kernels(trace_directory):
     accepted_kernels = []
-    run_costs = defaultdict(lambda: defaultdict(float))
+    run_costs = defaultdict(float)
+    gpu_types_by_run = {}
     for json_path in trace_directory.rglob("*.json"):
         relative_path = json_path.relative_to(trace_directory)
         try:
@@ -107,6 +124,11 @@ def load_accepted_kernels(trace_directory):
         if not isinstance(data, dict):
             continue
 
+        run_directory = _run_directory(relative_path)
+        gpu_type = _gpu_type(data)
+        if gpu_type is not None:
+            gpu_types_by_run[run_directory] = gpu_type
+
         cost = _finite_number(data.get("run_cost_usd_so_far"))
         if cost is None or cost < 0:
             continue
@@ -114,9 +136,8 @@ def load_accepted_kernels(trace_directory):
         kernel_name = _kernel_name(data, trace_directory, relative_path)
         if "Float16" not in kernel_name:
             continue
-        run_directory = _run_directory(relative_path)
-        run_costs[kernel_name][run_directory] = max(
-            run_costs[kernel_name][run_directory], cost
+        run_costs[kernel_name, run_directory] = max(
+            run_costs[kernel_name, run_directory], cost
         )
 
         speedup = _accepted_speedup(data, json_path)
@@ -131,18 +152,9 @@ def load_accepted_kernels(trace_directory):
                 "run_directory": run_directory,
             }
         )
-    _add_prior_run_costs(accepted_kernels, run_costs)
+    _add_prior_run_costs(accepted_kernels, run_costs, gpu_types_by_run)
     for point in accepted_kernels:
         point.pop("run_directory")
-    accepted_kernels.extend(
-        {
-            "cost_usd": cost_usd,
-            "speedup_vs_triton": speedup_vs_triton,
-            "kernel": "MatrixMultiplicationFloat16",
-            "source": "synthetic_float16_gemm",
-        }
-        for cost_usd, speedup_vs_triton in SYNTHETIC_FLOAT16_GEMM_POINTS
-    )
     return accepted_kernels
 
 
@@ -159,25 +171,23 @@ def pareto_frontier(points):
     return frontier
 
 
-def _kernel_version(kernel_name):
-    tensor_cores = "Float16" in kernel_name
-    return kernel_name.replace("Float16", ""), tensor_cores
+def _display_kernel_name(kernel_name):
+    return kernel_name.replace("Float16", "")
 
 
-def _plot_frontier(axis, frontier, tensor_cores):
+def _plot_frontier(axis, frontier, color, gpu_type):
     costs = [0.0, *(point["cost_usd"] for point in frontier)]
     speedups = [0.0, *(point["speedup_vs_triton"] for point in frontier)]
-    style = VERSION_STYLES[tensor_cores]
-    axis.plot(costs, speedups, color=style["color"], linewidth=2, marker="o")
-    return costs[-1], speedups[-1], style
+    axis.plot(costs, speedups, color=color, label=gpu_type, linewidth=2, marker="o")
+    return costs[-1], speedups[-1], color
 
 
 def _extend_frontier(axis, endpoint):
-    cost, speedup, style = endpoint
+    cost, speedup, color = endpoint
     axis.plot(
         [cost, axis.get_xlim()[1]],
         [speedup, speedup],
-        color=style["color"],
+        color=color,
         linewidth=2,
         scalex=False,
         scaley=False,
@@ -205,8 +215,8 @@ def _save_figure(figure, output_directory, basename):
 def write_frontier_grid(output_directory, accepted_kernels):
     kernels = defaultdict(lambda: defaultdict(list))
     for point in accepted_kernels:
-        kernel_name, tensor_cores = _kernel_version(str(point["kernel"]))
-        kernels[kernel_name][tensor_cores].append(point)
+        kernel_name = _display_kernel_name(str(point["kernel"]))
+        kernels[kernel_name][point["gpu_type"]].append(point)
     kernel_names = sorted(kernels)
     if len(kernel_names) > GRID_SIZE:
         LOGGER.warning(
@@ -222,13 +232,21 @@ def write_frontier_grid(output_directory, accepted_kernels):
         if index < len(kernel_names) and index < GRID_SIZE:
             kernel_name = kernel_names[index]
             endpoints = []
-            for tensor_cores, points in kernels[kernel_name].items():
+            for color_index, (gpu_type, points) in enumerate(
+                sorted(kernels[kernel_name].items())
+            ):
                 endpoints.append(
-                    _plot_frontier(axis, pareto_frontier(points), tensor_cores)
+                    _plot_frontier(
+                        axis,
+                        pareto_frontier(points),
+                        GPU_COLORS[color_index % len(GPU_COLORS)],
+                        gpu_type,
+                    )
                 )
             _format_axis(axis, kernel_name)
             for endpoint in endpoints:
                 _extend_frontier(axis, endpoint)
+            axis.legend()
         else:
             axis.set_visible(False)
     figure.subplots_adjust(hspace=0.45, wspace=0.3)
@@ -241,9 +259,7 @@ def main():
     parser = argparse.ArgumentParser(
         description="Plot speedup/cost Pareto frontiers from agent trace JSON."
     )
-    parser.add_argument(
-        "trace_directory", type=Path, nargs="?", default="paper_results"
-    )
+    parser.add_argument("trace_directory", type=Path, nargs="?", default="astra")
     parser.add_argument("--output-directory", type=Path, default="plots")
     arguments = parser.parse_args()
     trace_directory = arguments.trace_directory.resolve()
