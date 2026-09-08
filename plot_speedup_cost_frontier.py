@@ -84,6 +84,9 @@ def _kernel_name(data, trace_directory, relative_path):
 
 
 def _gpu_type(data):
+    gpu_type = data.get("gpu_type")
+    if isinstance(gpu_type, str) and gpu_type:
+        return gpu_type
     evaluation = data.get("evaluation")
     ncu_report = data.get("ncu_report")
     if ncu_report is None and isinstance(evaluation, dict):
@@ -237,6 +240,36 @@ def load_gpu_types_by_run(trace_directory):
     return gpu_types_by_run
 
 
+def _llm_ptx_path(run_directory):
+    final_path = run_directory / "final_candidate.ptx"
+    if final_path.is_file():
+        return final_path
+
+    best_path = None
+    best_speedup = -math.inf
+    for ptx_path in sorted(run_directory.rglob("*speedup_vs_triton_*.ptx")):
+        json_path = ptx_path.with_suffix(".json")
+        if ptx_path.parent.name == "tool_output":
+            json_path = ptx_path.with_name(
+                ptx_path.name.rsplit("_speedup_vs_triton_", 1)[0] + ".json"
+            )
+        try:
+            with json_path.open(encoding="utf-8") as json_file:
+                data = json.load(json_file)
+        except (json.JSONDecodeError, OSError) as error:
+            LOGGER.warning("Skipping unreadable JSON %s: %s", json_path, error)
+            continue
+        if not isinstance(data, dict):
+            continue
+        speedup = _accepted_speedup(data, json_path)
+        if speedup is not None and speedup > best_speedup:
+            best_path = ptx_path
+            best_speedup = speedup
+    if best_path is not None:
+        LOGGER.warning("No final LLM PTX; using best verified candidate %s.", best_path)
+    return best_path
+
+
 def load_token_expansion_data(trace_directory):
     token_counts = []
     gpu_types_by_run = load_gpu_types_by_run(trace_directory)
@@ -249,9 +282,9 @@ def load_token_expansion_data(trace_directory):
         triton_source = _triton_kernel_source(kernel_name)
         if triton_source is None:
             continue
-        llm_ptx_path = ptx_path.with_name("final_candidate.ptx")
-        if not llm_ptx_path.is_file():
-            LOGGER.warning("No final LLM PTX was found for %s.", kernel_name)
+        llm_ptx_path = _llm_ptx_path(ptx_path.parent)
+        if llm_ptx_path is None:
+            LOGGER.warning("No verified LLM PTX was found for %s.", kernel_name)
             continue
         triton_generated_ptx = clean_ptx(ptx_path.read_text(encoding="utf-8"))
         llm_generated_ptx = llm_ptx_path.read_text(encoding="utf-8")
