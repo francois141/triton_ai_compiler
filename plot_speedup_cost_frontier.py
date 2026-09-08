@@ -1,4 +1,5 @@
 import argparse
+import ast
 import json
 import logging
 import math
@@ -7,12 +8,16 @@ from collections import defaultdict
 from pathlib import Path
 
 import matplotlib.pyplot as plt
+import tiktoken
+
+from extract_ptx import clean_ptx
 
 plt.switch_backend("Agg")
 
 
 LOGGER = logging.getLogger(__name__)
 GRID_PLOT_BASENAME = "speedup_cost_frontiers_grid"
+TOKEN_EXPANSION_PLOT_BASENAME = "ptx_token_expansion_factors"
 PLOT_FORMATS = ("jpeg", "pdf")
 GRID_ROWS = 3
 GRID_COLUMNS = 4
@@ -22,6 +27,10 @@ AXIS_LABEL_FONT_SIZE = 16
 TICK_FONT_SIZE = 14
 GPU_COLORS = plt.rcParams["axes.prop_cycle"].by_key()["color"]
 RUN_DIRECTORY_PATTERN = re.compile(r"^\d{12}_")
+KERNEL_SOURCE_DIRECTORY = (
+    Path(__file__).resolve().parent / "triton_ptx" / "triton_ptx" / "kernels"
+)
+TOKEN_ENCODING = tiktoken.get_encoding("o200k_base")
 
 
 def _finite_number(value):
@@ -175,6 +184,100 @@ def _display_kernel_name(kernel_name):
     return kernel_name.replace("Float16", "")
 
 
+def _triton_source_path(kernel_name):
+    class_names = [kernel_name]
+    if not kernel_name.endswith("Kernel"):
+        class_names.append(f"{kernel_name}Kernel")
+    class_patterns = [
+        re.compile(rf"^class {re.escape(class_name)}\b", re.MULTILINE)
+        for class_name in class_names
+    ]
+    for source_path in KERNEL_SOURCE_DIRECTORY.rglob("*.py"):
+        source = source_path.read_text(encoding="utf-8")
+        if any(pattern.search(source) for pattern in class_patterns):
+            return source_path
+    return None
+
+
+def _triton_kernel_source(kernel_name):
+    source_path = _triton_source_path(kernel_name)
+    if source_path is None:
+        LOGGER.warning("No Triton source was found for %s.", kernel_name)
+        return None
+
+    source = source_path.read_text(encoding="utf-8")
+    source_tree = ast.parse(source, filename=source_path)
+    class_names = {kernel_name, f"{kernel_name}Kernel"}
+    for node in source_tree.body:
+        if isinstance(node, ast.ClassDef) and node.name in class_names:
+            return ast.get_source_segment(source, node)
+    LOGGER.warning("No Triton kernel class was found in %s.", source_path)
+    return None
+
+
+def _token_count(text):
+    return len(TOKEN_ENCODING.encode(text))
+
+
+def load_gpu_types_by_run(trace_directory):
+    gpu_types_by_run = {}
+    for json_path in trace_directory.rglob("*.json"):
+        relative_path = json_path.relative_to(trace_directory)
+        try:
+            with json_path.open(encoding="utf-8") as json_file:
+                data = json.load(json_file)
+        except (json.JSONDecodeError, OSError) as error:
+            LOGGER.warning("Skipping unreadable JSON %s: %s", json_path, error)
+            continue
+        if not isinstance(data, dict):
+            continue
+        gpu_type = _gpu_type(data)
+        if gpu_type is not None:
+            gpu_types_by_run[_run_directory(relative_path)] = gpu_type
+    return gpu_types_by_run
+
+
+def load_token_expansion_data(trace_directory):
+    token_counts = []
+    gpu_types_by_run = load_gpu_types_by_run(trace_directory)
+    for ptx_path in sorted(trace_directory.rglob("triton_generated.ptx")):
+        relative_path = ptx_path.relative_to(trace_directory)
+        run_directory = _run_directory(relative_path)
+        kernel_name = _kernel_name_from_path(trace_directory, run_directory)
+        if "Float16" not in kernel_name:
+            continue
+        triton_source = _triton_kernel_source(kernel_name)
+        if triton_source is None:
+            continue
+        llm_ptx_path = ptx_path.with_name("final_candidate.ptx")
+        if not llm_ptx_path.is_file():
+            LOGGER.warning("No final LLM PTX was found for %s.", kernel_name)
+            continue
+        triton_generated_ptx = clean_ptx(ptx_path.read_text(encoding="utf-8"))
+        llm_generated_ptx = llm_ptx_path.read_text(encoding="utf-8")
+        triton_tokens = _token_count(triton_source)
+        if triton_tokens == 0:
+            LOGGER.warning("Triton source for %s has no tokens.", kernel_name)
+            continue
+        triton_generated_ptx_tokens = _token_count(triton_generated_ptx)
+        llm_generated_ptx_tokens = _token_count(llm_generated_ptx)
+        token_counts.append(
+            {
+                "kernel": _display_kernel_name(kernel_name),
+                "gpu_type": gpu_types_by_run.get(run_directory, "Unknown GPU"),
+                "triton_generated_ptx_tokens": triton_generated_ptx_tokens,
+                "llm_generated_ptx_tokens": llm_generated_ptx_tokens,
+                "triton_generated_expansion_factor": (
+                    triton_generated_ptx_tokens / triton_tokens
+                ),
+                "llm_generated_expansion_factor": (
+                    llm_generated_ptx_tokens / triton_tokens
+                ),
+            }
+        )
+    return token_counts
+
+
 def _plot_frontier(axis, frontier, color, gpu_type):
     costs = [0.0, *(point["cost_usd"] for point in frontier)]
     speedups = [0.0, *(point["speedup_vs_triton"] for point in frontier)]
@@ -255,6 +358,86 @@ def write_frontier_grid(output_directory, accepted_kernels):
     return saved_paths
 
 
+def write_token_expansion_plot(output_directory, token_expansion_data):
+    kernel_names = sorted({data["kernel"] for data in token_expansion_data})
+    gpu_types = sorted({data["gpu_type"] for data in token_expansion_data})
+    data_by_kernel_and_gpu = {
+        (data["kernel"], data["gpu_type"]): data for data in token_expansion_data
+    }
+    figure, axis = plt.subplots(figsize=(30, 12))
+    kernel_indices = list(range(len(kernel_names)))
+    bar_width = 0.8 / (2 * len(gpu_types))
+    for gpu_index, gpu_type in enumerate(gpu_types):
+        offset = -0.4 + (2 * gpu_index + 0.5) * bar_width
+        triton_values = [
+            data_by_kernel_and_gpu.get((kernel_name, gpu_type), {}).get(
+                "triton_generated_expansion_factor", 0.0
+            )
+            for kernel_name in kernel_names
+        ]
+        llm_values = [
+            data_by_kernel_and_gpu.get((kernel_name, gpu_type), {}).get(
+                "llm_generated_expansion_factor", 0.0
+            )
+            for kernel_name in kernel_names
+        ]
+        triton_bars = axis.bar(
+            [index + offset for index in kernel_indices],
+            triton_values,
+            bar_width,
+            color=GPU_COLORS[gpu_index % len(GPU_COLORS)],
+            label=f"{gpu_type}: Triton-generated PTX",
+        )
+        llm_bars = axis.bar(
+            [index + offset + bar_width for index in kernel_indices],
+            llm_values,
+            bar_width,
+            color=GPU_COLORS[gpu_index % len(GPU_COLORS)],
+            hatch="//",
+            label=f"{gpu_type}: LLM-generated PTX",
+        )
+        triton_labels = [
+            f"{factor:.1f}x\n{data_by_kernel_and_gpu[(kernel_name, gpu_type)]['triton_generated_ptx_tokens']:,} tokens"
+            if factor
+            else ""
+            for kernel_name, factor in zip(kernel_names, triton_values, strict=True)
+        ]
+        llm_labels = [
+            f"{factor:.1f}x\n{data_by_kernel_and_gpu[(kernel_name, gpu_type)]['llm_generated_ptx_tokens']:,} tokens"
+            if factor
+            else ""
+            for kernel_name, factor in zip(kernel_names, llm_values, strict=True)
+        ]
+        axis.bar_label(
+            triton_bars,
+            labels=triton_labels,
+            padding=4,
+            fontsize=11,
+            rotation=90,
+        )
+        axis.bar_label(
+            llm_bars,
+            labels=llm_labels,
+            padding=4,
+            fontsize=11,
+            rotation=90,
+        )
+    axis.set_xticks(kernel_indices, kernel_names)
+    axis.set_ylabel("Token expansion factor vs. Triton source", fontsize=24)
+    axis.tick_params(axis="x", labelrotation=30, labelsize=17)
+    axis.tick_params(axis="y", labelsize=18)
+    axis.grid(axis="y", alpha=0.3)
+    axis.legend(fontsize=16, ncols=2)
+    figure.subplots_adjust(bottom=0.25)
+    saved_paths = _save_figure(
+        figure,
+        output_directory,
+        TOKEN_EXPANSION_PLOT_BASENAME,
+    )
+    plt.close(figure)
+    return saved_paths
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Plot speedup/cost Pareto frontiers from agent trace JSON."
@@ -273,7 +456,14 @@ def main():
     output_directory = arguments.output_directory.resolve()
     output_directory.mkdir(parents=True, exist_ok=True)
     grid_paths = write_frontier_grid(output_directory, accepted_kernels)
-    for output_path in grid_paths:
+    token_expansion_data = load_token_expansion_data(trace_directory)
+    if not token_expansion_data:
+        raise RuntimeError("No Triton-generated PTX files were found.")
+    token_expansion_paths = write_token_expansion_plot(
+        output_directory,
+        token_expansion_data,
+    )
+    for output_path in [*grid_paths, *token_expansion_paths]:
         print(f"Saved plot to {output_path}")
 
 
