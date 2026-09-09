@@ -29,7 +29,7 @@ running the agent.
 ## Test installation
 
 ```bash
-python smoke_run.py
+.venv/bin/python run_kernel.py SoftmaxFloat16Kernel
 python -m pytest triton_ptx/triton_ptx/kernels/test_triton_kernels.py
 ```
 
