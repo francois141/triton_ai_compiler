@@ -26,6 +26,10 @@ AXIS_TITLE_FONT_SIZE = 18
 AXIS_LABEL_FONT_SIZE = 16
 TICK_FONT_SIZE = 14
 GPU_COLORS = plt.rcParams["axes.prop_cycle"].by_key()["color"]
+FLOAT_PRECISION_LABELS = {
+    "Float16": "Floating Point 16",
+    "Float8": "Floating Point 8",
+}
 RUN_DIRECTORY_PATTERN = re.compile(r"^\d{12}_")
 KERNEL_SOURCE_DIRECTORY = (
     Path(__file__).resolve().parent / "triton_ptx" / "triton_ptx" / "kernels"
@@ -50,6 +54,13 @@ def _accepted_speedup(data, json_path):
 
     if json_path.name.startswith("final_speedup_vs_triton_"):
         return _finite_number(data.get("speedup"))
+    return None
+
+
+def _floating_point_precision(kernel_name):
+    for precision, label in FLOAT_PRECISION_LABELS.items():
+        if precision in kernel_name:
+            return label
     return None
 
 
@@ -146,7 +157,8 @@ def load_accepted_kernels(trace_directory):
             continue
 
         kernel_name = _kernel_name(data, trace_directory, relative_path)
-        if "Float16" not in kernel_name:
+        precision = _floating_point_precision(kernel_name)
+        if precision is None:
             continue
         run_costs[kernel_name, run_directory] = max(
             run_costs[kernel_name, run_directory], cost
@@ -160,6 +172,7 @@ def load_accepted_kernels(trace_directory):
                 "cost_usd": cost,
                 "speedup_vs_triton": speedup,
                 "kernel": kernel_name,
+                "precision": precision,
                 "source": str(relative_path),
                 "run_directory": run_directory,
             }
@@ -184,7 +197,9 @@ def pareto_frontier(points):
 
 
 def _display_kernel_name(kernel_name):
-    return kernel_name.replace("Float16", "")
+    for precision in FLOAT_PRECISION_LABELS:
+        kernel_name = kernel_name.replace(precision, "")
+    return kernel_name
 
 
 def _triton_source_path(kernel_name):
@@ -352,7 +367,8 @@ def write_frontier_grid(output_directory, accepted_kernels):
     kernels = defaultdict(lambda: defaultdict(list))
     for point in accepted_kernels:
         kernel_name = _display_kernel_name(str(point["kernel"]))
-        kernels[kernel_name][point["gpu_type"]].append(point)
+        series = (point["gpu_type"], point["precision"])
+        kernels[kernel_name][series].append(point)
     kernel_names = sorted(kernels)
     if len(kernel_names) > GRID_SIZE:
         LOGGER.warning(
@@ -368,7 +384,7 @@ def write_frontier_grid(output_directory, accepted_kernels):
         if index < len(kernel_names) and index < GRID_SIZE:
             kernel_name = kernel_names[index]
             endpoints = []
-            for color_index, (gpu_type, points) in enumerate(
+            for color_index, ((gpu_type, precision), points) in enumerate(
                 sorted(kernels[kernel_name].items())
             ):
                 endpoints.append(
@@ -376,7 +392,7 @@ def write_frontier_grid(output_directory, accepted_kernels):
                         axis,
                         pareto_frontier(points),
                         GPU_COLORS[color_index % len(GPU_COLORS)],
-                        gpu_type,
+                        f"{gpu_type}: {precision}",
                     )
                 )
             _format_axis(axis, kernel_name)
