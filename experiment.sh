@@ -1,7 +1,12 @@
 # Activate the environment
 source .venv/bin/activate
 
-python agent.py ReLUFloat16Kernel --reasoning-effort medium --max-tool-rounds 0 --trace-path astra --model gpt-6-astra
+python agent.py MatrixMultiplicationFloat16 --reasoning-effort max --max-tool-rounds 0 --trace-path astra --model gpt-5.6-sol --max-budget 10.00
+python agent.py MatrixMultiplicationFloat16 --reasoning-effort max --max-tool-rounds 0 --trace-path astra --model gpt-5.6-terra --max-budget 10.00
+python agent.py MatrixMultiplicationFloat16 --reasoning-effort max --max-tool-rounds 0 --trace-path astra --model gpt-5.6-luna --max-budget 10.00
+python agent.py MatrixMultiplicationFloat16 --reasoning-effort max --max-tool-rounds 0 --trace-path astra --model gpt-5.5 --max-budget 10.00
+python agent.py MatrixMultiplicationFloat16 --reasoning-effort max --max-tool-rounds 0 --trace-path astra --model gpt-5.4 --max-budget 10.00
+
 
 exit 0
 

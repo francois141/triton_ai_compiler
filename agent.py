@@ -4,6 +4,7 @@ import argparse
 import atexit
 import json
 import re
+from math import isfinite
 from pathlib import Path
 from time import perf_counter
 
@@ -164,6 +165,22 @@ def _require_ncu_report(evaluation):
     )
 
 
+def _budget_exhausted(trace_path, max_budget_usd):
+    return (
+        max_budget_usd is not None
+        and read_cost_total(trace_path / "prices.log") >= max_budget_usd
+    )
+
+
+def _print_budget_exhausted(trace_path, max_budget_usd):
+    spent = read_cost_total(trace_path / "prices.log")
+    print(
+        f"=== Maximum budget reached (${spent:.6f} spent; "
+        f"${max_budget_usd:.6f} configured); stopping new LLM requests ===",
+        flush=True,
+    )
+
+
 def _generate_tested_candidate(
     provider_session,
     evaluator,
@@ -179,6 +196,7 @@ def _generate_tested_candidate(
     candidate_index,
     reasoning_effort,
     max_repair_attempts,
+    max_budget_usd=None,
 ):
     candidate_prompt = build_candidate_prompt(
         prompt_sections,
@@ -229,6 +247,9 @@ def _generate_tested_candidate(
     for repair_index in range(1, max_repair_attempts + 1):
         if not _should_repair_candidate(best_attempt):
             break
+        if _budget_exhausted(trace_path, max_budget_usd):
+            _print_budget_exhausted(trace_path, max_budget_usd)
+            break
 
         print(
             f"=== TTS round {round_index}: repairing candidate "
@@ -268,6 +289,9 @@ def _generate_tested_candidate(
         failure_analysis = FailureAnalysis.model_validate_json(
             response_json_text(analysis_response)
         ).model_dump()
+        if _budget_exhausted(trace_path, max_budget_usd):
+            _print_budget_exhausted(trace_path, max_budget_usd)
+            break
         repair_prompt = build_repair_prompt(
             prompt_sections,
             best_evaluation,
@@ -340,10 +364,14 @@ def _repair_initial_candidate(
     initial_evaluation,
     reasoning_effort,
     max_repair_attempts,
+    max_budget_usd=None,
 ):
     best_attempt = initial_evaluation
     for repair_index in range(1, max_repair_attempts + 1):
         if not _should_repair_candidate(best_attempt):
+            break
+        if _budget_exhausted(trace_path, max_budget_usd):
+            _print_budget_exhausted(trace_path, max_budget_usd)
             break
 
         print(
@@ -381,6 +409,9 @@ def _repair_initial_candidate(
         failure_analysis = FailureAnalysis.model_validate_json(
             response_json_text(analysis_response)
         ).model_dump()
+        if _budget_exhausted(trace_path, max_budget_usd):
+            _print_budget_exhausted(trace_path, max_budget_usd)
+            break
         repair_prompt = build_initial_repair_prompt(
             prompt_sections,
             best_attempt,
@@ -445,6 +476,7 @@ def run_agent_loop(
     provider="openai",
     max_tool_rounds,
     max_repair_attempts,
+    max_budget_usd=None,
     reasoning_effort,
     trace_path,
     start_json=None,
@@ -464,6 +496,10 @@ def run_agent_loop(
 
     if max_repair_attempts < 0:
         raise ValueError("max_repair_attempts must be non-negative.")
+    if max_budget_usd is not None and (
+        not isfinite(max_budget_usd) or max_budget_usd < 0
+    ):
+        raise ValueError("max_budget_usd must be a finite, non-negative number.")
     if (
         sum(
             value is not None and value is not False
@@ -570,6 +606,12 @@ def run_agent_loop(
 
     try:
         if starting_candidate is None:
+            if _budget_exhausted(trace_path, max_budget_usd):
+                raise RuntimeError(
+                    "The maximum budget was reached before an initial candidate "
+                    "could be generated. Provide a positive budget or a starting "
+                    "candidate."
+                )
             print(
                 "=== Generating initial candidate ===",
                 flush=True,
@@ -619,6 +661,7 @@ def run_agent_loop(
             initial_evaluation=best_evaluation,
             reasoning_effort=reasoning_effort,
             max_repair_attempts=max_repair_attempts,
+            max_budget_usd=max_budget_usd,
         )
         if not best_evaluation.passed:
             raise RuntimeError("Initial candidate must compile and pass verification.")
@@ -633,6 +676,9 @@ def run_agent_loop(
             )
 
         for round_index in range(1, 1 if disable_ncu_report else max_tool_rounds + 1):
+            if _budget_exhausted(trace_path, max_budget_usd):
+                _print_budget_exhausted(trace_path, max_budget_usd)
+                break
             _require_ncu_report(best_evaluation)
             print(
                 f"=== TTS round {round_index}/{max_tool_rounds}: planning one to "
@@ -686,6 +732,9 @@ def run_agent_loop(
 
             total_ideas = len(ideas)
             for candidate_index, idea in enumerate(ideas, start=1):
+                if _budget_exhausted(trace_path, max_budget_usd):
+                    _print_budget_exhausted(trace_path, max_budget_usd)
+                    break
                 print(
                     f"=== TTS round {round_index}: generating candidate "
                     f"{candidate_index}/{total_ideas} for {idea['name']!r} ===",
@@ -705,6 +754,7 @@ def run_agent_loop(
                     candidate_index=candidate_index,
                     reasoning_effort=reasoning_effort,
                     max_repair_attempts=max_repair_attempts,
+                    max_budget_usd=max_budget_usd,
                 )
                 if (
                     evaluated_candidate.passed
@@ -747,6 +797,8 @@ def run_agent_loop(
         final_payload["run_cost_usd_so_far"] = read_cost_total(
             trace_path / "prices.log"
         )
+        if max_budget_usd is not None:
+            final_payload["max_budget_usd"] = max_budget_usd
         final_json = json.dumps(
             normalize_nested_json(final_payload),
             indent=2,
@@ -778,6 +830,16 @@ def parse_args():
         help="LLM API provider to use.",
     )
     parser.add_argument("--max-tool-rounds", type=int, default=3)
+    parser.add_argument(
+        "--max-budget",
+        "--max-budget-usd",
+        dest="max_budget_usd",
+        type=float,
+        help=(
+            "Maximum run cost in USD. The loop stops starting new LLM requests "
+            "after recorded cost reaches this amount."
+        ),
+    )
     parser.add_argument(
         "--disable-ncu-skill",
         action="store_true",
@@ -858,6 +920,7 @@ def main():
             provider=args.provider,
             max_tool_rounds=args.max_tool_rounds,
             max_repair_attempts=args.max_repair_attempts,
+            max_budget_usd=args.max_budget_usd,
             reasoning_effort=(
                 None if args.reasoning_effort == "none" else args.reasoning_effort
             ),
