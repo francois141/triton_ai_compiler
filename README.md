@@ -155,6 +155,17 @@ python -m remeasure_candidate PATH --kernel KernelClassName \
   --output output.json
 ```
 
+Remeasure every archived Triton baseline and write the correction factors used
+by the speedup plot:
+
+```bash
+.venv/bin/python remeasure_baseline.py
+```
+
+The command writes `correction factor.txt` to each immediate run directory in
+`astra`. Each factor is the fresh Triton p50 divided by that run's archived
+Triton p50, so the plot adjusts its saved speedups to the fresh baseline.
+
 ## Validation
 
 ```bash
