@@ -18,6 +18,8 @@ plt.switch_backend("Agg")
 LOGGER = logging.getLogger(__name__)
 GRID_PLOT_BASENAME = "speedup_cost_frontiers_grid"
 TOKEN_EXPANSION_PLOT_BASENAME = "ptx_token_expansion_factors"
+GEMM_LLM_FRONTIER_PLOT_BASENAME = "gemm_llm_cost_frontiers"
+CORRECTION_FACTOR_FILENAME = "correction factor.txt"
 PLOT_FORMATS = ("jpeg", "pdf")
 GRID_ROWS = 3
 GRID_COLUMNS = 4
@@ -31,6 +33,9 @@ FLOAT_PRECISION_LABELS = {
     "Float8": "Floating Point 8",
 }
 RUN_DIRECTORY_PATTERN = re.compile(r"^\d{12}_")
+REASONING_EFFORT_PATTERN = re.compile(
+    r"_(?:low|medium|high|max|xhigh|ultra|none)$", re.IGNORECASE
+)
 KERNEL_SOURCE_DIRECTORY = (
     Path(__file__).resolve().parent / "triton_ptx" / "triton_ptx" / "kernels"
 )
@@ -81,6 +86,40 @@ def _run_directory(relative_path):
         if RUN_DIRECTORY_PATTERN.match(path_part):
             return Path(*relative_path.parts[: index + 1])
     return Path(relative_path.parts[0])
+
+
+def _model_from_run_directory(run_directory):
+    name_parts = run_directory.name.split("_", maxsplit=2)
+    if len(name_parts) != 3:
+        return "Unknown model"
+    return REASONING_EFFORT_PATTERN.sub("", name_parts[2])
+
+
+def _provider_group(provider, model):
+    provider = provider.lower() if isinstance(provider, str) else ""
+    model = model.lower()
+    if provider == "openai" or model.startswith(("gpt-", "o1", "o3", "o4")):
+        return "OpenAI LLMs"
+    if provider == "anthropic" or model.startswith("claude-"):
+        return "Anthropic LLMs"
+    return "Other LLMs"
+
+
+def _is_gemm_kernel(kernel_name):
+    normalized_name = kernel_name.lower()
+    return "gemm" in normalized_name or "matrixmultiplication" in normalized_name
+
+
+def _correction_factor(run_directory):
+    correction_path = run_directory / CORRECTION_FACTOR_FILENAME
+    try:
+        correction_factor = float(correction_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return 1.0
+    if math.isfinite(correction_factor) and correction_factor > 0:
+        return correction_factor
+    LOGGER.warning("Ignoring invalid correction factor in %s", correction_path)
+    return 1.0
 
 
 def _kernel_name(data, trace_directory, relative_path):
@@ -136,6 +175,7 @@ def load_accepted_kernels(trace_directory):
     accepted_kernels = []
     run_costs = defaultdict(float)
     gpu_types_by_run = {}
+    providers_by_run = {}
     for json_path in trace_directory.rglob("*.json"):
         relative_path = json_path.relative_to(trace_directory)
         try:
@@ -151,6 +191,9 @@ def load_accepted_kernels(trace_directory):
         gpu_type = _gpu_type(data)
         if gpu_type is not None:
             gpu_types_by_run[run_directory] = gpu_type
+        provider = data.get("provider")
+        if isinstance(provider, str) and provider:
+            providers_by_run[run_directory] = provider
 
         cost = _finite_number(data.get("run_cost_usd_so_far"))
         if cost is None or cost < 0:
@@ -170,15 +213,19 @@ def load_accepted_kernels(trace_directory):
         accepted_kernels.append(
             {
                 "cost_usd": cost,
-                "speedup_vs_triton": speedup,
+                "speedup_vs_triton": speedup * _correction_factor(run_directory),
                 "kernel": kernel_name,
                 "precision": precision,
                 "source": str(relative_path),
                 "run_directory": run_directory,
+                "model": _model_from_run_directory(run_directory),
             }
         )
     _add_prior_run_costs(accepted_kernels, run_costs, gpu_types_by_run)
     for point in accepted_kernels:
+        point["provider"] = _provider_group(
+            providers_by_run.get(point["run_directory"]), point["model"]
+        )
         point.pop("run_directory")
     return accepted_kernels
 
@@ -407,6 +454,50 @@ def write_frontier_grid(output_directory, accepted_kernels):
     return saved_paths
 
 
+def write_gemm_llm_frontier(output_directory, accepted_kernels):
+    points_by_provider_and_model = defaultdict(lambda: defaultdict(list))
+    for point in accepted_kernels:
+        if point["precision"] == "Floating Point 16" and _is_gemm_kernel(
+            str(point["kernel"])
+        ):
+            points_by_provider_and_model[point["provider"]][point["model"]].append(
+                point
+            )
+
+    provider_groups = ("OpenAI LLMs", "Anthropic LLMs", "Other LLMs")
+    figure, axes = plt.subplots(1, 3, figsize=(21, 6), sharey=True)
+    for axis, provider_group in zip(axes, provider_groups, strict=True):
+        models = points_by_provider_and_model[provider_group]
+        for color_index, (model, points) in enumerate(sorted(models.items())):
+            _plot_frontier(
+                axis,
+                pareto_frontier(points),
+                GPU_COLORS[color_index % len(GPU_COLORS)],
+                model,
+            )
+        _format_axis(axis, provider_group)
+        if models:
+            axis.legend(fontsize=12)
+        else:
+            axis.text(
+                0.5,
+                0.5,
+                "No accepted GEMM results",
+                ha="center",
+                va="center",
+                transform=axis.transAxes,
+                fontsize=13,
+            )
+    figure.subplots_adjust(wspace=0.2)
+    saved_paths = _save_figure(
+        figure,
+        output_directory,
+        GEMM_LLM_FRONTIER_PLOT_BASENAME,
+    )
+    plt.close(figure)
+    return saved_paths
+
+
 def write_token_expansion_plot(output_directory, token_expansion_data):
     kernel_names = sorted({data["kernel"] for data in token_expansion_data})
     gpu_types = sorted({data["gpu_type"] for data in token_expansion_data})
@@ -505,6 +596,10 @@ def main():
     output_directory = arguments.output_directory.resolve()
     output_directory.mkdir(parents=True, exist_ok=True)
     grid_paths = write_frontier_grid(output_directory, accepted_kernels)
+    gemm_llm_frontier_paths = write_gemm_llm_frontier(
+        output_directory,
+        accepted_kernels,
+    )
     token_expansion_data = load_token_expansion_data(trace_directory)
     if not token_expansion_data:
         raise RuntimeError("No Triton-generated PTX files were found.")
@@ -512,7 +607,11 @@ def main():
         output_directory,
         token_expansion_data,
     )
-    for output_path in [*grid_paths, *token_expansion_paths]:
+    for output_path in [
+        *grid_paths,
+        *gemm_llm_frontier_paths,
+        *token_expansion_paths,
+    ]:
         print(f"Saved plot to {output_path}")
 
 
