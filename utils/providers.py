@@ -21,14 +21,12 @@ class ProviderSession:
         *,
         enable_ncu_report=True,
         enable_sanitizer=True,
-        enable_web_search=True,
     ):
         self.client = client
         self.tools = tools
         self.autotune_metrics = autotune_metrics
         self.enable_ncu_report = enable_ncu_report
         self.enable_sanitizer = enable_sanitizer
-        self.enable_web_search = enable_web_search
 
     def request_json(
         self,
@@ -75,7 +73,6 @@ class OpenAIProviderSession(ProviderSession):
             system_instruction=system_instruction,
             enable_ncu_report=self.enable_ncu_report,
             enable_sanitizer=self.enable_sanitizer,
-            enable_web_search=self.enable_web_search,
         )
 
 
@@ -89,7 +86,6 @@ class AnthropicProviderSession(ProviderSession):
         *,
         enable_ncu_report=True,
         enable_sanitizer=True,
-        enable_web_search=True,
     ):
         super().__init__(
             client,
@@ -97,7 +93,6 @@ class AnthropicProviderSession(ProviderSession):
             autotune_metrics,
             enable_ncu_report=enable_ncu_report,
             enable_sanitizer=enable_sanitizer,
-            enable_web_search=enable_web_search,
         )
         self.skill_ids = skill_ids
 
@@ -141,7 +136,6 @@ def create_provider_session(
     enable_ptx_skill=True,
     enable_ncu_report=True,
     enable_sanitizer=True,
-    enable_web_search=True,
 ):
     if provider == "openai":
         client = OpenAI()
@@ -157,7 +151,6 @@ def create_provider_session(
             autotune_metrics=autotune_metrics,
             enable_ncu_report=enable_ncu_report,
             enable_sanitizer=enable_sanitizer,
-            enable_web_search=enable_web_search,
         )
     elif provider == "anthropic":
         client = Anthropic()
@@ -174,7 +167,6 @@ def create_provider_session(
             autotune_metrics=autotune_metrics,
             enable_ncu_report=enable_ncu_report,
             enable_sanitizer=enable_sanitizer,
-            enable_web_search=enable_web_search,
         )
 
     raise ValueError(f"Unsupported provider: {provider}")

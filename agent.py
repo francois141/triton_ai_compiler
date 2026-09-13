@@ -490,7 +490,6 @@ def run_agent_loop(
     disable_ncu_report=False,
     disable_sanitizer=False,
     disable_ptx_skill=False,
-    disable_websearch=False,
 ):
     print("=== Start of the agent loop ===")
 
@@ -570,12 +569,10 @@ def run_agent_loop(
         enable_ptx_skill=not disable_ptx_skill,
         enable_ncu_report=not disable_ncu_report,
         enable_sanitizer=not disable_sanitizer,
-        enable_web_search=not disable_websearch,
     )
     prompt_sections = build_prompt_sections(
         kernel_name,
         evaluator.operator,
-        enable_web_search=not disable_websearch,
     )
     initial_prompt = render_prompt_sections(
         prompt_sections,
@@ -861,11 +858,6 @@ def parse_args():
         help="Do not upload the PTX ISA reference skill to the provider.",
     )
     parser.add_argument(
-        "--disable-websearch",
-        action="store_true",
-        help="Do not enable web search for FP16 kernel requests.",
-    )
-    parser.add_argument(
         "--max-repair-attempts",
         type=int,
         default=2,
@@ -933,7 +925,6 @@ def main():
             disable_ncu_report=args.disable_ncu_report,
             disable_sanitizer=args.disable_sanitizer,
             disable_ptx_skill=args.disable_ptx_skill,
-            disable_websearch=args.disable_websearch,
         )
     )
 

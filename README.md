@@ -131,10 +131,10 @@ the kernel skips autotuning.
 `--reasoning-effort` applies to OpenAI models; Anthropic requests use the
 Messages API's standard tool-use flow.
 
-Use `--disable-ncu-skill`, `--disable-ptx-skill`, `--disable-ncu-report`,
-`--disable-sanitizer`, or `--disable-websearch` to selectively omit the
-corresponding uploaded skill, local validation step, or FP16 web-search tool.
-Disabling the NCU report also skips NCU-backed improvement rounds.
+Use `--disable-ncu-skill`, `--disable-ptx-skill`, `--disable-ncu-report`, or
+`--disable-sanitizer` to selectively omit the corresponding uploaded skill or
+local validation step. Disabling the NCU report also skips NCU-backed
+improvement rounds.
 
 ## Utilities
 

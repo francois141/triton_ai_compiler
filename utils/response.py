@@ -22,21 +22,6 @@ ANTHROPIC_CODE_EXECUTION_TOOL = {
     "name": "code_execution",
 }
 PATCH_WORKFLOW_TOOL_NAMES = frozenset({"apply_ptx_patch", "verify_current_ptx"})
-FLOAT16_GEMM_WEB_SEARCH_TOOL = {
-    "type": "web_search",
-    "filters": {
-        "allowed_domains": [
-            "github.com",
-            "leimao.github.io",
-            "docs.nvidia.com",
-            "www.rimikawrites.com",
-            "qsysarch.com",
-            "siboehm.com",
-            "alexarmbr.github.io",
-            "hazyresearch.stanford.edu",
-        ]
-    },
-}
 
 
 @cache
@@ -91,10 +76,6 @@ def _tools_for_request(tools, current_candidate):
         return tools
     return [tool for tool in tools if tool.get("name") not in PATCH_WORKFLOW_TOOL_NAMES]
 
-
-def _is_float16_kernel(kernel_name):
-    operator_cls = resolve_kernel(kernel_name)
-    return operator_cls.__module__.startswith("triton_ptx.kernels.level2_float16")
 
 
 def _launch_verifier_output(evaluation, payload):
@@ -482,7 +463,6 @@ def request_openai_json(
     system_instruction=None,
     enable_ncu_report=True,
     enable_sanitizer=True,
-    enable_web_search=True,
 ):
     from openai import NotFoundError
 
@@ -501,8 +481,6 @@ def request_openai_json(
         PtxPatchWorkspace(current_candidate) if current_candidate is not None else None
     )
     available_tools = _tools_for_request(tools, current_candidate)
-    if enable_web_search and _is_float16_kernel(kernel_name):
-        available_tools = [*available_tools, FLOAT16_GEMM_WEB_SEARCH_TOOL]
     kwargs = {
         "model": model,
         "instructions": (

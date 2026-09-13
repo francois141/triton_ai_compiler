@@ -111,7 +111,6 @@ def estimate_token_cost(model, token_counts):
 
 
 COST_LOG_PATH = Path(__file__).resolve().parent.parent / "costs.txt"
-WEB_SEARCH_COST_PER_CALL = 10.00 / 1_000
 
 
 def _get_nested_int(value, *keys):
@@ -133,7 +132,6 @@ def estimate_response_cost(response, model):
             "cached_input_tokens": 0,
             "cache_write_tokens": 0,
             "output_tokens": 0,
-            "web_search_calls": 0,
         }
 
     input_tokens = _get_nested_int(usage, "input_tokens") or _get_nested_int(
@@ -152,16 +150,11 @@ def estimate_response_cost(response, model):
     ) or _get_nested_int(
         usage, "prompt_tokens_details", "cache_write_tokens"
     ) or _get_nested_int(usage, "cache_creation_input_tokens")
-    tool_usage = getattr(response, "tool_usage", None)
-    web_search_calls = _get_nested_int(
-        tool_usage, "web_search", "num_requests"
-    ) or _get_nested_int(tool_usage, "web_search", "requests")
     token_counts = {
         "input_tokens": input_tokens,
         "cached_input_tokens": cached_input_tokens,
         "cache_write_tokens": cache_write_tokens,
         "output_tokens": output_tokens,
-        "web_search_calls": web_search_calls,
     }
     token_cost = estimate_token_cost(
         model,
@@ -174,7 +167,7 @@ def estimate_response_cost(response, model):
     )
     if token_cost is None:
         return None, token_counts
-    return token_cost + web_search_calls * WEB_SEARCH_COST_PER_CALL, token_counts
+    return token_cost, token_counts
 
 
 def read_daily_total(cost_log_path, date_text):
@@ -214,7 +207,6 @@ def append_cost_log(
             f"cached_input_tokens={token_counts['cached_input_tokens']} "
             f"cache_write_tokens={token_counts['cache_write_tokens']} "
             f"output_tokens={token_counts['output_tokens']} "
-            f"web_search_calls={token_counts['web_search_calls']} "
             f"cost_usd={cost_text} daily_total_usd={daily_total:.8f}\n"
         )
     return cost
