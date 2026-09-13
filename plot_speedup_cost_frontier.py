@@ -9,6 +9,7 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 import tiktoken
+from matplotlib.lines import Line2D
 
 from clean_ptx import clean_ptx
 
@@ -19,6 +20,10 @@ LOGGER = logging.getLogger(__name__)
 GRID_PLOT_BASENAME = "speedup_cost_frontiers_grid"
 TOKEN_EXPANSION_PLOT_BASENAME = "ptx_token_expansion_factors"
 GEMM_LLM_FRONTIER_PLOT_BASENAME = "gemm_llm_cost_frontiers"
+GEMM_GPU_TYPE = "NVIDIA L40S"
+GEMM_COST_LIMIT_USD = 15.0
+GEMM_FAILED_MODEL_LABELS = {"gpt-5.6-luna": "gpt-5.6-luna (failed)"}
+LEGACY_L40S_GEMM_MODELS = {"gpt-5.6-sol"}
 CORRECTION_FACTOR_FILENAME = "correction factor.txt"
 PLOT_FORMATS = ("jpeg", "pdf")
 GRID_ROWS = 3
@@ -110,6 +115,19 @@ def _is_gemm_kernel(kernel_name):
     return "gemm" in normalized_name or "matrixmultiplication" in normalized_name
 
 
+def _is_gemm_gpu(gpu_type):
+    return gpu_type.casefold() == GEMM_GPU_TYPE.casefold()
+
+
+def _is_l40s_gemm_point(point):
+    if _is_gemm_gpu(point["gpu_type"]):
+        return True
+    # This trace predates persisted GPU metadata but was run on the L40S.
+    return (
+        point["gpu_type"] == "Unknown GPU" and point["model"] in LEGACY_L40S_GEMM_MODELS
+    )
+
+
 def _correction_factor(run_directory):
     correction_path = run_directory / CORRECTION_FACTOR_FILENAME
     try:
@@ -147,26 +165,39 @@ def _gpu_type(data):
     return display_name if isinstance(display_name, str) else None
 
 
-def _add_prior_run_costs(accepted_kernels, run_costs, gpu_types_by_run):
-    points_by_kernel_gpu_and_run = defaultdict(lambda: defaultdict(list))
-    run_costs_by_kernel_and_gpu = defaultdict(dict)
+def _add_prior_run_costs(
+    accepted_kernels,
+    run_costs,
+    gpu_types_by_run,
+    models_by_run,
+):
+    points_by_kernel_gpu_model_and_run = defaultdict(lambda: defaultdict(list))
+    run_costs_by_kernel_gpu_and_model = defaultdict(dict)
     for point in accepted_kernels:
         gpu_type = gpu_types_by_run.get(point["run_directory"], "Unknown GPU")
+        model = models_by_run[point["run_directory"]]
         point["gpu_type"] = gpu_type
-        points_by_kernel_gpu_and_run[(point["kernel"], gpu_type)][
+        points_by_kernel_gpu_model_and_run[(point["kernel"], gpu_type, model)][
             point["run_directory"]
         ].append(point)
 
     for (kernel_name, run_directory), cost in run_costs.items():
         gpu_type = gpu_types_by_run.get(run_directory, "Unknown GPU")
-        run_costs_by_kernel_and_gpu[(kernel_name, gpu_type)][run_directory] = cost
+        model = models_by_run[run_directory]
+        run_costs_by_kernel_gpu_and_model[(kernel_name, gpu_type, model)][
+            run_directory
+        ] = cost
 
-    for (kernel_name, gpu_type), costs_by_run in run_costs_by_kernel_and_gpu.items():
+    for (
+        kernel_name,
+        gpu_type,
+        model,
+    ), costs_by_run in run_costs_by_kernel_gpu_and_model.items():
         prior_cost = 0.0
         for run_directory in sorted(costs_by_run):
-            for point in points_by_kernel_gpu_and_run[(kernel_name, gpu_type)][
-                run_directory
-            ]:
+            for point in points_by_kernel_gpu_model_and_run[
+                (kernel_name, gpu_type, model)
+            ][run_directory]:
                 point["cost_usd"] += prior_cost
             prior_cost += costs_by_run[run_directory]
 
@@ -221,7 +252,16 @@ def load_accepted_kernels(trace_directory):
                 "model": _model_from_run_directory(run_directory),
             }
         )
-    _add_prior_run_costs(accepted_kernels, run_costs, gpu_types_by_run)
+    models_by_run = {
+        run_directory: _model_from_run_directory(run_directory)
+        for _, run_directory in run_costs
+    }
+    _add_prior_run_costs(
+        accepted_kernels,
+        run_costs,
+        gpu_types_by_run,
+        models_by_run,
+    )
     for point in accepted_kernels:
         point["provider"] = _provider_group(
             providers_by_run.get(point["run_directory"]), point["model"]
@@ -277,7 +317,6 @@ def _triton_kernel_source(kernel_name):
         if isinstance(node, ast.ClassDef) and node.name in class_names:
             return ast.get_source_segment(source, node)
     LOGGER.warning("No Triton kernel class was found in %s.", source_path)
-    return None
 
 
 def _token_count(text):
@@ -457,8 +496,10 @@ def write_frontier_grid(output_directory, accepted_kernels):
 def write_gemm_llm_frontier(output_directory, accepted_kernels):
     points_by_provider_and_model = defaultdict(lambda: defaultdict(list))
     for point in accepted_kernels:
-        if point["precision"] == "Floating Point 16" and _is_gemm_kernel(
-            str(point["kernel"])
+        if (
+            point["precision"] == "Floating Point 16"
+            and _is_gemm_kernel(str(point["kernel"]))
+            and _is_l40s_gemm_point(point)
         ):
             points_by_provider_and_model[point["provider"]][point["model"]].append(
                 point
@@ -468,16 +509,35 @@ def write_gemm_llm_frontier(output_directory, accepted_kernels):
     figure, axes = plt.subplots(1, 3, figsize=(21, 6), sharey=True)
     for axis, provider_group in zip(axes, provider_groups, strict=True):
         models = points_by_provider_and_model[provider_group]
+        endpoints = []
         for color_index, (model, points) in enumerate(sorted(models.items())):
-            _plot_frontier(
-                axis,
-                pareto_frontier(points),
-                GPU_COLORS[color_index % len(GPU_COLORS)],
-                model,
+            endpoints.append(
+                _plot_frontier(
+                    axis,
+                    pareto_frontier(points),
+                    GPU_COLORS[color_index % len(GPU_COLORS)],
+                    model,
+                )
             )
         _format_axis(axis, provider_group)
-        if models:
-            axis.legend(fontsize=12)
+        axis.set_xlim(0.0, GEMM_COST_LIMIT_USD)
+        for endpoint in endpoints:
+            _extend_frontier(axis, endpoint)
+        if models or provider_group == "OpenAI LLMs":
+            legend_handles, legend_labels = axis.get_legend_handles_labels()
+            if provider_group == "OpenAI LLMs":
+                legend_handles.append(
+                    Line2D(
+                        [],
+                        [],
+                        color="#dc2626",
+                        marker="x",
+                        linestyle="None",
+                        markersize=8,
+                    )
+                )
+                legend_labels.append(GEMM_FAILED_MODEL_LABELS["gpt-5.6-luna"])
+            axis.legend(legend_handles, legend_labels, fontsize=12)
         else:
             axis.text(
                 0.5,
