@@ -146,7 +146,6 @@ python -m extract_ptx
 
 The extractor saves TTIR, TTGIR, LLVM IR, and PTX in separate `ttir/`,
 `ttgir/`, `llir/`, and `ptx/` directories under `triton_generated_ptx/`.
-Apertus kernels are stored in an `APERTUS/` subdirectory within each stage.
 
 Re-run compile, correctness, and timing measurement for a candidate JSON:
 

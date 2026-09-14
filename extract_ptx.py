@@ -1,15 +1,13 @@
-#!/usr/bin/env python3
 import argparse
 from contextlib import contextmanager
 from pathlib import Path
 
-from clean_ptx import clean_ptx
 from triton_ptx.helpers.environment import is_gpu_available
 from triton_ptx.helpers.triton import dump_kernel_assembly
 from triton_ptx.kernels import kernel_list
 from triton_ptx.kernels.base import TritonPTXKernel
-from triton_ptx.LLMs.apertus import Apertus
 
+from clean_ptx import clean_ptx
 
 ASSEMBLY_STAGE_EXTENSIONS = {
     "ttir": ".ttir",
@@ -76,34 +74,7 @@ def dump_and_save_ptx_kernel(
     return output_paths
 
 
-def dump_apertus_ptx(output_dir, clean, failed_kernels, kernel_name=None, stages=None):
-    """Extract Apertus representations into their dedicated subdirectories."""
-    stages = ASSEMBLY_STAGE_EXTENSIONS if stages is None else stages
-
-    kernel_classes = Apertus.get_kernel_classes()
-    if kernel_name is not None:
-        kernel_classes = {kernel_name: kernel_classes[kernel_name]}
-
-    for name, kernel_class in kernel_classes.items():
-        kernel = kernel_class()
-        kernel_name = kernel.__class__.__name__
-        print(f"Compiling APERTUS/{kernel_name}")
-
-        try:
-            output_paths = dump_and_save_ptx_kernel(
-                kernel,
-                output_dir,
-                clean,
-                kernel_subdir="APERTUS",
-                stages=stages,
-            )
-            print(f"Dumped PTX to {output_paths['ptx']}")
-        except Exception as exc:
-            print(f"Failed to dump APERTUS/{kernel_name}: {exc}")
-            failed_kernels.append(f"APERTUS/{name}")
-
-
-def main(output_dir, clean=False, apertus_kernel=None, ptx_only=False):
+def main(output_dir, clean=False, ptx_only=False):
     if not is_gpu_available():
         raise RuntimeError("CUDA is required to compile and dump Triton PTX.")
 
@@ -114,32 +85,23 @@ def main(output_dir, clean=False, apertus_kernel=None, ptx_only=False):
     stages = {"ptx": ".ptx"} if ptx_only else ASSEMBLY_STAGE_EXTENSIONS
 
     with disable_kernel_autotuning():
-        if apertus_kernel is None:
-            for op in kernel_list:
-                kernel = op()
-                kernel_name = kernel.__class__.__name__
+        for op in kernel_list:
+            kernel = op()
+            kernel_name = kernel.__class__.__name__
 
-                print(f"Compiling {kernel_name}")
+            print(f"Compiling {kernel_name}")
 
-                try:
-                    output_paths = dump_and_save_ptx_kernel(
-                        kernel,
-                        output_dir,
-                        clean,
-                        stages=stages,
-                    )
-                    print(f"Dumped PTX to {output_paths['ptx']}")
-                except Exception as exc:
-                    print(f"Failed to dump PTX for {kernel_name}: {exc}")
-                    failed_kernels.append(kernel_name)
-
-        dump_apertus_ptx(
-            output_dir,
-            clean,
-            failed_kernels,
-            kernel_name=apertus_kernel,
-            stages=stages,
-        )
+            try:
+                output_paths = dump_and_save_ptx_kernel(
+                    kernel,
+                    output_dir,
+                    clean,
+                    stages=stages,
+                )
+                print(f"Dumped PTX to {output_paths['ptx']}")
+            except (RuntimeError, ValueError) as exc:
+                print(f"Failed to dump PTX for {kernel_name}: {exc}")
+                failed_kernels.append(kernel_name)
 
     if failed_kernels:
         print("\nFailed kernels:")
@@ -165,15 +127,10 @@ if __name__ == "__main__":
         help="Remove comments and .loc, .file, and .section directives from PTX.",
     )
     parser.add_argument(
-        "--apertus-kernel",
-        choices=sorted(Apertus.get_kernel_classes()),
-        help="Extract only the specified Apertus kernel.",
-    )
-    parser.add_argument(
         "--ptx-only",
         action="store_true",
         help="Write PTX only, without intermediate representations.",
     )
 
     args = parser.parse_args()
-    main(args.output_dir, args.clean, args.apertus_kernel, args.ptx_only)
+    main(args.output_dir, args.clean, args.ptx_only)
