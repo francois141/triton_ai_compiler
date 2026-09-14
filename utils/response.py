@@ -11,7 +11,12 @@ from anthropic import transform_schema
 from prompts.blocks import anthropic_system_prompt, system_prompt
 from triton_ptx import Payload, TritonPTXCandidateEvaluator, resolve_kernel
 
-from .cost import COST_LOG_PATH, append_cost_log, append_pipeline_cost_summary
+from .cost import (
+    COST_LOG_PATH,
+    append_cost_log,
+    append_pipeline_cost_summary,
+    read_cost_total,
+)
 from .response_format import PtxKernel
 from .traces import autotune_metrics as collect_autotune_metrics
 from .traces import ncu_instruction_issues, record_tool_call
@@ -25,6 +30,21 @@ ANTHROPIC_CODE_EXECUTION_TOOL = {
     "name": "code_execution",
 }
 PATCH_WORKFLOW_TOOL_NAMES = frozenset({"apply_ptx_patch", "verify_current_ptx"})
+
+
+class BudgetExceededError(RuntimeError):
+    pass
+
+
+def _raise_if_budget_exhausted(cost_log_path, max_budget_usd):
+    if max_budget_usd is None or cost_log_path is None:
+        return
+    spent = read_cost_total(Path(cost_log_path))
+    if spent >= max_budget_usd:
+        raise BudgetExceededError(
+            "Maximum budget reached after an API response and before a continuation "
+            f"(${spent:.6f} spent; ${max_budget_usd:.6f} configured)."
+        )
 
 
 @cache
@@ -269,6 +289,7 @@ def request_anthropic_json(
     system_instruction=None,
     enable_ncu_report=True,
     enable_sanitizer=True,
+    max_budget_usd=None,
 ):
     verifier = verifier_for_kernel(
         kernel_name,
@@ -341,7 +362,8 @@ def request_anthropic_json(
             if _get_field(block, "type") == "tool_use"
         ]
         stop_reason = _get_field(response, "stop_reason")
-        if _get_field(response, "stop_reason") == "pause_turn":
+        if _get_field(response, "stop_reason") == "pause_turn" and not tool_uses:
+            _raise_if_budget_exhausted(cost_log_path, max_budget_usd)
             container_id = _get_field(_get_field(response, "container"), "id")
             if isinstance(container_id, str):
                 container["id"] = container_id
@@ -353,6 +375,7 @@ def request_anthropic_json(
             )
             continue
         if stop_reason == "max_tokens" and not tool_uses:
+            _raise_if_budget_exhausted(cost_log_path, max_budget_usd)
             if continuation_count == ANTHROPIC_MAX_CONTINUATIONS:
                 raise ValueError(
                     "Anthropic exhausted its output-token budget before returning "
@@ -471,6 +494,7 @@ def request_anthropic_json(
                     "content": result,
                 }
             )
+        _raise_if_budget_exhausted(cost_log_path, max_budget_usd)
         messages.extend(
             [
                 {
@@ -498,6 +522,7 @@ def request_openai_json(
     system_instruction=None,
     enable_ncu_report=True,
     enable_sanitizer=True,
+    max_budget_usd=None,
 ):
     from openai import NotFoundError
 
@@ -627,6 +652,7 @@ def request_openai_json(
                 }
             )
 
+        _raise_if_budget_exhausted(cost_log_path, max_budget_usd)
         kwargs = {
             "model": model,
             "previous_response_id": _get_field(response, "id"),

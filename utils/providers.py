@@ -40,6 +40,7 @@ class ProviderSession:
         pipeline=None,
         current_candidate=None,
         system_instruction=None,
+        max_budget_usd=None,
     ):
         raise NotImplementedError
 
@@ -57,6 +58,7 @@ class OpenAIProviderSession(ProviderSession):
         pipeline=None,
         current_candidate=None,
         system_instruction=None,
+        max_budget_usd=None,
     ):
         return request_openai_json(
             self.client,
@@ -73,6 +75,7 @@ class OpenAIProviderSession(ProviderSession):
             system_instruction=system_instruction,
             enable_ncu_report=self.enable_ncu_report,
             enable_sanitizer=self.enable_sanitizer,
+            max_budget_usd=max_budget_usd,
         )
 
 
@@ -108,6 +111,7 @@ class AnthropicProviderSession(ProviderSession):
         pipeline=None,
         current_candidate=None,
         system_instruction=None,
+        max_budget_usd=None,
     ):
         del reasoning_effort
         return request_anthropic_json(
@@ -125,6 +129,7 @@ class AnthropicProviderSession(ProviderSession):
             system_instruction=system_instruction,
             enable_ncu_report=self.enable_ncu_report,
             enable_sanitizer=self.enable_sanitizer,
+            max_budget_usd=max_budget_usd,
         )
 
 

@@ -30,7 +30,7 @@ from utils.evaluation import (
     register_evaluated_candidate,
 )
 from utils.providers import create_provider_session
-from utils.response import response_json_text, verifier_for_kernel
+from utils.response import BudgetExceededError, response_json_text, verifier_for_kernel
 from utils.response_format import (
     FAILURE_ANALYSIS_RESPONSE_FORMAT,
     IMPROVEMENT_PLAN_RESPONSE_FORMAT,
@@ -217,16 +217,21 @@ def _generate_tested_candidate(
         idea=idea,
         speedup_vs_triton=best_evaluation.speedup_vs_triton,
     )
-    response, _, patched_candidate = provider_session.request_json(
-        model=model,
-        prompt=candidate_prompt,
-        response_format=PTX_KERNEL_METADATA_RESPONSE_FORMAT,
-        reasoning_effort=reasoning_effort,
-        kernel_name=kernel_name,
-        cost_log_path=trace_path / "prices.log",
-        pipeline="candidate",
-        current_candidate=candidate_from_evaluation(best_evaluation),
-    )
+    try:
+        response, _, patched_candidate = provider_session.request_json(
+            model=model,
+            prompt=candidate_prompt,
+            response_format=PTX_KERNEL_METADATA_RESPONSE_FORMAT,
+            reasoning_effort=reasoning_effort,
+            kernel_name=kernel_name,
+            cost_log_path=trace_path / "prices.log",
+            pipeline="candidate",
+            current_candidate=candidate_from_evaluation(best_evaluation),
+            max_budget_usd=max_budget_usd,
+        )
+    except BudgetExceededError:
+        _print_budget_exhausted(trace_path, max_budget_usd)
+        return best_evaluation
     responses.append(response.model_dump(mode="json"))
     write_trace(trace_path, responses)
     candidate = _candidate_from_patch_response(response, patched_candidate)
@@ -279,15 +284,20 @@ def _generate_tested_candidate(
             idea=idea,
             speedup_vs_triton=best_attempt.speedup_vs_triton,
         )
-        analysis_response, _, _ = provider_session.request_json(
-            model=model,
-            prompt=analysis_prompt,
-            response_format=FAILURE_ANALYSIS_RESPONSE_FORMAT,
-            reasoning_effort=reasoning_effort,
-            kernel_name=kernel_name,
-            cost_log_path=trace_path / "prices.log",
-            pipeline="candidate_failure_analysis",
-        )
+        try:
+            analysis_response, _, _ = provider_session.request_json(
+                model=model,
+                prompt=analysis_prompt,
+                response_format=FAILURE_ANALYSIS_RESPONSE_FORMAT,
+                reasoning_effort=reasoning_effort,
+                kernel_name=kernel_name,
+                cost_log_path=trace_path / "prices.log",
+                pipeline="candidate_failure_analysis",
+                max_budget_usd=max_budget_usd,
+            )
+        except BudgetExceededError:
+            _print_budget_exhausted(trace_path, max_budget_usd)
+            break
         responses.append(analysis_response.model_dump(mode="json"))
         write_trace(trace_path, responses)
         failure_analysis = FailureAnalysis.model_validate_json(
@@ -316,16 +326,21 @@ def _generate_tested_candidate(
             idea=idea,
             speedup_vs_triton=best_attempt.speedup_vs_triton,
         )
-        response, _, patched_candidate = provider_session.request_json(
-            model=model,
-            prompt=repair_prompt,
-            response_format=PTX_KERNEL_METADATA_RESPONSE_FORMAT,
-            reasoning_effort=reasoning_effort,
-            kernel_name=kernel_name,
-            cost_log_path=trace_path / "prices.log",
-            pipeline="candidate_repair",
-            current_candidate=candidate_from_evaluation(best_attempt),
-        )
+        try:
+            response, _, patched_candidate = provider_session.request_json(
+                model=model,
+                prompt=repair_prompt,
+                response_format=PTX_KERNEL_METADATA_RESPONSE_FORMAT,
+                reasoning_effort=reasoning_effort,
+                kernel_name=kernel_name,
+                cost_log_path=trace_path / "prices.log",
+                pipeline="candidate_repair",
+                current_candidate=candidate_from_evaluation(best_attempt),
+                max_budget_usd=max_budget_usd,
+            )
+        except BudgetExceededError:
+            _print_budget_exhausted(trace_path, max_budget_usd)
+            break
         responses.append(response.model_dump(mode="json"))
         write_trace(trace_path, responses)
         repaired_candidate = _candidate_from_patch_response(response, patched_candidate)
@@ -399,15 +414,20 @@ def _repair_initial_candidate(
             candidate_index=0,
             speedup_vs_triton=best_attempt.speedup_vs_triton,
         )
-        analysis_response, _, _ = provider_session.request_json(
-            model=model,
-            prompt=analysis_prompt,
-            response_format=FAILURE_ANALYSIS_RESPONSE_FORMAT,
-            reasoning_effort=reasoning_effort,
-            kernel_name=kernel_name,
-            cost_log_path=trace_path / "prices.log",
-            pipeline="initial_candidate_failure_analysis",
-        )
+        try:
+            analysis_response, _, _ = provider_session.request_json(
+                model=model,
+                prompt=analysis_prompt,
+                response_format=FAILURE_ANALYSIS_RESPONSE_FORMAT,
+                reasoning_effort=reasoning_effort,
+                kernel_name=kernel_name,
+                cost_log_path=trace_path / "prices.log",
+                pipeline="initial_candidate_failure_analysis",
+                max_budget_usd=max_budget_usd,
+            )
+        except BudgetExceededError:
+            _print_budget_exhausted(trace_path, max_budget_usd)
+            break
         responses.append(analysis_response.model_dump(mode="json"))
         write_trace(trace_path, responses)
         failure_analysis = FailureAnalysis.model_validate_json(
@@ -433,16 +453,21 @@ def _repair_initial_candidate(
             candidate_index=0,
             speedup_vs_triton=best_attempt.speedup_vs_triton,
         )
-        response, _, patched_candidate = provider_session.request_json(
-            model=model,
-            prompt=repair_prompt,
-            response_format=PTX_KERNEL_METADATA_RESPONSE_FORMAT,
-            reasoning_effort=reasoning_effort,
-            kernel_name=kernel_name,
-            cost_log_path=trace_path / "prices.log",
-            pipeline="initial_candidate_repair",
-            current_candidate=candidate_from_evaluation(best_attempt),
-        )
+        try:
+            response, _, patched_candidate = provider_session.request_json(
+                model=model,
+                prompt=repair_prompt,
+                response_format=PTX_KERNEL_METADATA_RESPONSE_FORMAT,
+                reasoning_effort=reasoning_effort,
+                kernel_name=kernel_name,
+                cost_log_path=trace_path / "prices.log",
+                pipeline="initial_candidate_repair",
+                current_candidate=candidate_from_evaluation(best_attempt),
+                max_budget_usd=max_budget_usd,
+            )
+        except BudgetExceededError:
+            _print_budget_exhausted(trace_path, max_budget_usd)
+            break
         responses.append(response.model_dump(mode="json"))
         write_trace(trace_path, responses)
         repaired_candidate = _candidate_from_patch_response(response, patched_candidate)
@@ -627,15 +652,22 @@ def run_agent_loop(
                 round_index=0,
                 speedup_vs_triton=None,
             )
-            response, _, _ = provider_session.request_json(
-                model=model,
-                prompt=initial_prompt,
-                response_format=PTX_KERNEL_RESPONSE_FORMAT,
-                reasoning_effort=reasoning_effort,
-                kernel_name=kernel_name,
-                cost_log_path=trace_path / "prices.log",
-                pipeline="initial_candidate",
-            )
+            try:
+                response, _, _ = provider_session.request_json(
+                    model=model,
+                    prompt=initial_prompt,
+                    response_format=PTX_KERNEL_RESPONSE_FORMAT,
+                    reasoning_effort=reasoning_effort,
+                    kernel_name=kernel_name,
+                    cost_log_path=trace_path / "prices.log",
+                    pipeline="initial_candidate",
+                    max_budget_usd=max_budget_usd,
+                )
+            except BudgetExceededError as error:
+                raise RuntimeError(
+                    "The maximum budget was reached before the initial candidate "
+                    "was completed. Provide a larger budget or a starting candidate."
+                ) from error
             responses.append(response.model_dump(mode="json"))
             write_trace(trace_path, responses)
             starting_candidate = PtxKernel.model_validate_json(
@@ -701,16 +733,21 @@ def run_agent_loop(
                 speedup_vs_triton=best_evaluation.speedup_vs_triton,
             )
             request_start = perf_counter()
-            response, cost, _ = provider_session.request_json(
-                model=model,
-                prompt=plan_prompt,
-                response_format=IMPROVEMENT_PLAN_RESPONSE_FORMAT,
-                reasoning_effort="high",
-                kernel_name=kernel_name,
-                cost_log_path=trace_path / "prices.log",
-                pipeline="improvement_plan",
-                system_instruction=improvement_planning_system_prompt(),
-            )
+            try:
+                response, cost, _ = provider_session.request_json(
+                    model=model,
+                    prompt=plan_prompt,
+                    response_format=IMPROVEMENT_PLAN_RESPONSE_FORMAT,
+                    reasoning_effort="high",
+                    kernel_name=kernel_name,
+                    cost_log_path=trace_path / "prices.log",
+                    pipeline="improvement_plan",
+                    system_instruction=improvement_planning_system_prompt(),
+                    max_budget_usd=max_budget_usd,
+                )
+            except BudgetExceededError:
+                _print_budget_exhausted(trace_path, max_budget_usd)
+                break
             request_duration = perf_counter() - request_start
             cost_message = "cost unavailable" if cost is None else f"cost ${cost:.6f}"
             print(
@@ -759,6 +796,9 @@ def run_agent_loop(
                     max_repair_attempts=max_repair_attempts,
                     max_budget_usd=max_budget_usd,
                 )
+                if _budget_exhausted(trace_path, max_budget_usd):
+                    _print_budget_exhausted(trace_path, max_budget_usd)
+                    break
                 if (
                     evaluated_candidate.passed
                     and evaluated_candidate.speedup_vs_triton
