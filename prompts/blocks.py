@@ -3,7 +3,7 @@ from __future__ import annotations
 
 def system_prompt():
     return """
-You are an autonomous NVIDIA PTX optimization agent. Your goal is to generate 
+You are an autonomous NVIDIA PTX optimization agent. Your goal is to generate
 efficient and optimised PTX code.
 
 ## Available tools
@@ -46,6 +46,36 @@ the verifier feedback to refine it instead of falling back to a simpler kernel.
 """.strip()
 
 
+def anthropic_system_prompt():
+    return """
+You generate a basic, correct NVIDIA PTX implementation. Once the basic
+implementation is working and verified, optimize it as much as possible while
+preserving correctness. Use applicable modern NVIDIA GPU features such as
+Tensor Cores, dynamic shared-memory tiling, asynchronous copies, and
+multi-stage pipelines. Dynamic shared memory is already available through the
+declared `global_smem` buffer.
+
+## Available tools
+
+- `launch_verifier` checks whether a candidate compiles and is correct.
+  Call it before returning a candidate.
+- Use the `ptx` skill only when you need help with PTX syntax or a compiler
+  error.
+
+## Task
+
+Read the supplied kernel, signature, shapes, and launch requirements. Write
+the simplest PTX that implements the same result. Handle the stated masks and
+boundaries. Keep the initial implementation straightforward; do not add
+optional optimizations or alternative implementations before it is verified.
+If verification fails, make the smallest change needed to fix it and verify
+again. Once it is working, optimize it as much as possible with applicable
+modern NVIDIA GPU features. Dynamic shared memory is already available through
+the declared `global_smem` buffer. Verify each optimization and retain only
+correct improvements.
+""".strip()
+
+
 def improvement_planning_system_prompt():
     return """
 You are an NVIDIA PTX performance-analysis agent. Your sole task is to plan
@@ -78,6 +108,19 @@ def initial_task():
 You are given a Triton kernel. Generate a compile-ready PTX kernels.
 The kernel must be the fastest implementation you can produce for the exact
 PTX version and target listed below.
+    """
+
+
+def anthropic_initial_task():
+    return """
+# Triton to Basic PTX Conversion
+
+You are given a Triton kernel. Generate one compile-ready, basic PTX
+implementation for the exact PTX version and target listed below. Prioritize
+correctness and clarity over performance tuning. Once the basic implementation
+is working and verified, optimize it with applicable modern NVIDIA GPU
+features. Dynamic shared memory is already available through the declared
+`global_smem` buffer.
     """
 
 
@@ -144,6 +187,10 @@ def signature_template(
     address_size,
     kernel_name="kernel",
     ptx_signature=None,
+    shared_memory_instruction=(
+        "Do not allocate or use any static shared memory, use dynamic shared memory "
+        "instead."
+    ),
 ):
     runtime_params = [
         param for param in parameters if not _is_constexpr_annotation(param.annotation)
@@ -165,7 +212,7 @@ def signature_template(
 ## PTX Entry Template
 
 Use this exact entry template and fill the body with your PTX.
-Do not allocate or use any static shared memory, use dynamic shared memory instead.
+{shared_memory_instruction}
 
 ```ptx
 .version {version}
@@ -182,6 +229,31 @@ Do not allocate or use any static shared memory, use dynamic shared memory inste
 }}
 ```
 """.strip()
+
+
+def anthropic_signature_template(
+    parameters,
+    *,
+    version,
+    target,
+    address_size,
+    kernel_name="kernel",
+    ptx_signature=None,
+):
+    return signature_template(
+        parameters,
+        version=version,
+        target=target,
+        address_size=address_size,
+        kernel_name=kernel_name,
+        ptx_signature=ptx_signature,
+        shared_memory_instruction=(
+            "Do not use shared memory in the initial basic implementation. After it "
+            "is verified, dynamic shared memory is already available through "
+            "`global_smem` for performance optimizations; do not declare static "
+            "shared memory."
+        ),
+    )
 
 
 def shape_information_block(shape_information):
@@ -260,6 +332,31 @@ def float16_gemm_research_rules(*, enable_web_search=True):
         else "Web search is unavailable. Use the following sources only as optional "
         "background references:"
     )
+    return _float16_gemm_research_rules(f"{research_instruction}\n{sources}")
+
+
+def anthropic_float16_gemm_research_rules(*, shared_memory_bytes):
+    return _float16_gemm_research_rules(
+        f"""## Dynamic Shared-Memory Allocation
+
+The launcher allocates exactly {shared_memory_bytes} bytes of dynamic shared
+memory for each CTA (kernel block). All dynamic shared-memory addresses must
+remain in the byte range [0, {shared_memory_bytes}); no additional shared
+memory can be requested through the verifier. Account for this fixed budget
+when choosing tile shapes, pipeline stages, and any epilogue workspace.
+
+## Implementation Order
+
+Start by implementing and verifying a basic, correct GEMM that exactly
+preserves the supplied layout, indexing, masks, and numerical contract. Only
+after it passes the launch verifier should you introduce more advanced
+features such as Tensor Cores, shared-memory tiling, asynchronous copies,
+multi-stage pipelines, or a shared-memory epilogue. Keep each optimization
+step independently correct and verified."""
+    )
+
+
+def _float16_gemm_research_rules(provider_guidance):
     return f"""
 ## FP16 GEMM Research and Tensor Core Requirements
 
@@ -268,8 +365,7 @@ consistent with the operator's supplied shapes, indexing, and memory layout.
 It does not change the computation, imply a 4096 x 4096 problem, or permit
 treating a non-contiguous operand as a contiguous matrix.
 
-{research_instruction}
-{sources}
+{provider_guidance}
 
 For a true FP16 GEMM, use Tensor Cores when they are valid for the supplied
 target and exact operand layout. Choose block, warp, and K tiling from the
@@ -384,6 +480,41 @@ The output must follow this format:
   not use it for uncertainty, a disclaimer, or a reason to return a fallback;
   use an empty list when there are no such constraints;
 - the product of the included thread dimensions must equal {num_threads} ({spec.num_warps} warps), treating omitted `"num_threads_y"` and `"num_threads_z"` as 1;
+- do not include tl.constexpr parameters in the dictionary; the operator defaults are used when launching the PTX kernel;
+- make the PTX string valid PTX;
+- include concise human-readable PTX comments that explain the logic and each logical instruction group;
+- ASCII-only;
+- free of markdown fences;
+""".strip()
+
+
+def anthropic_output_contract(spec):
+    num_threads = spec.num_warps * 32
+    return f"""
+## Output Contract
+
+Submit exactly one structured response object. Do not return plain text, a Python
+snippet, or Markdown.
+
+The output must follow this format:
+
+{{
+    "ptx": \"\"\"<valid PTX code>\"\"\",
+    "num_threads_x": <required_threads_x>,
+    "num_threads_y": <optional_threads_y>,
+    "num_threads_z": <optional_threads_z>,
+    "difficulties": [],
+}}
+
+- generate exactly one object;
+- put the PTX code directly under the top-level `"ptx"` key;
+- include `"num_threads_x"`, `"num_threads_y"`, and `"num_threads_z"` as
+  positive integer values; use 1 for unused dimensions;
+- include `"difficulties"` as a list of at most three concise, concrete
+  verifier-reported constraints encountered while producing the candidate; do
+  not use it for uncertainty, a disclaimer, or a reason to return a fallback;
+  use an empty list when there are no such constraints;
+- the product of the thread dimensions must equal {num_threads} ({spec.num_warps} warps);
 - do not include tl.constexpr parameters in the dictionary; the operator defaults are used when launching the PTX kernel;
 - make the PTX string valid PTX;
 - include concise human-readable PTX comments that explain the logic and each logical instruction group;

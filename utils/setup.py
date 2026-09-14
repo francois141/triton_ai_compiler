@@ -130,7 +130,7 @@ def build_anthropic_tools():
     ]
 
 
-def build_prompt_sections(kernel_name, kernel=None):
+def build_prompt_sections(kernel_name, kernel=None, *, provider="openai"):
     kernel = resolve_kernel(kernel_name)() if kernel is None else kernel
     version, target, address_size = get_ptx_system_config()
     signature = parse_ptx_signature(dump_kernel_ptx(kernel))
@@ -140,6 +140,7 @@ def build_prompt_sections(kernel_name, kernel=None):
         target=target,
         address_size=address_size,
         ptx_signature=signature,
+        provider=provider,
     )
 
 

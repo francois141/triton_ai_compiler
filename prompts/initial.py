@@ -1,8 +1,13 @@
 from __future__ import annotations
 
 from triton_ptx.helpers.kernels import extract_specification_from_operator
+from triton_ptx.helpers.triton import get_kernel_shared_memory_bytes
 
 from .blocks import (
+    anthropic_float16_gemm_research_rules,
+    anthropic_initial_task,
+    anthropic_output_contract,
+    anthropic_signature_template,
     commenting_rules,
     constexpr_values_block,
     convolution_2d_float16_rules,
@@ -34,6 +39,17 @@ INITIAL_PROMPT_SECTION_NAMES = (
     "output_contract",
 )
 
+ANTHROPIC_INITIAL_PROMPT_SECTION_NAMES = (
+    "initial_task",
+    "constexpr_values",
+    "launch_configuration",
+    "ptx_entry_template",
+    "shape_information",
+    "correctness_rules",
+    "triton_kernel",
+    "output_contract",
+)
+
 IMPROVEMENT_CONTEXT_SECTION_NAMES = (
     "constexpr_values",
     "launch_configuration",
@@ -44,6 +60,14 @@ IMPROVEMENT_CONTEXT_SECTION_NAMES = (
     "convolution_memory_layout",
     "triton_kernel",
 )
+
+
+def initial_prompt_section_names(provider):
+    if provider == "anthropic":
+        return ANTHROPIC_INITIAL_PROMPT_SECTION_NAMES
+    if provider == "openai":
+        return INITIAL_PROMPT_SECTION_NAMES
+    raise ValueError(f"Unsupported provider: {provider}")
 
 
 def _is_float16_operator(operator):
@@ -82,13 +106,22 @@ def build_prompt_sections(
     include_float16_gemm_research=False,
     include_flash_attention=False,
     include_convolution_memory_layout=False,
+    provider="openai",
     enable_web_search=True,
+    shared_memory_bytes=None,
 ):
+    if provider not in {"anthropic", "openai"}:
+        raise ValueError(f"Unsupported provider: {provider}")
+    is_anthropic = provider == "anthropic"
     return {
-        "initial_task": initial_task().strip(),
+        "initial_task": (
+            anthropic_initial_task().strip() if is_anthropic else initial_task().strip()
+        ),
         "constexpr_values": constexpr_values_block(spec),
         "launch_configuration": launch_configuration_block(spec.num_warps),
-        "ptx_entry_template": signature_template(
+        "ptx_entry_template": (
+            anthropic_signature_template if is_anthropic else signature_template
+        )(
             spec.parameters,
             version=version,
             target=target,
@@ -104,7 +137,13 @@ def build_prompt_sections(
             flash_attention_float16_rules() if include_flash_attention else ""
         ),
         "float16_gemm_research": (
-            float16_gemm_research_rules(enable_web_search=enable_web_search)
+            (
+                anthropic_float16_gemm_research_rules(
+                    shared_memory_bytes=shared_memory_bytes,
+                )
+                if is_anthropic
+                else float16_gemm_research_rules(enable_web_search=enable_web_search)
+            )
             if include_float16_gemm_research
             else ""
         ),
@@ -112,7 +151,9 @@ def build_prompt_sections(
             convolution_2d_float16_rules() if include_convolution_memory_layout else ""
         ),
         "triton_kernel": triton_kernel_block(spec.source, spec.supporting_source),
-        "output_contract": output_contract(spec),
+        "output_contract": (
+            anthropic_output_contract(spec) if is_anthropic else output_contract(spec)
+        ),
     }
 
 
@@ -126,7 +167,9 @@ def prompt_builder(
     include_float16_gemm_research=False,
     include_flash_attention=False,
     include_convolution_memory_layout=False,
+    provider="openai",
     enable_web_search=True,
+    shared_memory_bytes=None,
 ):
     prompt_sections = build_prompt_sections(
         spec,
@@ -137,9 +180,13 @@ def prompt_builder(
         include_float16_gemm_research=include_float16_gemm_research,
         include_flash_attention=include_flash_attention,
         include_convolution_memory_layout=include_convolution_memory_layout,
+        provider=provider,
         enable_web_search=enable_web_search,
+        shared_memory_bytes=shared_memory_bytes,
     )
-    return render_prompt_sections(prompt_sections, INITIAL_PROMPT_SECTION_NAMES)
+    return render_prompt_sections(
+        prompt_sections, initial_prompt_section_names(provider)
+    )
 
 
 def build_prompt_for_operator(
@@ -149,17 +196,25 @@ def build_prompt_for_operator(
     target,
     address_size,
     ptx_signature=None,
+    provider="openai",
 ):
     spec = extract_specification_from_operator(operator)
+    include_float16_gemm_research = _is_float16_operator(operator)
     return prompt_builder(
         spec,
         version=version,
         target=target,
         address_size=address_size,
         ptx_signature=ptx_signature,
-        include_float16_gemm_research=_is_float16_operator(operator),
+        include_float16_gemm_research=include_float16_gemm_research,
         include_flash_attention=_is_flash_attention_float16_operator(operator),
         include_convolution_memory_layout=_is_convolution_2d_float16_operator(operator),
+        provider=provider,
+        shared_memory_bytes=(
+            get_kernel_shared_memory_bytes(operator)
+            if include_float16_gemm_research
+            else None
+        ),
     )
 
 
@@ -170,17 +225,25 @@ def build_prompt_sections_for_operator(
     target,
     address_size,
     ptx_signature=None,
+    provider="openai",
     enable_web_search=True,
 ):
     spec = extract_specification_from_operator(operator)
+    include_float16_gemm_research = _is_float16_operator(operator)
     return build_prompt_sections(
         spec,
         version=version,
         target=target,
         address_size=address_size,
         ptx_signature=ptx_signature,
-        include_float16_gemm_research=_is_float16_operator(operator),
+        include_float16_gemm_research=include_float16_gemm_research,
         include_flash_attention=_is_flash_attention_float16_operator(operator),
         include_convolution_memory_layout=_is_convolution_2d_float16_operator(operator),
+        provider=provider,
         enable_web_search=enable_web_search,
+        shared_memory_bytes=(
+            get_kernel_shared_memory_bytes(operator)
+            if include_float16_gemm_research
+            else None
+        ),
     )

@@ -8,7 +8,7 @@ from pathlib import Path
 
 from anthropic import transform_schema
 
-from prompts.blocks import system_prompt
+from prompts.blocks import anthropic_system_prompt, system_prompt
 from triton_ptx import Payload, TritonPTXCandidateEvaluator, resolve_kernel
 
 from .cost import COST_LOG_PATH, append_cost_log, append_pipeline_cost_summary
@@ -308,7 +308,9 @@ def request_anthropic_json(
             "model": model,
             "max_tokens": ANTHROPIC_MAX_TOKENS,
             "system": (
-                system_prompt() if system_instruction is None else system_instruction
+                anthropic_system_prompt()
+                if system_instruction is None
+                else system_instruction
             ),
             "messages": messages,
             "tools": anthropic_tools,

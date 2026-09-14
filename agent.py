@@ -8,7 +8,11 @@ from math import isfinite
 from pathlib import Path
 from time import perf_counter
 
-from prompts.blocks import improvement_planning_system_prompt, system_prompt
+from prompts.blocks import (
+    anthropic_system_prompt,
+    improvement_planning_system_prompt,
+    system_prompt,
+)
 from prompts.improvement import (
     build_candidate_prompt,
     build_failure_analysis_prompt,
@@ -16,7 +20,7 @@ from prompts.improvement import (
     build_initial_repair_prompt,
     build_repair_prompt,
 )
-from prompts.initial import INITIAL_PROMPT_SECTION_NAMES, render_prompt_sections
+from prompts.initial import initial_prompt_section_names, render_prompt_sections
 from triton_ptx import Payload, dump_kernel_ptx
 from utils.cost import append_daily_cost_summary, read_cost_total
 from utils.evaluation import (
@@ -518,7 +522,8 @@ def run_agent_loop(
         reasoning_effort,
     )
     (trace_path / "system_prompt.md").write_text(
-        system_prompt() + "\n",
+        (anthropic_system_prompt() if provider == "anthropic" else system_prompt())
+        + "\n",
         encoding="utf-8",
     )
     print(f"=== Writing trace artifacts to {trace_path} ===", flush=True)
@@ -573,10 +578,11 @@ def run_agent_loop(
     prompt_sections = build_prompt_sections(
         kernel_name,
         evaluator.operator,
+        provider=provider,
     )
     initial_prompt = render_prompt_sections(
         prompt_sections,
-        INITIAL_PROMPT_SECTION_NAMES,
+        initial_prompt_section_names(provider),
     )
     if initial_prompt_ptx is not None:
         ptx_content = Path(initial_prompt_ptx).read_text(encoding="utf-8")
