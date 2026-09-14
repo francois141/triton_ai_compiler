@@ -24,6 +24,7 @@ GEMM_GPU_TYPE = "NVIDIA L40S"
 GEMM_COST_LIMIT_USD = 15.0
 GEMM_FAILED_MODEL_LABELS = {"gpt-5.6-luna": "gpt-5.6-luna (failed)"}
 LEGACY_L40S_GEMM_MODELS = {"gpt-5.6-sol"}
+GRID_MODEL_PREFIX = "gpt-6"
 CORRECTION_FACTOR_FILENAME = "correction factor.txt"
 PLOT_FORMATS = ("jpeg", "pdf")
 GRID_ROWS = 3
@@ -126,6 +127,16 @@ def _is_l40s_gemm_point(point):
     return (
         point["gpu_type"] == "Unknown GPU" and point["model"] in LEGACY_L40S_GEMM_MODELS
     )
+
+
+def _grid_gpu_type(point):
+    if (
+        point["gpu_type"] == "Unknown GPU"
+        and point["model"].startswith(GRID_MODEL_PREFIX)
+        and _is_gemm_kernel(str(point["kernel"]))
+    ):
+        return GEMM_GPU_TYPE
+    return point["gpu_type"]
 
 
 def _correction_factor(run_directory):
@@ -452,8 +463,10 @@ def _save_figure(figure, output_directory, basename):
 def write_frontier_grid(output_directory, accepted_kernels):
     kernels = defaultdict(lambda: defaultdict(list))
     for point in accepted_kernels:
+        if not point["model"].startswith(GRID_MODEL_PREFIX):
+            continue
         kernel_name = _display_kernel_name(str(point["kernel"]))
-        series = (point["gpu_type"], point["precision"])
+        series = (_grid_gpu_type(point), point["precision"])
         kernels[kernel_name][series].append(point)
     kernel_names = sorted(kernels)
     if len(kernel_names) > GRID_SIZE:
