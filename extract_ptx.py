@@ -28,13 +28,11 @@ def disable_kernel_autotuning():
         *,
         ptx,
         autotune=True,
-        tuning_options=None,
     ):
         return original_init_compiled_kernels(
             self,
             ptx=ptx,
             autotune=False,
-            tuning_options=tuning_options,
         )
 
     TritonPTXKernel.init_compiled_kernels = init_compiled_kernels_without_autotuning

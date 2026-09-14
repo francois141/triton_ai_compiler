@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from functools import cache
 from pathlib import Path
 
+from anthropic import transform_schema
+
 from prompts.blocks import system_prompt
 from triton_ptx import Payload, TritonPTXCandidateEvaluator, resolve_kernel
 
@@ -16,6 +18,7 @@ from .traces import ncu_instruction_issues, record_tool_call
 
 RESPONSE_RETRY_ATTEMPTS = 6
 ANTHROPIC_MAX_TOKENS = 16_384
+ANTHROPIC_MAX_CONTINUATIONS = 3
 ANTHROPIC_SKILLS_BETA = "skills-2025-10-02"
 ANTHROPIC_CODE_EXECUTION_TOOL = {
     "type": "code_execution_20260521",
@@ -75,7 +78,6 @@ def _tools_for_request(tools, current_candidate):
     if current_candidate is not None:
         return tools
     return [tool for tool in tools if tool.get("name") not in PATCH_WORKFLOW_TOOL_NAMES]
-
 
 
 def _launch_verifier_output(evaluation, payload):
@@ -206,17 +208,6 @@ def _json_value(value):
     return value
 
 
-def _anthropic_response_tool(response_format):
-    return {
-        "name": "submit_response",
-        "description": (
-            "Submit the final response after using launch_verifier as needed. "
-            "The submitted value must exactly match this response schema."
-        ),
-        "input_schema": response_format["schema"],
-    }
-
-
 class PtxPatchWorkspace:
     def __init__(self, candidate):
         self.candidate = candidate
@@ -297,7 +288,6 @@ def request_anthropic_json(
     messages = [{"role": "user", "content": prompt}]
     anthropic_tools = [
         *available_tools,
-        _anthropic_response_tool(response_format),
         ANTHROPIC_CODE_EXECUTION_TOOL,
     ]
     container = {
@@ -311,18 +301,28 @@ def request_anthropic_json(
         ]
     }
     total_cost = None
+    continuation_count = 0
 
     while True:
+        request_arguments = {
+            "model": model,
+            "max_tokens": ANTHROPIC_MAX_TOKENS,
+            "system": (
+                system_prompt() if system_instruction is None else system_instruction
+            ),
+            "messages": messages,
+            "tools": anthropic_tools,
+            "container": container,
+            "betas": [ANTHROPIC_SKILLS_BETA],
+            "output_config": {
+                "format": {
+                    "type": "json_schema",
+                    "schema": transform_schema(response_format["schema"]),
+                }
+            },
+        }
         response = client.beta.messages.create(
-            model=model,
-            max_tokens=ANTHROPIC_MAX_TOKENS,
-            system=system_prompt()
-            if system_instruction is None
-            else system_instruction,
-            messages=messages,
-            tools=anthropic_tools,
-            container=container,
-            betas=[ANTHROPIC_SKILLS_BETA],
+            **request_arguments,
         )
         cost = _append_response_cost(
             model=model,
@@ -338,27 +338,7 @@ def request_anthropic_json(
             for block in response.content
             if _get_field(block, "type") == "tool_use"
         ]
-        submitted_response = next(
-            (
-                tool_use
-                for tool_use in tool_uses
-                if _get_field(tool_use, "name") == "submit_response"
-            ),
-            None,
-        )
-        if submitted_response is not None:
-            response_text = json.dumps(_get_field(submitted_response, "input"))
-            if cost_log_path is not None:
-                _append_pipeline_cost(
-                    pipeline=pipeline or "unnamed",
-                    cost=total_cost,
-                    cost_log_path=cost_log_path,
-                )
-            return (
-                _AnthropicResponse(response_text, response.usage, response),
-                total_cost,
-                workspace.candidate if workspace is not None else None,
-            )
+        stop_reason = _get_field(response, "stop_reason")
         if _get_field(response, "stop_reason") == "pause_turn":
             container_id = _get_field(_get_field(response, "container"), "id")
             if isinstance(container_id, str):
@@ -370,10 +350,63 @@ def request_anthropic_json(
                 }
             )
             continue
+        if stop_reason == "max_tokens" and not tool_uses:
+            if continuation_count == ANTHROPIC_MAX_CONTINUATIONS:
+                raise ValueError(
+                    "Anthropic exhausted its output-token budget before returning "
+                    f"a structured response after {continuation_count} continuation "
+                    "requests."
+                )
+            continuation_count += 1
+            container_id = _get_field(_get_field(response, "container"), "id")
+            if isinstance(container_id, str):
+                container["id"] = container_id
+            print(
+                "=== Anthropic reached its output-token limit; continuing "
+                f"({continuation_count}/{ANTHROPIC_MAX_CONTINUATIONS}) ===",
+                flush=True,
+            )
+            messages.extend(
+                [
+                    {
+                        "role": "assistant",
+                        "content": [_json_value(block) for block in response.content],
+                    },
+                    {
+                        "role": "user",
+                        "content": (
+                            "Continue from the previous response. Use tools as needed, "
+                            "then return the complete required structured response. Do "
+                            "not repeat completed work."
+                        ),
+                    },
+                ]
+            )
+            continue
         if not tool_uses:
+            response_text = "".join(
+                _get_field(block, "text")
+                for block in response.content
+                if _get_field(block, "type") == "text"
+                and isinstance(_get_field(block, "text"), str)
+            )
+            if response_text:
+                if cost_log_path is not None:
+                    _append_pipeline_cost(
+                        pipeline=pipeline or "unnamed",
+                        cost=total_cost,
+                        cost_log_path=cost_log_path,
+                    )
+                return (
+                    _AnthropicResponse(response_text, response.usage, response),
+                    total_cost,
+                    workspace.candidate if workspace is not None else None,
+                )
+            content_types = [_get_field(block, "type") for block in response.content]
             raise ValueError(
-                "Anthropic response did not call submit_response with the "
-                "required structured output."
+                "Anthropic response contained neither a tool call nor a structured "
+                f"text response (stop_reason={_get_field(response, 'stop_reason')!r}, "
+                f"content_types={content_types!r})."
             )
 
         tool_results = []

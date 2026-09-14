@@ -6,7 +6,6 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Mapping
 
-
 PriceTable = Mapping[str, Mapping[str, float]]
 
 _PRICING_PER_1M_TOKENS = {
@@ -53,6 +52,60 @@ _PRICING_PER_1M_TOKENS = {
     "claude-opus-4": {"input": 15.00, "output": 75.00},
     "claude-sonnet-4": {"input": 3.00, "output": 15.00},
     "claude-fable-5": {"input": 10.00, "output": 50.00},
+    "claude-fable-5-1": {
+        "input": 10.00,
+        "cached_input": 0.25,
+        "cache_write": 12.50,
+        "output": 50.00,
+    },
+    "claude-opus-5": {
+        "input": 5.00,
+        "cached_input": 0.50,
+        "cache_write": 6.25,
+        "output": 25.00,
+    },
+    "claude-opus-4-7": {
+        "input": 5.00,
+        "cached_input": 0.50,
+        "cache_write": 6.25,
+        "output": 25.00,
+    },
+    "claude-opus-4-6": {
+        "input": 5.00,
+        "cached_input": 0.50,
+        "cache_write": 6.25,
+        "output": 25.00,
+    },
+    "claude-opus-4-5": {
+        "input": 5.00,
+        "cached_input": 0.50,
+        "cache_write": 6.25,
+        "output": 25.00,
+    },
+    "claude-sonnet-5": {
+        "input": 2.00,
+        "cached_input": 0.20,
+        "cache_write": 2.50,
+        "output": 10.00,
+    },
+    "claude-sonnet-4-6": {
+        "input": 3.00,
+        "cached_input": 0.30,
+        "cache_write": 3.75,
+        "output": 15.00,
+    },
+    "claude-sonnet-4-5": {
+        "input": 3.00,
+        "cached_input": 0.30,
+        "cache_write": 3.75,
+        "output": 15.00,
+    },
+    "claude-haiku-4-5-20251001": {
+        "input": 1.00,
+        "cached_input": 0.10,
+        "cache_write": 1.25,
+        "output": 5.00,
+    },
     "qwen/qwen3-coder": {"input": 0.22, "output": 1.80},
     "deepseek/deepseek-v4-pro": {
         "input": 0.435,
@@ -140,16 +193,16 @@ def estimate_response_cost(response, model):
     output_tokens = _get_nested_int(usage, "output_tokens") or _get_nested_int(
         usage, "completion_tokens"
     )
-    cached_input_tokens = _get_nested_int(
-        usage, "input_tokens_details", "cached_tokens"
-    ) or _get_nested_int(
-        usage, "prompt_tokens_details", "cached_tokens"
-    ) or _get_nested_int(usage, "cache_read_input_tokens")
-    cache_write_tokens = _get_nested_int(
-        usage, "input_tokens_details", "cache_write_tokens"
-    ) or _get_nested_int(
-        usage, "prompt_tokens_details", "cache_write_tokens"
-    ) or _get_nested_int(usage, "cache_creation_input_tokens")
+    cached_input_tokens = (
+        _get_nested_int(usage, "input_tokens_details", "cached_tokens")
+        or _get_nested_int(usage, "prompt_tokens_details", "cached_tokens")
+        or _get_nested_int(usage, "cache_read_input_tokens")
+    )
+    cache_write_tokens = (
+        _get_nested_int(usage, "input_tokens_details", "cache_write_tokens")
+        or _get_nested_int(usage, "prompt_tokens_details", "cache_write_tokens")
+        or _get_nested_int(usage, "cache_creation_input_tokens")
+    )
     token_counts = {
         "input_tokens": input_tokens,
         "cached_input_tokens": cached_input_tokens,

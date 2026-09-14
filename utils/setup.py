@@ -2,6 +2,8 @@ import json
 import re
 from pathlib import Path
 
+from anthropic import transform_schema
+
 from prompts import build_prompt_sections_for_operator
 from triton_ptx import (
     dump_kernel_ptx,
@@ -120,14 +122,15 @@ def build_anthropic_tools():
         {
             "name": tool["name"],
             "description": tool["description"],
-            "input_schema": tool["parameters"],
+            "input_schema": transform_schema(tool["parameters"]),
+            "strict": True,
         }
         for tool in build_openai_tools()
         if tool["type"] == "function"
     ]
 
 
-def build_prompt_sections(kernel_name, kernel=None, *, enable_web_search=True):
+def build_prompt_sections(kernel_name, kernel=None):
     kernel = resolve_kernel(kernel_name)() if kernel is None else kernel
     version, target, address_size = get_ptx_system_config()
     signature = parse_ptx_signature(dump_kernel_ptx(kernel))
@@ -137,7 +140,6 @@ def build_prompt_sections(kernel_name, kernel=None, *, enable_web_search=True):
         target=target,
         address_size=address_size,
         ptx_signature=signature,
-        enable_web_search=enable_web_search,
     )
 
 
