@@ -22,10 +22,29 @@ TOKEN_EXPANSION_PLOT_BASENAME = "ptx_token_expansion_factors"
 GEMM_LLM_FRONTIER_PLOT_BASENAME = "gemm_llm_cost_frontiers"
 GEMM_GPU_TYPE = "NVIDIA L40S"
 GEMM_COST_LIMIT_USD = 15.0
-GEMM_FAILED_MODEL_LABELS = {"gpt-5.6-luna": "gpt-5.6-luna (failed)"}
-LEGACY_L40S_GEMM_MODELS = {"gpt-5.6-sol"}
-GRID_MODEL_PREFIX = "gpt-6"
+# Restrict this set of figures to GPT-6 experiment traces.
+MODEL_PREFIXES = ("gpt-6",)
+GEMM_FAILED_MODELS_BY_PROVIDER = {
+    "OpenAI LLMs": ("gpt-5.6-luna",),
+    "Anthropic LLMs": (
+        "claude-haiku-4-5-20251001",
+        "claude-opus-5",
+    ),
+}
+# These historical GEMM traces predate persisted GPU metadata, but were all
+# collected on the L40S used for the GEMM frontier.
+LEGACY_L40S_GEMM_MODELS = {
+    "gpt-5.6-sol",
+    "claude-fable-5-1",
+    "claude-fable-5",
+    "claude-sonnet-5",
+}
 CORRECTION_FACTOR_FILENAME = "correction factor.txt"
+PENDING_SPEEDUP_EVENTS_FILENAMES = (
+    "events_speedup_vs_triton_pending.json",
+    # Retain compatibility with traces created under the historical filename.
+    "events_speedup_vst_triton_pending.json",
+)
 PLOT_FORMATS = ("jpeg", "pdf")
 GRID_ROWS = 3
 GRID_COLUMNS = 4
@@ -101,6 +120,10 @@ def _model_from_run_directory(run_directory):
     return REASONING_EFFORT_PATTERN.sub("", name_parts[2])
 
 
+def _is_included_run(run_directory):
+    return _model_from_run_directory(run_directory).startswith(MODEL_PREFIXES)
+
+
 def _provider_group(provider, model):
     provider = provider.lower() if isinstance(provider, str) else ""
     model = model.lower()
@@ -113,7 +136,10 @@ def _provider_group(provider, model):
 
 def _is_gemm_kernel(kernel_name):
     normalized_name = kernel_name.lower()
-    return "gemm" in normalized_name or "matrixmultiplication" in normalized_name
+    # The LLM frontier compares the common base GEMM workload.  In particular,
+    # do not combine it with fused GEMM operators (for example, GEMM + GELU),
+    # which have a different Triton baseline and cannot share a frontier.
+    return "matrixmultiplication" in normalized_name
 
 
 def _is_gemm_gpu(gpu_type):
@@ -127,16 +153,6 @@ def _is_l40s_gemm_point(point):
     return (
         point["gpu_type"] == "Unknown GPU" and point["model"] in LEGACY_L40S_GEMM_MODELS
     )
-
-
-def _grid_gpu_type(point):
-    if (
-        point["gpu_type"] == "Unknown GPU"
-        and point["model"].startswith(GRID_MODEL_PREFIX)
-        and _is_gemm_kernel(str(point["kernel"]))
-    ):
-        return GEMM_GPU_TYPE
-    return point["gpu_type"]
 
 
 def _correction_factor(run_directory):
@@ -174,6 +190,19 @@ def _gpu_type(data):
     hardware = summary.get("hardware") if isinstance(summary, dict) else None
     display_name = hardware.get("display_name") if isinstance(hardware, dict) else None
     return display_name if isinstance(display_name, str) else None
+
+
+def _pending_events_gpu_type(data):
+    """Return the GPU recorded with an in-progress run's trace events."""
+    if not isinstance(data, list):
+        return None
+    for event in data:
+        if not isinstance(event, dict):
+            continue
+        gpu_type = _gpu_type(event)
+        if gpu_type is not None:
+            return gpu_type
+    return None
 
 
 def _add_prior_run_costs(
@@ -217,6 +246,7 @@ def load_accepted_kernels(trace_directory):
     accepted_kernels = []
     run_costs = defaultdict(float)
     gpu_types_by_run = {}
+    pending_gpu_types_by_run = {}
     providers_by_run = {}
     for json_path in trace_directory.rglob("*.json"):
         relative_path = json_path.relative_to(trace_directory)
@@ -226,10 +256,17 @@ def load_accepted_kernels(trace_directory):
         except (json.JSONDecodeError, OSError) as error:
             LOGGER.warning("Skipping unreadable JSON %s: %s", json_path, error)
             continue
+        run_directory = _run_directory(relative_path)
+        if not _is_included_run(run_directory):
+            continue
+        if json_path.name in PENDING_SPEEDUP_EVENTS_FILENAMES:
+            gpu_type = _pending_events_gpu_type(data)
+            if gpu_type is not None:
+                pending_gpu_types_by_run[run_directory] = gpu_type
+            continue
         if not isinstance(data, dict):
             continue
 
-        run_directory = _run_directory(relative_path)
         gpu_type = _gpu_type(data)
         if gpu_type is not None:
             gpu_types_by_run[run_directory] = gpu_type
@@ -263,6 +300,8 @@ def load_accepted_kernels(trace_directory):
                 "model": _model_from_run_directory(run_directory),
             }
         )
+    for run_directory, gpu_type in pending_gpu_types_by_run.items():
+        gpu_types_by_run.setdefault(run_directory, gpu_type)
     models_by_run = {
         run_directory: _model_from_run_directory(run_directory)
         for _, run_directory in run_costs
@@ -336,6 +375,7 @@ def _token_count(text):
 
 def load_gpu_types_by_run(trace_directory):
     gpu_types_by_run = {}
+    pending_gpu_types_by_run = {}
     for json_path in trace_directory.rglob("*.json"):
         relative_path = json_path.relative_to(trace_directory)
         try:
@@ -344,11 +384,19 @@ def load_gpu_types_by_run(trace_directory):
         except (json.JSONDecodeError, OSError) as error:
             LOGGER.warning("Skipping unreadable JSON %s: %s", json_path, error)
             continue
+        run_directory = _run_directory(relative_path)
+        if json_path.name in PENDING_SPEEDUP_EVENTS_FILENAMES:
+            gpu_type = _pending_events_gpu_type(data)
+            if gpu_type is not None:
+                pending_gpu_types_by_run[run_directory] = gpu_type
+            continue
         if not isinstance(data, dict):
             continue
         gpu_type = _gpu_type(data)
         if gpu_type is not None:
-            gpu_types_by_run[_run_directory(relative_path)] = gpu_type
+            gpu_types_by_run[run_directory] = gpu_type
+    for run_directory, gpu_type in pending_gpu_types_by_run.items():
+        gpu_types_by_run.setdefault(run_directory, gpu_type)
     return gpu_types_by_run
 
 
@@ -388,6 +436,8 @@ def load_token_expansion_data(trace_directory):
     for ptx_path in sorted(trace_directory.rglob("triton_generated.ptx")):
         relative_path = ptx_path.relative_to(trace_directory)
         run_directory = _run_directory(relative_path)
+        if not _is_included_run(run_directory):
+            continue
         kernel_name = _kernel_name_from_path(trace_directory, run_directory)
         if "Float16" not in kernel_name:
             continue
@@ -463,10 +513,8 @@ def _save_figure(figure, output_directory, basename):
 def write_frontier_grid(output_directory, accepted_kernels):
     kernels = defaultdict(lambda: defaultdict(list))
     for point in accepted_kernels:
-        if not point["model"].startswith(GRID_MODEL_PREFIX):
-            continue
         kernel_name = _display_kernel_name(str(point["kernel"]))
-        series = (_grid_gpu_type(point), point["precision"])
+        series = (point["gpu_type"], point["precision"])
         kernels[kernel_name][series].append(point)
     kernel_names = sorted(kernels)
     if len(kernel_names) > GRID_SIZE:
@@ -536,9 +584,10 @@ def write_gemm_llm_frontier(output_directory, accepted_kernels):
         axis.set_xlim(0.0, GEMM_COST_LIMIT_USD)
         for endpoint in endpoints:
             _extend_frontier(axis, endpoint)
-        if models or provider_group == "OpenAI LLMs":
+        failed_models = GEMM_FAILED_MODELS_BY_PROVIDER.get(provider_group, ())
+        if models or failed_models:
             legend_handles, legend_labels = axis.get_legend_handles_labels()
-            if provider_group == "OpenAI LLMs":
+            for failed_model in failed_models:
                 legend_handles.append(
                     Line2D(
                         [],
@@ -549,7 +598,7 @@ def write_gemm_llm_frontier(output_directory, accepted_kernels):
                         markersize=8,
                     )
                 )
-                legend_labels.append(GEMM_FAILED_MODEL_LABELS["gpt-5.6-luna"])
+                legend_labels.append(f"{failed_model} (failed)")
             axis.legend(legend_handles, legend_labels, fontsize=12)
         else:
             axis.text(
