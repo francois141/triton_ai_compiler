@@ -120,8 +120,10 @@ def _model_from_run_directory(run_directory):
     return REASONING_EFFORT_PATTERN.sub("", name_parts[2])
 
 
-def _is_included_run(run_directory):
-    return _model_from_run_directory(run_directory).startswith(MODEL_PREFIXES)
+def _is_included_run(run_directory, model_prefixes):
+    return model_prefixes is None or _model_from_run_directory(run_directory).startswith(
+        model_prefixes
+    )
 
 
 def _provider_group(provider, model):
@@ -242,7 +244,7 @@ def _add_prior_run_costs(
             prior_cost += costs_by_run[run_directory]
 
 
-def load_accepted_kernels(trace_directory):
+def load_accepted_kernels(trace_directory, model_prefixes=MODEL_PREFIXES):
     accepted_kernels = []
     run_costs = defaultdict(float)
     gpu_types_by_run = {}
@@ -257,7 +259,7 @@ def load_accepted_kernels(trace_directory):
             LOGGER.warning("Skipping unreadable JSON %s: %s", json_path, error)
             continue
         run_directory = _run_directory(relative_path)
-        if not _is_included_run(run_directory):
+        if not _is_included_run(run_directory, model_prefixes):
             continue
         if json_path.name in PENDING_SPEEDUP_EVENTS_FILENAMES:
             gpu_type = _pending_events_gpu_type(data)
@@ -436,7 +438,7 @@ def load_token_expansion_data(trace_directory):
     for ptx_path in sorted(trace_directory.rglob("triton_generated.ptx")):
         relative_path = ptx_path.relative_to(trace_directory)
         run_directory = _run_directory(relative_path)
-        if not _is_included_run(run_directory):
+        if not _is_included_run(run_directory, MODEL_PREFIXES):
             continue
         kernel_name = _kernel_name_from_path(trace_directory, run_directory)
         if "Float16" not in kernel_name:
@@ -714,13 +716,14 @@ def main():
     accepted_kernels = load_accepted_kernels(trace_directory)
     if not accepted_kernels:
         raise RuntimeError("No accepted kernels with run_cost_usd_so_far were found.")
+    all_accepted_kernels = load_accepted_kernels(trace_directory, model_prefixes=None)
 
     output_directory = arguments.output_directory.resolve()
     output_directory.mkdir(parents=True, exist_ok=True)
     grid_paths = write_frontier_grid(output_directory, accepted_kernels)
     gemm_llm_frontier_paths = write_gemm_llm_frontier(
         output_directory,
-        accepted_kernels,
+        all_accepted_kernels,
     )
     token_expansion_data = load_token_expansion_data(trace_directory)
     if not token_expansion_data:
