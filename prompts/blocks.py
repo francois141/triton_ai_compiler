@@ -83,20 +83,27 @@ one to three evidence-based improvements for an already verified PTX kernel.
 Do not generate PTX, invoke candidate-verification tools, or propose changes
 outside the supplied kernel and launch contract.
 
-Use the bundled `ncu-report-skill` as the complete Nsight Compute diagnosis
-reference. Ground every conclusion in metrics or derived ratios present in the
-supplied report. Treat omitted metrics as zero and do not infer unavailable
-measurements.
+When usable Nsight Compute metrics are supplied, use the bundled
+`ncu-report-skill` as the diagnosis reference and ground bottleneck conclusions
+in metrics or derived ratios present in the report. Do not infer unavailable
+measurements or treat missing metrics as measured zeros.
+
+When usable NCU metrics are unavailable, plan from the supplied source, PTX,
+launch configuration, target architecture, and available benchmark results.
+Do not require NCU, request profiling, or use the NCU diagnosis skill. Label
+suspected performance issues as hypotheses and cite concrete code observations
+or available measurements. Propose changes that can be validated by correctness
+checks and timing benchmarks without NCU.
 
 For each proposed improvement:
 
-1. Identify one distinct measurable bottleneck.
-2. Cite the exact supporting metric or derived ratio.
+1. Identify one distinct bottleneck or, without NCU, suspected performance issue.
+2. Cite the supporting metric, derived ratio, or, without NCU, code observation.
 3. Specify one concrete PTX-level change that addresses that bottleneck.
 4. State the expected effect without claiming an unmeasured speedup.
 
 Prioritize ideas by likely impact. Do not invent micro-optimizations merely to
-reach three ideas; return fewer when the report does not support another
+reach three ideas; return fewer when the available evidence does not support another
 distinct change. Preserve correctness, the PTX signature, and launch contract.
 """.strip()
 

@@ -159,16 +159,6 @@ def _record_unsuccessful_optimization(evaluation, idea):
     register_evaluated_candidate(evaluation, annotated_candidate)
 
 
-def _require_ncu_report(evaluation):
-    ncu_report = evaluation.ncu_report
-    if ncu_report.get("available") and ncu_report.get("metrics"):
-        return
-    raise RuntimeError(
-        "The improvement planner requires kernel-wide Nsight Compute metrics. "
-        f"NCU error: {ncu_report.get('error', '')}"
-    )
-
-
 def _budget_exhausted(trace_path, max_budget_usd):
     return (
         max_budget_usd is not None
@@ -701,20 +691,10 @@ def run_agent_loop(
         if not best_evaluation.passed:
             raise RuntimeError("Initial candidate must compile and pass verification.")
 
-        if not disable_ncu_report:
-            _require_ncu_report(best_evaluation)
-
-        if disable_ncu_report and max_tool_rounds:
-            print(
-                "=== Skipping improvement rounds because NCU reporting is disabled ===",
-                flush=True,
-            )
-
-        for round_index in range(1, 1 if disable_ncu_report else max_tool_rounds + 1):
+        for round_index in range(1, max_tool_rounds + 1):
             if _budget_exhausted(trace_path, max_budget_usd):
                 _print_budget_exhausted(trace_path, max_budget_usd)
                 break
-            _require_ncu_report(best_evaluation)
             print(
                 f"=== TTS round {round_index}/{max_tool_rounds}: planning one to "
                 "three ordered improvements ===",
@@ -891,7 +871,7 @@ def parse_args():
     parser.add_argument(
         "--disable-ncu-report",
         action="store_true",
-        help="Do not run Nsight Compute profiling; improvement rounds are skipped.",
+        help="Plan improvements without Nsight Compute profiling.",
     )
     parser.add_argument(
         "--disable-sanitizer",

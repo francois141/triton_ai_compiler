@@ -135,10 +135,13 @@ OPENAI_API_KEY=fake OPENAI_BASE_URL=http://127.0.0.1:8000/v1 \
   --model fake-ptx --max-tool-rounds 0
 ```
 
-Improvement planning always uses the current Nsight Compute report. Set
-`NCU_PATH`; the run stops with an error if NCU does not produce a usable report.
-Plans use the full bundled NCU report skill and must cite only metrics present
-in the current report.
+Improvement planning uses the current Nsight Compute report when available.
+Set `NCU_PATH` to enable profiling. When usable NCU metrics are unavailable,
+planning falls back to one to three ideas based on the current kernel source,
+PTX, launch configuration, and benchmark results. These ideas label suspected
+bottlenecks as hypotheses and require only correctness checks and timing
+benchmarks. NCU-backed plans use the bundled NCU report skill and cite only
+metrics present in the current report.
 
 Each run creates a timestamped directory under `output_traces/`, containing
 prompts, model responses, evaluated candidate JSON and PTX artifacts, and the
@@ -160,8 +163,8 @@ Messages API's standard tool-use flow.
 
 Use `--disable-ncu-skill`, `--disable-ptx-skill`, `--disable-ncu-report`, or
 `--disable-sanitizer` to selectively omit the corresponding uploaded skill or
-local validation step. Disabling the NCU report also skips NCU-backed
-improvement rounds.
+local validation step. Disabling the NCU report uses the same improvement
+planning fallback without profiling.
 
 ## Utilities
 

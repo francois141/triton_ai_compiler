@@ -31,6 +31,10 @@ def _improvement_context(prompt_sections):
 
 
 def _annotated_evaluation_summary(evaluation):
+    if not (
+        evaluation.ncu_report.get("available") and evaluation.ncu_report.get("metrics")
+    ):
+        return evaluation_summary(evaluation, include_ptx=True)
     summary = evaluation_summary(
         evaluation,
         include_ptx=False,
@@ -64,6 +68,37 @@ def _annotated_evaluation_summary(evaluation):
 
 
 def build_improvement_prompt(prompt_sections, best_evaluation):
+    if not (
+        best_evaluation.ncu_report.get("available")
+        and best_evaluation.ncu_report.get("metrics")
+    ):
+        return f"""
+## Kernel Source, Constexpr Values, And Launch Contract
+
+{_improvement_context(prompt_sections)}
+
+## Current Best Verified Candidate
+
+{_annotated_evaluation_summary(best_evaluation)}
+
+## Planning Task Without Nsight Compute
+
+Usable NCU metrics are unavailable. Do not require NCU, request profiling,
+or use the NCU diagnosis skill. Use the supplied kernel source, current PTX,
+launch configuration, target architecture, and available benchmark results.
+
+Return one to three specific, ordered ideas to improve the current kernel.
+For each idea, identify the suspected issue and cite the code or available
+measurement motivating it. Prescribe one concrete PTX-level change, explain
+why it could help, and list concrete variants to explore when useful.
+Distinguish code observations from performance hypotheses; do not invent
+profiler metrics, claim a measured bottleneck, or promise an unmeasured speedup.
+Rank ideas by likely benefit and explain the reasoning. Do not add weak ideas
+just to reach three. Avoid changes recorded in `// Tried optimization:` comments.
+Preserve correctness, the PTX signature, and the launch contract. Each idea
+must be verifiable with the existing correctness checks and timing benchmarks,
+without NCU. Use the required improvement-plan response schema.
+""".strip()
     research_context = prompt_sections["float16_gemm_research"]
     research_constraint = ""
     if research_context:
