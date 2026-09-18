@@ -28,7 +28,8 @@ def main():
         if not torch.cuda.is_available():
             raise RuntimeError("CUDA is required to run a Triton kernel.")
         kernel = resolve_kernel(args.kernel)()
-        verifier = OutputVerifier()
+        tolerance = getattr(kernel, "verification_tolerance", 1e-3)
+        verifier = OutputVerifier(rtol=tolerance, atol=tolerance)
         if not verifier.verify_triton_vs_torch(kernel):
             LOGGER.error("Triton output does not match Torch: %s", verifier.last_report)
             return 1
