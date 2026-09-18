@@ -12,6 +12,7 @@ from .blocks import (
     constexpr_values_block,
     convolution_2d_float16_rules,
     correctness_rules,
+    dynamic_shared_memory_allocation,
     flash_attention_float16_rules,
     float16_gemm_research_rules,
     initial_task,
@@ -27,6 +28,7 @@ INITIAL_PROMPT_SECTION_NAMES = (
     "initial_task",
     "constexpr_values",
     "launch_configuration",
+    "dynamic_shared_memory",
     "ptx_entry_template",
     "shape_information",
     "correctness_rules",
@@ -43,6 +45,7 @@ ANTHROPIC_INITIAL_PROMPT_SECTION_NAMES = (
     "initial_task",
     "constexpr_values",
     "launch_configuration",
+    "dynamic_shared_memory",
     "ptx_entry_template",
     "shape_information",
     "correctness_rules",
@@ -53,6 +56,7 @@ ANTHROPIC_INITIAL_PROMPT_SECTION_NAMES = (
 IMPROVEMENT_CONTEXT_SECTION_NAMES = (
     "constexpr_values",
     "launch_configuration",
+    "dynamic_shared_memory",
     "shape_information",
     "performance_rules",
     "flash_attention",
@@ -65,7 +69,7 @@ IMPROVEMENT_CONTEXT_SECTION_NAMES = (
 def initial_prompt_section_names(provider):
     if provider == "anthropic":
         return ANTHROPIC_INITIAL_PROMPT_SECTION_NAMES
-    if provider == "openai":
+    if provider in {"openai", "openrouter"}:
         return INITIAL_PROMPT_SECTION_NAMES
     raise ValueError(f"Unsupported provider: {provider}")
 
@@ -110,7 +114,7 @@ def build_prompt_sections(
     enable_web_search=True,
     shared_memory_bytes=None,
 ):
-    if provider not in {"anthropic", "openai"}:
+    if provider not in {"anthropic", "openai", "openrouter"}:
         raise ValueError(f"Unsupported provider: {provider}")
     is_anthropic = provider == "anthropic"
     return {
@@ -119,6 +123,7 @@ def build_prompt_sections(
         ),
         "constexpr_values": constexpr_values_block(spec),
         "launch_configuration": launch_configuration_block(spec.num_warps),
+        "dynamic_shared_memory": dynamic_shared_memory_allocation(shared_memory_bytes),
         "ptx_entry_template": (
             anthropic_signature_template if is_anthropic else signature_template
         )(
@@ -210,11 +215,7 @@ def build_prompt_for_operator(
         include_flash_attention=_is_flash_attention_float16_operator(operator),
         include_convolution_memory_layout=_is_convolution_2d_float16_operator(operator),
         provider=provider,
-        shared_memory_bytes=(
-            get_kernel_shared_memory_bytes(operator)
-            if include_float16_gemm_research
-            else None
-        ),
+        shared_memory_bytes=get_kernel_shared_memory_bytes(operator),
     )
 
 
@@ -241,9 +242,5 @@ def build_prompt_sections_for_operator(
         include_convolution_memory_layout=_is_convolution_2d_float16_operator(operator),
         provider=provider,
         enable_web_search=enable_web_search,
-        shared_memory_bytes=(
-            get_kernel_shared_memory_bytes(operator)
-            if include_float16_gemm_research
-            else None
-        ),
+        shared_memory_bytes=get_kernel_shared_memory_bytes(operator),
     )

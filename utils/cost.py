@@ -187,6 +187,17 @@ def estimate_response_cost(response, model):
             "output_tokens": 0,
         }
 
+    reported_cost = _get_nested_value(usage, "cost")
+    if isinstance(reported_cost, (int, float)) and not isinstance(reported_cost, bool):
+        return float(reported_cost), {
+            "input_tokens": _get_nested_int(usage, "input_tokens")
+            or _get_nested_int(usage, "prompt_tokens"),
+            "cached_input_tokens": 0,
+            "cache_write_tokens": 0,
+            "output_tokens": _get_nested_int(usage, "output_tokens")
+            or _get_nested_int(usage, "completion_tokens"),
+        }
+
     input_tokens = _get_nested_int(usage, "input_tokens") or _get_nested_int(
         usage, "prompt_tokens"
     )
@@ -221,6 +232,15 @@ def estimate_response_cost(response, model):
     if token_cost is None:
         return None, token_counts
     return token_cost, token_counts
+
+
+def _get_nested_value(value, *keys):
+    for key in keys:
+        if isinstance(value, dict):
+            value = value.get(key)
+        else:
+            value = getattr(value, key, None)
+    return value
 
 
 def read_daily_total(cost_log_path, date_text):

@@ -130,6 +130,73 @@ def build_anthropic_tools():
     ]
 
 
+def build_openrouter_tools(*, enable_ptx_skill=True, enable_ncu_skill=True):
+    """Build OpenRouter's Chat Completions function-tool schema."""
+    tools = [
+        {
+            "type": "function",
+            "function": {key: value for key, value in tool.items() if key != "type"},
+        }
+        for tool in build_openai_tools()
+        if tool["type"] == "function"
+    ]
+    skill_names = []
+    if enable_ptx_skill:
+        skill_names.append("ptx")
+    if enable_ncu_skill:
+        skill_names.append("ncu")
+    if skill_names:
+        tools.extend(
+            [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "list_skill_files",
+                        "description": (
+                            "List the bundled local reference files for the requested "
+                            "skill. Use it to find PTX ISA or Nsight Compute guidance."
+                        ),
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "skill": {
+                                    "type": "string",
+                                    "enum": skill_names,
+                                },
+                                "path_prefix": {"type": "string"},
+                            },
+                            "required": ["skill"],
+                            "additionalProperties": False,
+                        },
+                    },
+                },
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "read_skill_file",
+                        "description": (
+                            "Read one bundled local PTX ISA or Nsight Compute "
+                            "reference file returned by list_skill_files."
+                        ),
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "skill": {
+                                    "type": "string",
+                                    "enum": skill_names,
+                                },
+                                "path": {"type": "string", "minLength": 1},
+                            },
+                            "required": ["skill", "path"],
+                            "additionalProperties": False,
+                        },
+                    },
+                },
+            ]
+        )
+    return tools
+
+
 def build_prompt_sections(kernel_name, kernel=None, *, provider="openai"):
     kernel = resolve_kernel(kernel_name)() if kernel is None else kernel
     version, target, address_size = get_ptx_system_config()

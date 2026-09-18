@@ -9,6 +9,7 @@ from pathlib import Path
 from anthropic import transform_schema
 
 from prompts.blocks import anthropic_system_prompt, system_prompt
+from skills.load_ptx import NCU_REPORT_SKILL_DIR, PTX_SKILL_DIR
 from triton_ptx import Payload, TritonPTXCandidateEvaluator, resolve_kernel
 
 from .cost import (
@@ -97,7 +98,12 @@ def _get_field(value, field_name):
 def _tools_for_request(tools, current_candidate):
     if current_candidate is not None:
         return tools
-    return [tool for tool in tools if tool.get("name") not in PATCH_WORKFLOW_TOOL_NAMES]
+    return [
+        tool
+        for tool in tools
+        if (tool.get("name") or tool.get("function", {}).get("name"))
+        not in PATCH_WORKFLOW_TOOL_NAMES
+    ]
 
 
 def _launch_verifier_output(evaluation, payload):
@@ -218,6 +224,70 @@ class _AnthropicResponse:
             "output_text": self.output_text,
             "response": _json_value(self.response),
         }
+
+
+@dataclass(slots=True)
+class _OpenRouterResponse:
+    output_text: str
+    usage: object
+    response: object
+
+    def model_dump(self, mode="json"):
+        del mode
+        return {
+            "provider": "openrouter",
+            "output_text": self.output_text,
+            "response": _json_value(self.response),
+        }
+
+
+@dataclass(slots=True)
+class _OpenRouterStreamFunction:
+    name: str
+    arguments: str
+
+
+@dataclass(slots=True)
+class _OpenRouterStreamToolCall:
+    id: str
+    function: _OpenRouterStreamFunction
+
+
+@dataclass(slots=True)
+class _OpenRouterStreamMessage:
+    content: str | None
+    tool_calls: list[_OpenRouterStreamToolCall]
+    reasoning: str
+
+    def model_dump(self, exclude_none=True):
+        message = {"role": "assistant", "content": self.content}
+        if self.tool_calls:
+            message["tool_calls"] = [
+                {
+                    "id": tool_call.id,
+                    "type": "function",
+                    "function": {
+                        "name": tool_call.function.name,
+                        "arguments": tool_call.function.arguments,
+                    },
+                }
+                for tool_call in self.tool_calls
+            ]
+        if self.reasoning:
+            message["reasoning"] = self.reasoning
+        if exclude_none:
+            return {key: value for key, value in message.items() if value is not None}
+        return message
+
+
+@dataclass(slots=True)
+class _OpenRouterStreamResponse:
+    usage: object
+    message: _OpenRouterStreamMessage
+
+    def model_dump(self, mode="json"):
+        del mode
+        return {"usage": _json_value(self.usage), "message": self.message.model_dump()}
 
 
 def _json_value(value):
@@ -504,6 +574,331 @@ def request_anthropic_json(
                 {"role": "user", "content": tool_results},
             ]
         )
+
+
+_SKILL_DIRECTORIES = {
+    "ptx": PTX_SKILL_DIR,
+    "ncu": NCU_REPORT_SKILL_DIR,
+}
+_MAX_SKILL_FILE_CHARS = 120_000
+
+
+def _skill_path(skill, relative_path):
+    try:
+        skill_directory = _SKILL_DIRECTORIES[skill].resolve()
+    except KeyError as error:
+        raise ValueError(f"Unknown local skill: {skill!r}") from error
+    candidate = (skill_directory / relative_path).resolve()
+    try:
+        candidate.relative_to(skill_directory)
+    except ValueError as error:
+        raise ValueError("Skill paths must stay within the requested skill.") from error
+    if not candidate.is_file():
+        raise FileNotFoundError(f"Skill file not found: {relative_path}")
+    return skill_directory, candidate
+
+
+def _run_openrouter_skill_tool(tool_name, arguments):
+    skill = arguments["skill"]
+    skill_directory = _SKILL_DIRECTORIES.get(skill)
+    if skill_directory is None:
+        raise ValueError(f"Unknown local skill: {skill!r}")
+    skill_directory = skill_directory.resolve()
+    if tool_name == "list_skill_files":
+        prefix = arguments.get("path_prefix", "")
+        if (
+            not isinstance(prefix, str)
+            or Path(prefix).is_absolute()
+            or ".." in Path(prefix).parts
+        ):
+            raise ValueError("path_prefix must be a relative path within the skill.")
+        files = [
+            str(path.relative_to(skill_directory))
+            for path in skill_directory.rglob("*")
+            if path.is_file()
+            and str(path.relative_to(skill_directory)).startswith(prefix)
+        ]
+        return json.dumps({"skill": skill, "files": sorted(files)[:500]})
+    if tool_name == "read_skill_file":
+        _, path = _skill_path(skill, arguments["path"])
+        content = path.read_text(encoding="utf-8")
+        return json.dumps(
+            {
+                "skill": skill,
+                "path": str(path.relative_to(skill_directory)),
+                "content": content[:_MAX_SKILL_FILE_CHARS],
+                "truncated": len(content) > _MAX_SKILL_FILE_CHARS,
+            }
+        )
+    raise RuntimeError(f"Unsupported OpenRouter skill tool: {tool_name}")
+
+
+def _openrouter_response_format(response_format):
+    return {"type": "json_schema", "json_schema": response_format}
+
+
+def _openrouter_assistant_message(message):
+    return message.model_dump(exclude_none=True)
+
+
+def _openrouter_reasoning_text(message):
+    reasoning_parts = []
+    for field_name in ("reasoning", "reasoning_content", "thinking"):
+        value = _get_field(message, field_name)
+        if isinstance(value, str) and value:
+            reasoning_parts.append(value)
+
+    reasoning_details = _get_field(message, "reasoning_details")
+    if not isinstance(reasoning_details, list):
+        return "\n\n".join(reasoning_parts)
+
+    for detail in reasoning_details:
+        text = _get_field(detail, "text")
+        if isinstance(text, str) and text:
+            reasoning_parts.append(text)
+    return "\n\n".join(dict.fromkeys(reasoning_parts))
+
+
+def _record_openrouter_reasoning(message, cost_log_path, *, display=True):
+    reasoning_text = _openrouter_reasoning_text(message)
+    if not reasoning_text:
+        return
+
+    if display:
+        print(
+            f"=== Model thinking ===\n{reasoning_text}\n=== End model thinking ===",
+            flush=True,
+        )
+    if cost_log_path is None:
+        return
+    thinking_log_path = Path(cost_log_path).parent / "thinking.log"
+    with thinking_log_path.open("a", encoding="utf-8") as thinking_log:
+        thinking_log.write(f"{reasoning_text}\n\n")
+
+
+def _stream_openrouter_response(client, **kwargs):
+    stream = client.chat.completions.create(
+        **kwargs,
+        stream=True,
+        stream_options={"include_usage": True},
+    )
+    content_parts = []
+    reasoning_parts = []
+    tool_call_parts = {}
+    usage = None
+    thinking_started = False
+
+    for chunk in stream:
+        chunk_usage = _get_field(chunk, "usage")
+        if chunk_usage is not None:
+            usage = chunk_usage
+        choices = _get_field(chunk, "choices")
+        if not choices:
+            continue
+        delta = _get_field(choices[0], "delta")
+        content = _get_field(delta, "content")
+        if isinstance(content, str):
+            content_parts.append(content)
+
+        reasoning_text = _openrouter_reasoning_text(delta)
+        if reasoning_text:
+            if not thinking_started:
+                print("=== Model thinking ===", flush=True)
+                thinking_started = True
+            print(reasoning_text, end="", flush=True)
+            reasoning_parts.append(reasoning_text)
+
+        for tool_call in _get_field(delta, "tool_calls") or []:
+            index = _get_field(tool_call, "index")
+            if not isinstance(index, int):
+                raise TypeError("OpenRouter returned a tool call without an index.")
+            parts = tool_call_parts.setdefault(
+                index, {"id": "", "name": "", "arguments": ""}
+            )
+            tool_call_id = _get_field(tool_call, "id")
+            if isinstance(tool_call_id, str):
+                parts["id"] = tool_call_id
+            function = _get_field(tool_call, "function")
+            function_name = _get_field(function, "name")
+            if isinstance(function_name, str):
+                parts["name"] += function_name
+            arguments = _get_field(function, "arguments")
+            if isinstance(arguments, str):
+                parts["arguments"] += arguments
+
+    if thinking_started:
+        print("\n=== End model thinking ===", flush=True)
+
+    message = _OpenRouterStreamMessage(
+        content="".join(content_parts) or None,
+        tool_calls=[
+            _OpenRouterStreamToolCall(
+                id=parts["id"],
+                function=_OpenRouterStreamFunction(
+                    name=parts["name"], arguments=parts["arguments"]
+                ),
+            )
+            for _, parts in sorted(tool_call_parts.items())
+        ],
+        reasoning="".join(reasoning_parts),
+    )
+    return message, _OpenRouterStreamResponse(usage=usage, message=message)
+
+
+def request_openrouter_json(
+    client,
+    *,
+    model,
+    prompt,
+    response_format,
+    tools,
+    kernel_name,
+    cost_log_path=None,
+    pipeline=None,
+    current_candidate=None,
+    autotune_metrics=None,
+    system_instruction=None,
+    enable_ncu_report=True,
+    enable_sanitizer=True,
+    max_budget_usd=None,
+):
+    """Run the verifier loop through OpenRouter's Chat Completions API."""
+    verifier = verifier_for_kernel(
+        kernel_name,
+        autotune_metrics,
+        enable_ncu_report=enable_ncu_report,
+        enable_sanitizer=enable_sanitizer,
+    )
+    run_autotune_metrics = (
+        autotune_metrics
+        if autotune_metrics is not None
+        else collect_autotune_metrics(verifier.operator)
+    )
+    workspace = (
+        PtxPatchWorkspace(current_candidate) if current_candidate is not None else None
+    )
+    available_tools = _tools_for_request(tools, current_candidate)
+    instruction = system_prompt() if system_instruction is None else system_instruction
+    enabled_skills = [
+        skill
+        for skill in _SKILL_DIRECTORIES
+        if any(
+            tool.get("function", {}).get("name") == "read_skill_file"
+            and skill in tool["function"]["parameters"]["properties"]["skill"]["enum"]
+            for tool in available_tools
+        )
+    ]
+    if enabled_skills:
+        instruction += (
+            "\n\nBundled local skills are available through list_skill_files and "
+            "read_skill_file. Consult the PTX skill for ISA details and the NCU skill "
+            "for profiling diagnosis when useful."
+        )
+    messages = [
+        {"role": "system", "content": instruction},
+        {"role": "user", "content": prompt},
+    ]
+    total_cost = None
+
+    while True:
+        message, response = _stream_openrouter_response(
+            client,
+            model=model,
+            messages=messages,
+            tools=available_tools,
+            tool_choice="auto",
+            response_format=_openrouter_response_format(response_format),
+        )
+        cost = _append_response_cost(
+            model=model,
+            response=response,
+            cost_log_path=cost_log_path,
+            pipeline=pipeline,
+        )
+        if cost is not None:
+            total_cost = (total_cost or 0) + cost
+        _record_openrouter_reasoning(message, cost_log_path, display=False)
+        tool_calls = message.tool_calls or []
+        if not tool_calls:
+            if not message.content:
+                raise ValueError(
+                    "OpenRouter response contained neither text nor a tool call."
+                )
+            if cost_log_path is not None:
+                _append_pipeline_cost(
+                    pipeline=pipeline or "unnamed",
+                    cost=total_cost,
+                    cost_log_path=cost_log_path,
+                )
+            return (
+                _OpenRouterResponse(message.content, response.usage, response),
+                total_cost,
+                workspace.candidate if workspace is not None else None,
+            )
+
+        messages.append(_openrouter_assistant_message(message))
+        for tool_call in tool_calls:
+            tool_name = tool_call.function.name
+            try:
+                arguments = json.loads(tool_call.function.arguments)
+            except json.JSONDecodeError as error:
+                raise ValueError(
+                    f"OpenRouter tool {tool_name!r} returned invalid JSON arguments."
+                ) from error
+            resulting_payload = None
+            verified_ptx = None
+            speedup_vs_triton = None
+            if tool_name in {"list_skill_files", "read_skill_file"}:
+                output = _run_openrouter_skill_tool(tool_name, arguments)
+            elif tool_name == "launch_verifier":
+                payload = Payload.from_input(arguments)
+                evaluation = verifier.evaluate(payload)
+                output = _launch_verifier_output(evaluation, payload)
+                if evaluation.passed:
+                    resulting_payload = arguments
+                    verified_ptx = arguments["ptx"]
+                    speedup_vs_triton = evaluation.speedup_vs_triton
+            elif tool_name == "apply_ptx_patch" and workspace is not None:
+                try:
+                    output = json.dumps(workspace.apply_patch(arguments))
+                    resulting_payload = workspace.candidate.model_dump(
+                        exclude_none=False
+                    )
+                    verified_ptx = workspace.candidate.ptx
+                except ValueError as error:
+                    output = json.dumps({"error": str(error)})
+            elif tool_name == "verify_current_ptx" and workspace is not None:
+                payload = Payload.from_input(workspace.candidate.model_dump())
+                evaluation = verifier.evaluate(payload)
+                output = _launch_verifier_output(evaluation, payload)
+                verified_ptx = workspace.candidate.ptx
+                resulting_payload = workspace.candidate.model_dump(exclude_none=False)
+                if evaluation.passed:
+                    speedup_vs_triton = evaluation.speedup_vs_triton
+                else:
+                    verified_ptx = None
+            else:
+                raise RuntimeError(f"Unsupported OpenRouter tool call: {tool_name}")
+            print(
+                f"=== LLM called tool: tool={tool_name}, id={tool_call.id} ===",
+                flush=True,
+            )
+            if cost_log_path is not None:
+                record_tool_call(
+                    Path(cost_log_path).parent,
+                    provider="openrouter",
+                    tool_name=tool_name,
+                    call_id=tool_call.id,
+                    answer=output,
+                    resulting_payload=resulting_payload,
+                    verified_ptx=verified_ptx,
+                    speedup_vs_triton=speedup_vs_triton,
+                    autotune_metrics=run_autotune_metrics,
+                )
+            messages.append(
+                {"role": "tool", "tool_call_id": tool_call.id, "content": output}
+            )
+        _raise_if_budget_exhausted(cost_log_path, max_budget_usd)
 
 
 def request_openai_json(

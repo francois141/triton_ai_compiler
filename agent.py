@@ -868,7 +868,7 @@ def parse_args():
     parser.add_argument("--model", help="Model to use; defaults depend on --provider.")
     parser.add_argument(
         "--provider",
-        choices=("openai", "anthropic"),
+        choices=("openai", "anthropic", "openrouter"),
         default="openai",
         help="LLM API provider to use.",
     )
@@ -949,6 +949,7 @@ def main():
         or {
             "openai": "gpt-6-astra",
             "anthropic": "claude-opus-4-8",
+            "openrouter": "google/gemini-3.8-flash",
         }[args.provider]
     )
     print(

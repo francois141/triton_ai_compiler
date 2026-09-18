@@ -1,7 +1,7 @@
 # Triton PTX Client
 
-An OpenAI- and Anthropic-compatible tool-calling agent for optimizing Triton
-kernels as PTX. It compiles,
+An OpenAI-, Anthropic-, and OpenRouter-compatible tool-calling agent for
+optimizing Triton kernels as PTX. It compiles,
 verifies, benchmarks, and records every candidate it evaluates.
 
 ## Setup
@@ -25,6 +25,10 @@ as the `skills/external_skills/ncu-report-skill` submodule and packaged at
 `skills/external_skills/ncu-report-skill.zip`. The Anthropic provider uses
 Anthropic's Skills API and code-execution tool; initialize submodules before
 running the agent.
+
+The OpenRouter harness gives the model on-demand access to the same bundled
+PTX and NCU-reference files through local tools. This makes the skills usable
+with providers that do not implement proprietary skill-upload APIs.
 
 ## Test installation
 
@@ -52,6 +56,29 @@ uv pip install anthropic
 python -m agent MatrixMultiplicationFloat16 \
   --provider anthropic
 ```
+
+Use OpenRouter by setting `OPENROUTER_API_KEY`. Its default model is Gemini
+Flash; select any compatible model with `--model`.
+
+```bash
+OPENROUTER_API_KEY=... .venv/bin/python -m agent MatrixMultiplicationFloat16 \
+  --provider openrouter --model google/gemini-3.8-flash
+```
+
+The following OpenRouter model families are useful alternatives when their
+selected variant supports both tools and structured JSON output:
+
+```bash
+OPENROUTER_API_KEY=... .venv/bin/python -m agent MatrixMultiplicationFloat16 \
+  --provider openrouter --model qwen/qwen3-coder
+OPENROUTER_API_KEY=... .venv/bin/python -m agent MatrixMultiplicationFloat16 \
+  --provider openrouter --model deepseek/deepseek-v3.2
+OPENROUTER_API_KEY=... .venv/bin/python -m agent MatrixMultiplicationFloat16 \
+  --provider openrouter --model meta-llama/llama-3.3-70b-instruct
+```
+
+Check a specific model's `tools` and `response_format` support in the
+[OpenRouter model catalog](https://openrouter.ai/models) before running it.
 
 To continue from a candidate JSON file or inline JSON, use `--start-json`:
 

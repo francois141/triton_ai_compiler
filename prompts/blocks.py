@@ -356,6 +356,18 @@ step independently correct and verified."""
     )
 
 
+def dynamic_shared_memory_allocation(shared_memory_bytes):
+    if shared_memory_bytes is None:
+        return ""
+    return f"""## Dynamic Shared-Memory Allocation
+
+The launcher allocates exactly {shared_memory_bytes} bytes of dynamic shared
+memory for each CTA (kernel block). All dynamic shared-memory addresses must
+remain in the byte range [0, {shared_memory_bytes}); no additional shared
+memory can be requested. Account for this fixed budget when choosing tile
+shapes, pipeline stages, and any epilogue workspace."""
+
+
 def _float16_gemm_research_rules(provider_guidance):
     return f"""
 ## FP16 GEMM Research and Tensor Core Requirements
