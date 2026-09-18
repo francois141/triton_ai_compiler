@@ -20,6 +20,7 @@ LOGGER = logging.getLogger(__name__)
 GRID_PLOT_BASENAME = "speedup_cost_frontiers_grid"
 TOKEN_EXPANSION_PLOT_BASENAME = "ptx_token_expansion_factors"
 GEMM_LLM_FRONTIER_PLOT_BASENAME = "gemm_llm_cost_frontiers"
+SPEEDUP_ORIGINAL_PLOT_BASENAME = "speedup_original"
 GEMM_GPU_TYPE = "NVIDIA L40S"
 GEMM_COST_LIMIT_USD = 15.0
 # Restrict this set of figures to GPT-6 experiment traces.
@@ -341,6 +342,13 @@ def _display_kernel_name(kernel_name):
     return kernel_name
 
 
+def _display_gpu_type(gpu_type):
+    """Hide H100 memory/interconnect variants in plot labels."""
+    if gpu_type.startswith("NVIDIA H100"):
+        return "NVIDIA H100"
+    return gpu_type
+
+
 def _triton_source_path(kernel_name):
     class_names = [kernel_name]
     if not kernel_name.endswith("Kernel"):
@@ -475,9 +483,12 @@ def load_token_expansion_data(trace_directory):
     return token_counts
 
 
-def _plot_frontier(axis, frontier, color, gpu_type):
-    costs = [0.0, *(point["cost_usd"] for point in frontier)]
-    speedups = [0.0, *(point["speedup_vs_triton"] for point in frontier)]
+def _plot_frontier(axis, frontier, color, gpu_type, *, include_origin=True):
+    costs = [point["cost_usd"] for point in frontier]
+    speedups = [point["speedup_vs_triton"] for point in frontier]
+    if include_origin:
+        costs.insert(0, 0.0)
+        speedups.insert(0, 0.0)
     axis.plot(costs, speedups, color=color, label=gpu_type, linewidth=2, marker="o")
     return costs[-1], speedups[-1], color
 
@@ -494,11 +505,12 @@ def _extend_frontier(axis, endpoint):
     )
 
 
-def _format_axis(axis, title):
+def _format_axis(axis, title, show_axis_labels=True):
     axis.axhline(1.0, color="#2563eb", linestyle="--", linewidth=1)
     axis.set_title(title, fontsize=AXIS_TITLE_FONT_SIZE)
-    axis.set_xlabel("Cumulative API cost (USD)", fontsize=AXIS_LABEL_FONT_SIZE)
-    axis.set_ylabel("Speedup vs. Triton", fontsize=AXIS_LABEL_FONT_SIZE)
+    if show_axis_labels:
+        axis.set_xlabel("Cumulative API cost (USD)", fontsize=AXIS_LABEL_FONT_SIZE)
+        axis.set_ylabel("Speedup vs. Triton", fontsize=AXIS_LABEL_FONT_SIZE)
     axis.tick_params(axis="both", labelsize=TICK_FONT_SIZE)
     axis.grid(True, alpha=0.3)
 
@@ -512,7 +524,14 @@ def _save_figure(figure, output_directory, basename):
     return saved_paths
 
 
-def write_frontier_grid(output_directory, accepted_kernels):
+def write_frontier_grid(
+    output_directory,
+    accepted_kernels,
+    *,
+    basename=GRID_PLOT_BASENAME,
+    show_axis_labels=True,
+    single_legend=True,
+):
     kernels = defaultdict(lambda: defaultdict(list))
     for point in accepted_kernels:
         kernel_name = _display_kernel_name(str(point["kernel"]))
@@ -529,6 +548,8 @@ def write_frontier_grid(output_directory, accepted_kernels):
         GRID_COLUMNS,
         figsize=(20, 13),
     )
+    figure_legend_handles = []
+    figure_legend_labels = []
     for index, axis in enumerate(axes.flat):
         if index < len(kernel_names) and index < GRID_SIZE:
             kernel_name = kernel_names[index]
@@ -541,22 +562,44 @@ def write_frontier_grid(output_directory, accepted_kernels):
                         axis,
                         pareto_frontier(points),
                         GPU_COLORS[color_index % len(GPU_COLORS)],
-                        f"{gpu_type}: {precision}",
+                        f"{_display_gpu_type(gpu_type)}: {precision}",
+                        include_origin=False,
                     )
                 )
-            _format_axis(axis, kernel_name)
-            for endpoint in endpoints:
-                _extend_frontier(axis, endpoint)
-            axis.legend()
+            _format_axis(axis, kernel_name, show_axis_labels=show_axis_labels)
+            if single_legend:
+                legend_handles, legend_labels = axis.get_legend_handles_labels()
+                figure_legend_handles.extend(legend_handles)
+                figure_legend_labels.extend(legend_labels)
+            else:
+                axis.legend()
         else:
             axis.set_visible(False)
-    figure.subplots_adjust(hspace=0.45, wspace=0.3)
-    saved_paths = _save_figure(figure, output_directory, GRID_PLOT_BASENAME)
+    if single_legend and figure_legend_handles:
+        unique_legend = dict(zip(figure_legend_labels, figure_legend_handles))
+        figure.legend(
+            unique_legend.values(),
+            unique_legend.keys(),
+            loc="lower center",
+            ncols=3,
+            fontsize=12,
+        )
+        figure.subplots_adjust(bottom=0.12, hspace=0.45, wspace=0.3)
+    else:
+        figure.subplots_adjust(hspace=0.45, wspace=0.3)
+    saved_paths = _save_figure(figure, output_directory, basename)
     plt.close(figure)
     return saved_paths
 
 
-def write_gemm_llm_frontier(output_directory, accepted_kernels):
+def write_gemm_llm_frontier(
+    output_directory,
+    accepted_kernels,
+    *,
+    basename=GEMM_LLM_FRONTIER_PLOT_BASENAME,
+    show_axis_labels=True,
+    single_legend=False,
+):
     points_by_provider_and_model = defaultdict(lambda: defaultdict(list))
     for point in accepted_kernels:
         if (
@@ -570,6 +613,8 @@ def write_gemm_llm_frontier(output_directory, accepted_kernels):
 
     provider_groups = ("OpenAI LLMs", "Anthropic LLMs", "Other LLMs")
     figure, axes = plt.subplots(1, 3, figsize=(21, 6), sharey=True)
+    figure_legend_handles = []
+    figure_legend_labels = []
     for axis, provider_group in zip(axes, provider_groups, strict=True):
         models = points_by_provider_and_model[provider_group]
         endpoints = []
@@ -582,7 +627,7 @@ def write_gemm_llm_frontier(output_directory, accepted_kernels):
                     model,
                 )
             )
-        _format_axis(axis, provider_group)
+        _format_axis(axis, provider_group, show_axis_labels=show_axis_labels)
         axis.set_xlim(0.0, GEMM_COST_LIMIT_USD)
         for endpoint in endpoints:
             _extend_frontier(axis, endpoint)
@@ -601,7 +646,11 @@ def write_gemm_llm_frontier(output_directory, accepted_kernels):
                     )
                 )
                 legend_labels.append(f"{failed_model} (failed)")
-            axis.legend(legend_handles, legend_labels, fontsize=12)
+            if single_legend:
+                figure_legend_handles.extend(legend_handles)
+                figure_legend_labels.extend(legend_labels)
+            else:
+                axis.legend(legend_handles, legend_labels, fontsize=12)
         else:
             axis.text(
                 0.5,
@@ -612,11 +661,21 @@ def write_gemm_llm_frontier(output_directory, accepted_kernels):
                 transform=axis.transAxes,
                 fontsize=13,
             )
-    figure.subplots_adjust(wspace=0.2)
+    if single_legend and figure_legend_handles:
+        figure.legend(
+            figure_legend_handles,
+            figure_legend_labels,
+            loc="lower center",
+            ncols=3,
+            fontsize=12,
+        )
+        figure.subplots_adjust(bottom=0.2, wspace=0.2)
+    else:
+        figure.subplots_adjust(wspace=0.2)
     saved_paths = _save_figure(
         figure,
         output_directory,
-        GEMM_LLM_FRONTIER_PLOT_BASENAME,
+        basename,
     )
     plt.close(figure)
     return saved_paths
@@ -721,6 +780,13 @@ def main():
     output_directory = arguments.output_directory.resolve()
     output_directory.mkdir(parents=True, exist_ok=True)
     grid_paths = write_frontier_grid(output_directory, accepted_kernels)
+    speedup_original_paths = write_frontier_grid(
+        output_directory,
+        accepted_kernels,
+        basename=SPEEDUP_ORIGINAL_PLOT_BASENAME,
+        show_axis_labels=True,
+        single_legend=False,
+    )
     gemm_llm_frontier_paths = write_gemm_llm_frontier(
         output_directory,
         all_accepted_kernels,
@@ -735,6 +801,7 @@ def main():
     for output_path in [
         *grid_paths,
         *gemm_llm_frontier_paths,
+        *speedup_original_paths,
         *token_expansion_paths,
     ]:
         print(f"Saved plot to {output_path}")
