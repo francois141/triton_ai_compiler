@@ -19,19 +19,14 @@ plt.switch_backend("Agg")
 LOGGER = logging.getLogger(__name__)
 GRID_PLOT_BASENAME = "speedup_cost_frontiers_grid"
 TOKEN_EXPANSION_PLOT_BASENAME = "ptx_token_expansion_factors"
-GEMM_LLM_FRONTIER_PLOT_BASENAME = "gemm_llm_cost_frontiers"
+GEMM_LLM_FRONTIER_OPENAI_PLOT_BASENAME = "gemm_llm_cost_frontier_openai"
 SPEEDUP_ORIGINAL_PLOT_BASENAME = "speedup_original"
+REPRESENTATIVE_RESULTS_TABLE_FILENAME = "representative_kernel_results.tex"
 GEMM_GPU_TYPE = "NVIDIA L40S"
 GEMM_COST_LIMIT_USD = 15.0
 # Restrict this set of figures to GPT-6 experiment traces.
 MODEL_PREFIXES = ("gpt-6",)
-GEMM_FAILED_MODELS_BY_PROVIDER = {
-    "OpenAI LLMs": ("gpt-5.6-luna",),
-    "Anthropic LLMs": (
-        "claude-haiku-4-5-20251001",
-        "claude-opus-5",
-    ),
-}
+GEMM_FAILED_OPENAI_MODELS = ("gpt-5.6-luna",)
 # These historical GEMM traces predate persisted GPU metadata, but were all
 # collected on the L40S used for the GEMM frontier.
 LEGACY_L40S_GEMM_MODELS = {
@@ -58,6 +53,12 @@ FLOAT_PRECISION_LABELS = {
     "Float16": "Floating Point 16",
     "Float8": "Floating Point 8",
 }
+REPRESENTATIVE_KERNELS = (
+    ("Fused GEMM + GELU", "FusedGEMMAddGELUFloat16Kernel"),
+    ("Softmax", "SoftmaxFloat16Kernel"),
+    ("Matrix multiplication", "MatrixMultiplicationFloat16"),
+)
+REPRESENTATIVE_GPU_TYPES = ("NVIDIA H100", "NVIDIA B200", "NVIDIA L40S")
 RUN_DIRECTORY_PATTERN = re.compile(r"^\d{12}_")
 REASONING_EFFORT_PATTERN = re.compile(
     r"_(?:low|medium|high|max|xhigh|ultra|none)$", re.IGNORECASE
@@ -122,9 +123,9 @@ def _model_from_run_directory(run_directory):
 
 
 def _is_included_run(run_directory, model_prefixes):
-    return model_prefixes is None or _model_from_run_directory(run_directory).startswith(
-        model_prefixes
-    )
+    return model_prefixes is None or _model_from_run_directory(
+        run_directory
+    ).startswith(model_prefixes)
 
 
 def _provider_group(provider, model):
@@ -469,7 +470,13 @@ def load_token_expansion_data(trace_directory):
         token_counts.append(
             {
                 "kernel": _display_kernel_name(kernel_name),
-                "gpu_type": gpu_types_by_run.get(run_directory, "Unknown GPU"),
+                # Treat H100 memory/interconnect variants as a single device
+                # series. The token-expansion runs are complementary across
+                # the variants, so this keeps every kernel while avoiding
+                # duplicate H100 legend entries.
+                "gpu_type": _display_gpu_type(
+                    gpu_types_by_run.get(run_directory, "Unknown GPU")
+                ),
                 "triton_generated_ptx_tokens": triton_generated_ptx_tokens,
                 "llm_generated_ptx_tokens": llm_generated_ptx_tokens,
                 "triton_generated_expansion_factor": (
@@ -522,6 +529,99 @@ def _save_figure(figure, output_directory, basename):
         figure.savefig(output_path, format=output_format, dpi=300, bbox_inches="tight")
         saved_paths.append(output_path)
     return saved_paths
+
+
+def _ptx_path_for_accepted_point(trace_directory, point):
+    json_path = trace_directory / point["source"]
+    candidate_paths = (
+        json_path.with_suffix(".ptx"),
+        json_path.parent / "final_candidate.ptx",
+        *json_path.parent.glob(f"{json_path.stem}_speedup_vs_triton_*.ptx"),
+    )
+    for ptx_path in candidate_paths:
+        if ptx_path.is_file():
+            return ptx_path
+    raise RuntimeError(f"No PTX artifact found for accepted result {json_path}.")
+
+
+def _representative_kernel_results(trace_directory, accepted_kernels):
+    results = []
+    for display_name, kernel_name in REPRESENTATIVE_KERNELS:
+        triton_source = _triton_kernel_source(kernel_name)
+        if triton_source is None:
+            raise RuntimeError(f"No Triton source found for {kernel_name}.")
+        triton_tokens = _token_count(triton_source)
+        if triton_tokens == 0:
+            raise RuntimeError(f"Triton source for {kernel_name} has no tokens.")
+        results_by_gpu = []
+        for gpu_type in REPRESENTATIVE_GPU_TYPES:
+            candidates = [
+                point
+                for point in accepted_kernels
+                if point["kernel"] == kernel_name
+                and point["precision"] == "Floating Point 16"
+                and _display_gpu_type(point["gpu_type"]) == gpu_type
+            ]
+            if not candidates:
+                raise RuntimeError(
+                    f"No accepted FP16 result found for {kernel_name} on {gpu_type}."
+                )
+            best_point = max(candidates, key=lambda point: point["speedup_vs_triton"])
+            ptx_path = _ptx_path_for_accepted_point(trace_directory, best_point)
+            expansion = (
+                _token_count(ptx_path.read_text(encoding="utf-8")) / triton_tokens
+            )
+            results_by_gpu.append((expansion, best_point["speedup_vs_triton"]))
+        results.append((display_name, results_by_gpu))
+    return results
+
+
+def write_representative_results_table(
+    output_directory, trace_directory, accepted_kernels
+):
+    """Write trace-derived representative results as a LaTex table."""
+    rows = []
+    for kernel_name, results_by_gpu in _representative_kernel_results(
+        trace_directory, accepted_kernels
+    ):
+        values = " & ".join(
+            f"${value:.{2 if index % 2 else 1}f}\\times$"
+            for result in results_by_gpu
+            for index, value in enumerate(result)
+        )
+        rows.append(f"{kernel_name:<24} & {values} \\\\")
+    table = "\n".join(
+        (
+            r"\begin{table*}[h]",
+            r"\centering",
+            r"\small",
+            r"\setlength{\tabcolsep}{8pt}",
+            r"\begin{tabular}{@{}lrrrrrr@{}}",
+            r"\toprule",
+            r"& \multicolumn{2}{c}{\textbf{NVIDIA H100}}",
+            r"& \multicolumn{2}{c}{\textbf{NVIDIA B200}}",
+            r"& \multicolumn{2}{c}{\textbf{NVIDIA L40S}} \\",
+            r"\cmidrule(lr){2-3}\cmidrule(lr){4-5}\cmidrule(l){6-7}",
+            r"\textbf{Kernel}",
+            r"& \textbf{Expansion} & \textbf{Speedup}",
+            r"& \textbf{Expansion} & \textbf{Speedup}",
+            r"& \textbf{Expansion} & \textbf{Speedup} \\",
+            r"\midrule",
+            *rows,
+            r"\bottomrule",
+            r"\end{tabular}",
+            r"\caption{Representative neural-lowering results on three GPU architectures.",
+            r"Expansion is the ratio of LLM-generated PTX tokens to Triton-source tokens;",
+            r"speedup is relative to the fastest correct Triton baseline. A dash denotes an",
+            r"unavailable measurement.}",
+            r"\label{tab:representative-kernel-results}",
+            r"\end{table*}",
+            "",
+        )
+    )
+    output_path = output_directory / REPRESENTATIVE_RESULTS_TABLE_FILENAME
+    output_path.write_text(table, encoding="utf-8")
+    return output_path
 
 
 def write_frontier_grid(
@@ -592,90 +692,52 @@ def write_frontier_grid(
     return saved_paths
 
 
-def write_gemm_llm_frontier(
-    output_directory,
-    accepted_kernels,
-    *,
-    basename=GEMM_LLM_FRONTIER_PLOT_BASENAME,
-    show_axis_labels=True,
-    single_legend=False,
-):
-    points_by_provider_and_model = defaultdict(lambda: defaultdict(list))
+def write_gemm_llm_frontier_openai(output_directory, accepted_kernels):
+    """Plot the FP16 GEMM cost frontier for OpenAI models only."""
+    points_by_model = defaultdict(list)
     for point in accepted_kernels:
         if (
             point["precision"] == "Floating Point 16"
             and _is_gemm_kernel(str(point["kernel"]))
             and _is_l40s_gemm_point(point)
+            and point["provider"] == "OpenAI LLMs"
         ):
-            points_by_provider_and_model[point["provider"]][point["model"]].append(
-                point
-            )
+            points_by_model[point["model"]].append(point)
 
-    provider_groups = ("OpenAI LLMs", "Anthropic LLMs", "Other LLMs")
-    figure, axes = plt.subplots(1, 3, figsize=(21, 6), sharey=True)
-    figure_legend_handles = []
-    figure_legend_labels = []
-    for axis, provider_group in zip(axes, provider_groups, strict=True):
-        models = points_by_provider_and_model[provider_group]
-        endpoints = []
-        for color_index, (model, points) in enumerate(sorted(models.items())):
-            endpoints.append(
-                _plot_frontier(
-                    axis,
-                    pareto_frontier(points),
-                    GPU_COLORS[color_index % len(GPU_COLORS)],
-                    model,
-                )
+    figure, axis = plt.subplots(figsize=(9, 6))
+    endpoints = []
+    for color_index, (model, points) in enumerate(sorted(points_by_model.items())):
+        endpoints.append(
+            _plot_frontier(
+                axis,
+                pareto_frontier(points),
+                GPU_COLORS[color_index % len(GPU_COLORS)],
+                model,
             )
-        _format_axis(axis, provider_group, show_axis_labels=show_axis_labels)
-        axis.set_xlim(0.0, GEMM_COST_LIMIT_USD)
-        for endpoint in endpoints:
-            _extend_frontier(axis, endpoint)
-        failed_models = GEMM_FAILED_MODELS_BY_PROVIDER.get(provider_group, ())
-        if models or failed_models:
-            legend_handles, legend_labels = axis.get_legend_handles_labels()
-            for failed_model in failed_models:
-                legend_handles.append(
-                    Line2D(
-                        [],
-                        [],
-                        color="#dc2626",
-                        marker="x",
-                        linestyle="None",
-                        markersize=8,
-                    )
-                )
-                legend_labels.append(f"{failed_model} (failed)")
-            if single_legend:
-                figure_legend_handles.extend(legend_handles)
-                figure_legend_labels.extend(legend_labels)
-            else:
-                axis.legend(legend_handles, legend_labels, fontsize=12)
-        else:
-            axis.text(
-                0.5,
-                0.5,
-                "No accepted GEMM results",
-                ha="center",
-                va="center",
-                transform=axis.transAxes,
-                fontsize=13,
-            )
-    if single_legend and figure_legend_handles:
-        figure.legend(
-            figure_legend_handles,
-            figure_legend_labels,
-            loc="lower center",
-            ncols=3,
-            fontsize=12,
         )
-        figure.subplots_adjust(bottom=0.2, wspace=0.2)
-    else:
-        figure.subplots_adjust(wspace=0.2)
+    _format_axis(axis, "OpenAI LLMs")
+    axis.set_xlim(0.0, GEMM_COST_LIMIT_USD)
+    for endpoint in endpoints:
+        _extend_frontier(axis, endpoint)
+    legend_handles, legend_labels = axis.get_legend_handles_labels()
+    for failed_model in GEMM_FAILED_OPENAI_MODELS:
+        legend_handles.append(
+            Line2D(
+                [],
+                [],
+                color="#dc2626",
+                marker="x",
+                linestyle="None",
+                markersize=8,
+            )
+        )
+        legend_labels.append(f"{failed_model} (failed)")
+    axis.legend(legend_handles, legend_labels, fontsize=12)
+    figure.tight_layout()
     saved_paths = _save_figure(
         figure,
         output_directory,
-        basename,
+        GEMM_LLM_FRONTIER_OPENAI_PLOT_BASENAME,
     )
     plt.close(figure)
     return saved_paths
@@ -779,6 +841,9 @@ def main():
 
     output_directory = arguments.output_directory.resolve()
     output_directory.mkdir(parents=True, exist_ok=True)
+    representative_results_table_path = write_representative_results_table(
+        output_directory, trace_directory, accepted_kernels
+    )
     grid_paths = write_frontier_grid(output_directory, accepted_kernels)
     speedup_original_paths = write_frontier_grid(
         output_directory,
@@ -787,7 +852,7 @@ def main():
         show_axis_labels=True,
         single_legend=False,
     )
-    gemm_llm_frontier_paths = write_gemm_llm_frontier(
+    gemm_llm_frontier_paths = write_gemm_llm_frontier_openai(
         output_directory,
         all_accepted_kernels,
     )
@@ -799,6 +864,7 @@ def main():
         token_expansion_data,
     )
     for output_path in [
+        representative_results_table_path,
         *grid_paths,
         *gemm_llm_frontier_paths,
         *speedup_original_paths,
