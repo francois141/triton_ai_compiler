@@ -21,6 +21,7 @@ GRID_PLOT_BASENAME = "speedup_cost_frontiers_grid"
 TOKEN_EXPANSION_PLOT_BASENAME = "ptx_token_expansion_factors"
 GEMM_LLM_FRONTIER_OPENAI_PLOT_BASENAME = "gemm_llm_cost_frontier_openai"
 SPEEDUP_ORIGINAL_PLOT_BASENAME = "speedup_original"
+CONFERENCE_KERNEL_SPEEDUP_PLOT_BASENAME = "conference_kernel_speedups_b200"
 REPRESENTATIVE_RESULTS_TABLE_FILENAME = "representative_kernel_results.tex"
 GEMM_GPU_TYPE = "NVIDIA L40S"
 GEMM_COST_LIMIT_USD = 15.0
@@ -45,10 +46,31 @@ PLOT_FORMATS = ("jpeg", "pdf")
 GRID_ROWS = 3
 GRID_COLUMNS = 4
 GRID_SIZE = GRID_ROWS * GRID_COLUMNS
-AXIS_TITLE_FONT_SIZE = 18
-AXIS_LABEL_FONT_SIZE = 16
-TICK_FONT_SIZE = 14
+AXIS_TITLE_FONT_SIZE = 22
+AXIS_LABEL_FONT_SIZE = 20
+TICK_FONT_SIZE = 17
 GPU_COLORS = plt.rcParams["axes.prop_cycle"].by_key()["color"]
+# The paper figure has a deliberate narrative order rather than alphabetical
+# ordering.  Each tuple is (trace kernel name, operator label, venue label).
+# Measurements remain fully data-driven: a kernel is omitted when no accepted
+# B200 result is present in the supplied traces.
+CONFERENCE_KERNEL_PLOT_ORDER = (
+    ("BitDeltaNeurIPS2024Matmul", "BitDelta", "NeurIPS 2024"),
+    ("BitDeltaNeurIPS2024BatchedMatmul", "BitDelta\nbatched", "NeurIPS 2024"),
+    ("Dion2TritonPostOrthogonalize", "Dion2\npost-orthogonalize", "Microsoft Research\nForum 2026"),
+    ("FlashAttentionNeurIPS2022Forward", "FlashAttention\nforward", "NeurIPS 2022"),
+    ("FlashSinkhornFusedSchurMatvec", "FlashSinkhorn", "ICML 2026"),
+    ("ForgettingAttentionICLR2025Forward", "Forgetting Attention\nforward", "ICLR 2025"),
+    ("LionNeurIPS2023Optimizer", "Lion optimizer", "NeurIPS 2023"),
+    ("MambaICLR2026Forward", r"Mamba forward$^{\dagger}$", "ICLR 2026"),
+    ("Mamba2ChunkScanForward", "Mamba-2 chunk\nscan forward", "ICML 2024"),
+    ("Mamba2ChunkStateForward", "Mamba-2 chunk\nstate forward", "ICML 2024"),
+    ("SageAttentionICLR2025", "SageAttention", "ICLR 2025"),
+)
+CONFERENCE_KERNEL_DISPLAY_NAMES = {
+    kernel_name: f"{operator_label.replace(chr(10), ' ')} ({venue_label.replace(chr(10), ' ')})"
+    for kernel_name, operator_label, venue_label in CONFERENCE_KERNEL_PLOT_ORDER
+}
 FLOAT_PRECISION_LABELS = {
     "Float16": "Floating Point 16",
     "Float8": "Floating Point 8",
@@ -246,7 +268,12 @@ def _add_prior_run_costs(
             prior_cost += costs_by_run[run_directory]
 
 
-def load_accepted_kernels(trace_directory, model_prefixes=MODEL_PREFIXES):
+def load_accepted_kernels(
+    trace_directory,
+    model_prefixes=MODEL_PREFIXES,
+    *,
+    include_non_floating_point=False,
+):
     accepted_kernels = []
     run_costs = defaultdict(float)
     gpu_types_by_run = {}
@@ -284,7 +311,10 @@ def load_accepted_kernels(trace_directory, model_prefixes=MODEL_PREFIXES):
 
         kernel_name = _kernel_name(data, trace_directory, relative_path)
         precision = _floating_point_precision(kernel_name)
-        if precision is None:
+        # Most existing figures compare Float16/Float8 workloads. Conference
+        # kernels use paper-specific class names instead, so allow the B200
+        # conference chart to request those results explicitly.
+        if precision is None and not include_non_floating_point:
             continue
         run_costs[kernel_name, run_directory] = max(
             run_costs[kernel_name, run_directory], cost
@@ -514,7 +544,10 @@ def _extend_frontier(axis, endpoint):
 
 def _format_axis(axis, title, show_axis_labels=True):
     axis.axhline(1.0, color="#2563eb", linestyle="--", linewidth=1)
-    axis.set_title(title, fontsize=AXIS_TITLE_FONT_SIZE)
+    # Keep the enlarged panel headings inside their own panels.
+    if len(title) > 18 and title.endswith("Kernel"):
+        title = f"{title[:-6]}\nKernel"
+    axis.set_title(title, fontsize=AXIS_TITLE_FONT_SIZE, fontweight="bold")
     if show_axis_labels:
         axis.set_xlabel("Cumulative API cost (USD)", fontsize=AXIS_LABEL_FONT_SIZE)
         axis.set_ylabel("Speedup vs. Triton", fontsize=AXIS_LABEL_FONT_SIZE)
@@ -684,7 +717,11 @@ def write_frontier_grid(
             ncols=3,
             fontsize=12,
         )
-        figure.subplots_adjust(bottom=0.12, hspace=0.45, wspace=0.3)
+        figure.supxlabel("Cumulative API cost (USD)", fontsize=AXIS_LABEL_FONT_SIZE,
+                          fontweight="bold", y=0.075)
+        figure.supylabel("Speedup vs. Triton", fontsize=AXIS_LABEL_FONT_SIZE,
+                          fontweight="bold", x=0.015)
+        figure.subplots_adjust(left=0.075, bottom=0.15, hspace=0.43, wspace=0.25)
     else:
         figure.subplots_adjust(hspace=0.45, wspace=0.3)
     saved_paths = _save_figure(figure, output_directory, basename)
@@ -738,6 +775,82 @@ def write_gemm_llm_frontier_openai(output_directory, accepted_kernels):
         figure,
         output_directory,
         GEMM_LLM_FRONTIER_OPENAI_PLOT_BASENAME,
+    )
+    plt.close(figure)
+    return saved_paths
+
+
+def _is_b200_gpu(gpu_type):
+    return "b200" in gpu_type.casefold()
+
+
+def plot_llm_figure(
+    output_directory, accepted_kernels
+):
+    """Write the paper's B200 conference-kernel speedup figure from traces."""
+    best_speedups = {}
+    for point in accepted_kernels:
+        kernel_name = str(point["kernel"])
+        if not (
+            _is_b200_gpu(str(point["gpu_type"]))
+            and kernel_name in CONFERENCE_KERNEL_DISPLAY_NAMES
+        ):
+            continue
+        best_speedups[kernel_name] = max(
+            best_speedups.get(kernel_name, -math.inf),
+            point["speedup_vs_triton"],
+        )
+
+    if not best_speedups:
+        LOGGER.warning("No accepted conference-kernel results were found on B200.")
+        return []
+
+    kernel_results = [
+        (kernel_name, operator_label, venue_label, best_speedups[kernel_name])
+        for kernel_name, operator_label, venue_label in CONFERENCE_KERNEL_PLOT_ORDER
+        if kernel_name in best_speedups
+    ]
+    kernel_names, labels, venues, speedups = zip(*kernel_results)
+    indices = range(len(kernel_results))
+    mamba_index = kernel_names.index("MambaICLR2026Forward") if "MambaICLR2026Forward" in kernel_names else None
+    colors = ["#2C7FB8"] * len(kernel_results)
+    if mamba_index is not None:
+        colors[mamba_index] = "#C77C2E"
+
+    figure, axis = plt.subplots(figsize=(13.2, 5.6))
+    bars = axis.bar(indices, speedups, width=0.78, color=colors, edgecolor="white", linewidth=0.8)
+    axis.axhline(1.0, color="#4E79A7", linestyle="--", linewidth=1.15, zorder=0)
+    axis.text(len(kernel_results) - 0.25, 1.045, "parity", color="#4E79A7", fontsize=8, ha="right", va="bottom")
+    axis.set_xlim(-0.65, len(kernel_results) - 0.35)
+    axis.set_ylim(0, max(1.8, max(speedups) + 0.28))
+    axis.set_ylabel("Best speedup vs. Triton", fontsize=13, fontweight="bold")
+    axis.set_title("Best LLM speedup for conference kernels on NVIDIA B200", pad=8, fontsize=16, fontweight="bold")
+    axis.set_xticks([])
+    axis.tick_params(axis="both", labelsize=11)
+    axis.grid(axis="y", color="#D9D9D9", linewidth=0.7, alpha=0.75)
+    axis.spines[["top", "right"]].set_visible(False)
+    axis.set_axisbelow(True)
+
+    for index, (bar, speedup, label, venue) in enumerate(zip(bars, speedups, labels, venues)):
+        axis.text(bar.get_x() + bar.get_width() / 2, speedup + 0.055, f"{speedup:.2f}x", ha="center", va="bottom", fontsize=10, fontweight="bold")
+        label_y = -0.115 if index % 2 == 0 else -0.255
+        axis.text(index, label_y, label, transform=axis.get_xaxis_transform(), ha="center", va="top", fontsize=9.1, fontweight="bold", linespacing=1.05, clip_on=False)
+        axis.text(index, label_y - 0.052 * (label.count("\n") + 1), venue, transform=axis.get_xaxis_transform(), ha="center", va="top", fontsize=8.2, fontweight="medium", color="#5B6573", linespacing=1.05, clip_on=False)
+
+    if mamba_index is not None:
+        axis.annotate(
+            "Likely served through a\nlegacy GPT routing path",
+            xy=(mamba_index, speedups[mamba_index]), xycoords="data",
+            xytext=(mamba_index + 0.05, min(axis.get_ylim()[1] - 0.3, 1.55)), textcoords="data",
+            ha="center", va="bottom", fontsize=8.4, fontweight="bold", color="#775124",
+            arrowprops={"arrowstyle": "->", "color": "#C77C2E", "lw": 1.1, "shrinkA": 8, "shrinkB": 3, "relpos": (0.5, 0.0)},
+            bbox={"boxstyle": "round,pad=0.28", "fc": "#FFF5E8", "ec": "#C77C2E", "lw": 0.8},
+        )
+    figure.subplots_adjust(left=0.09, right=0.995, top=0.88, bottom=0.34)
+    saved_paths = _save_figure(
+        figure,
+        output_directory,
+        CONFERENCE_KERNEL_SPEEDUP_PLOT_BASENAME,
     )
     plt.close(figure)
     return saved_paths
@@ -844,7 +957,9 @@ def main():
     representative_results_table_path = write_representative_results_table(
         output_directory, trace_directory, accepted_kernels
     )
-    grid_paths = write_frontier_grid(output_directory, accepted_kernels)
+    grid_paths = write_frontier_grid(
+        output_directory, accepted_kernels, show_axis_labels=False
+    )
     speedup_original_paths = write_frontier_grid(
         output_directory,
         accepted_kernels,
@@ -855,6 +970,13 @@ def main():
     gemm_llm_frontier_paths = write_gemm_llm_frontier_openai(
         output_directory,
         all_accepted_kernels,
+    )
+    conference_kernel_speedup_paths = plot_llm_figure(
+        output_directory,
+        load_accepted_kernels(
+            trace_directory,
+            include_non_floating_point=True,
+        ),
     )
     token_expansion_data = load_token_expansion_data(trace_directory)
     if not token_expansion_data:
@@ -867,6 +989,7 @@ def main():
         representative_results_table_path,
         *grid_paths,
         *gemm_llm_frontier_paths,
+        *conference_kernel_speedup_paths,
         *speedup_original_paths,
         *token_expansion_paths,
     ]:
