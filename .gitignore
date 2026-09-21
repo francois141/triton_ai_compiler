@@ -24,3 +24,4 @@ matmul/direct_cutlass_kernel_fp16
 /ablation/
 /random/
 /astra/
+/final_ptx/
