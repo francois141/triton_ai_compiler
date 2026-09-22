@@ -1,0 +1,2 @@
+argv: ./volta/target/release/volta analyze final_ptx/SoftmaxKernel/NVIDIA_L40S_Float8_1.2857x.ptx -k kernel -b 128 -g 1 --dyn-shared 4 --array input:0x100000000:1:1024:in --array output:0x200000000:2:1024:out --param ptr:output --param ptr:input --param int:256 --param int:256 --param int:4 --param int:256 --param int:0 --param int:0 --print-outputs 1
+analyze final_ptx/SoftmaxKernel/NVIDIA_L40S_Float8_1.2857x.ptx: OK in 0.002s, 13440 instructions
