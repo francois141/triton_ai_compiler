@@ -15,7 +15,6 @@ KERNELS = (
     "RMSNorm",
     "RoPE",
     "Softmax",
-    "GELU",
     "Lion",
     "MatrixVectorMultiplication",
     "Sigmoid",
@@ -51,10 +50,6 @@ ROPE_BLOCK_SIZES = {
 }
 SOFTMAX_BLOCK_SIZES = {
     ("B200", "Float8"): "32,4",
-}
-GELU_BLOCK_SIZES = {
-    ("B200", "Float8"): 256,
-    ("B200", "Float16"): 256,
 }
 MULTI_DIM_BLOCK_KERNELS = ("RoPE", "Softmax")
 
@@ -141,7 +136,6 @@ def verifier_command(volta_bin, target, specs_dir):
             "RMSNorm": "rms_norm.spec",
             "RoPE": "rope.spec",
             "Softmax": "softmax.spec",
-            "GELU": "gelu.spec",
             "MatrixVectorMultiplication": "matrix_vector_multiply.spec",
         }.get(target.kernel, f"{target.kernel.lower()}.spec")
     )
@@ -152,8 +146,6 @@ def verifier_command(volta_bin, target, specs_dir):
         if target.kernel == "RoPE"
         else SOFTMAX_BLOCK_SIZES.get((target.gpu, target.precision), "128")
         if target.kernel == "Softmax"
-        else GELU_BLOCK_SIZES.get((target.gpu, target.precision), 128)
-        if target.kernel == "GELU"
         else LION_BLOCK_SIZE
         if target.kernel == "Lion"
         else 128
@@ -449,10 +441,10 @@ def first_symbolic_expression(volta_bin, target, specs_dir, environment):
 def first_output_line(output, fallback):
     return next((line for line in output.splitlines() if line.strip()), fallback)
 
-def print_table(results):
+def print_table(results, kernels=KERNELS):
     print("| Kernel | GPU | FP8 | FP16 |")
     print("| --- | --- | --- | --- |")
-    for kernel in KERNELS:
+    for kernel in kernels:
         for gpu in GPU_TYPES:
             fp8_status = results[kernel, gpu, "Float8"]
             fp16_status = results[kernel, gpu, "Float16"]
@@ -484,11 +476,19 @@ def main(args):
             value for value in (str(args.z3_lib_dir), old_library_path) if value
         )
 
+    targets = find_targets(args.final_ptx_dir)
+    if args.kernel is not None:
+        targets = {
+            key: target for key, target in targets.items() if key[0] == args.kernel
+        }
+
     results = {}
-    for target in find_targets(args.final_ptx_dir).values():
+    for target in targets.values():
         status, output = verify_target(volta_bin, target, args.specs_dir, environment)
         results[target.kernel, target.gpu, target.precision] = status
         label = f"{target.kernel} {target.gpu} {target.precision}"
+        if status == "VERIFIED":
+            print(f"{label}: successful")
         if status == "NOT VERIFIED" and target.ptx_path is not None:
             print(f"{label}: {first_output_line(output, status)}")
         if args.verbose and status == "NOT VERIFIED" and target.ptx_path is not None:
@@ -496,7 +496,7 @@ def main(args):
                 volta_bin, target, args.specs_dir, environment
             )
             print(f"{label} symbolic: {expression}")
-    print_table(results)
+    print_table(results, kernels=(args.kernel,) if args.kernel is not None else KERNELS)
 
 
 if __name__ == "__main__":
@@ -510,6 +510,12 @@ if __name__ == "__main__":
         "--z3-lib-dir", type=Path, default=Path("/opt/homebrew/opt/z3/lib")
     )
     parser.add_argument("--no-build", action="store_true")
+    parser.add_argument(
+        "--kernel",
+        choices=KERNELS,
+        default=None,
+        help="Verify only the specified kernel instead of all kernels.",
+    )
     parser.add_argument(
         "--verbose",
         action="store_true",
