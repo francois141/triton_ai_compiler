@@ -92,25 +92,37 @@ GRID_KERNEL_ORDER = (
 # Panels within a row share a Y scale; each row is scaled to its workload family.
 GRID_Y_LIMITS_BY_ROW = ((0.5, 2.2), (0.5, 1.15), (0.5, 1.35))
 # The paper figure has a deliberate narrative order rather than alphabetical
-# ordering.  Each tuple is (trace kernel name, operator label, venue label).
-# Measurements remain fully data-driven: a kernel is omitted when no accepted
-# B200 result is present in the supplied traces.
+# ordering. Measurements remain fully data-driven: a kernel is omitted when
+# no accepted B200 result is present in the supplied traces.
 CONFERENCE_KERNEL_PLOT_ORDER = (
-    ("BitDeltaNeurIPS2024Matmul", "BitDelta", "NeurIPS 2024"),
-    ("BitDeltaNeurIPS2024BatchedMatmul", "BitDelta\nbatched", "NeurIPS 2024"),
-    ("Dion2TritonPostOrthogonalize", "Dion2\npost-orthogonalize", "Microsoft Research\nForum 2026"),
-    ("FlashAttentionNeurIPS2022Forward", "FlashAttention\nforward", "NeurIPS 2022"),
-    ("FlashSinkhornFusedSchurMatvec", "FlashSinkhorn", "ICML 2026"),
-    ("ForgettingAttentionICLR2025Forward", "Forgetting Attention\nforward", "ICLR 2025"),
-    ("LionNeurIPS2023Optimizer", "Lion optimizer", "NeurIPS 2023"),
-    ("MambaICLR2026Forward", r"Mamba forward$^{\dagger}$", "ICLR 2026"),
-    ("Mamba2ChunkScanForward", "Mamba-2 chunk\nscan forward", "ICML 2024"),
-    ("Mamba2ChunkStateForward", "Mamba-2 chunk\nstate forward", "ICML 2024"),
-    ("SageAttentionICLR2025", "SageAttention", "ICLR 2025"),
+    "BitDeltaNeurIPS2024Matmul",
+    "BitDeltaNeurIPS2024BatchedMatmul",
+    "Dion2TritonPostOrthogonalize",
+    "FlashAttentionNeurIPS2022Forward",
+    "FlashSinkhornFusedSchurMatvec",
+    "ForgettingAttentionICLR2025Forward",
+    "LionNeurIPS2023Optimizer",
+    "Mamba2ChunkScanForward",
+    "Mamba2ChunkStateForward",
+    "SageAttentionICLR2025",
 )
+# Edit this table to set the displayed title and venue beneath each bar.
+# The keys are trace kernel names; use \n in either string to add a line break.
+CONFERENCE_KERNEL_FIGURE_TITLES = {
+    "BitDeltaNeurIPS2024Matmul": ("BitDelta", "NeurIPS 2024"),
+    "BitDeltaNeurIPS2024BatchedMatmul": ("BitDelta\nbatched", "NeurIPS 2024"),
+    "Dion2TritonPostOrthogonalize": ("Dion2", "Microsoft Research\nForum 2026"),
+    "FlashAttentionNeurIPS2022Forward": ("FlashAttention", "NeurIPS 2022"),
+    "FlashSinkhornFusedSchurMatvec": ("FlashSinkhorn", "ICML 2026"),
+    "ForgettingAttentionICLR2025Forward": ("ForgettingAttention", "ICLR 2025"),
+    "LionNeurIPS2023Optimizer": ("Lion optimizer", "NeurIPS 2023"),
+    "Mamba2ChunkScanForward": ("Mamba-2 chunk\nscan forward", "ICML 2024"),
+    "Mamba2ChunkStateForward": ("Mamba-2 chunk\nstate forward", "ICML 2024"),
+    "SageAttentionICLR2025": ("SageAttention", "ICLR 2025"),
+}
 CONFERENCE_KERNEL_DISPLAY_NAMES = {
     kernel_name: f"{operator_label.replace(chr(10), ' ')} ({venue_label.replace(chr(10), ' ')})"
-    for kernel_name, operator_label, venue_label in CONFERENCE_KERNEL_PLOT_ORDER
+    for kernel_name, (operator_label, venue_label) in CONFERENCE_KERNEL_FIGURE_TITLES.items()
 }
 FLOAT_PRECISION_LABELS = {
     "Float16": "Floating Point 16",
@@ -896,19 +908,14 @@ def plot_llm_figure(
         return []
 
     kernel_results = [
-        (kernel_name, operator_label, venue_label, best_speedups[kernel_name])
-        for kernel_name, operator_label, venue_label in CONFERENCE_KERNEL_PLOT_ORDER
+        (*CONFERENCE_KERNEL_FIGURE_TITLES[kernel_name], best_speedups[kernel_name])
+        for kernel_name in CONFERENCE_KERNEL_PLOT_ORDER
         if kernel_name in best_speedups
     ]
-    kernel_names, labels, venues, speedups = zip(*kernel_results)
+    labels, venues, speedups = zip(*kernel_results)
     indices = range(len(kernel_results))
-    mamba_index = kernel_names.index("MambaICLR2026Forward") if "MambaICLR2026Forward" in kernel_names else None
-    colors = ["#2C7FB8"] * len(kernel_results)
-    if mamba_index is not None:
-        colors[mamba_index] = "#C77C2E"
-
     figure, axis = plt.subplots(figsize=(13.2, 5.6))
-    bars = axis.bar(indices, speedups, width=0.78, color=colors, edgecolor="white", linewidth=0.8)
+    bars = axis.bar(indices, speedups, width=0.78, color="#2C7FB8", edgecolor="white", linewidth=0.8)
     axis.axhline(1.0, color="#4E79A7", linestyle="--", linewidth=1.15, zorder=0)
     axis.text(len(kernel_results) - 0.25, 1.045, "parity", color="#4E79A7", fontsize=8, ha="right", va="bottom")
     axis.set_xlim(-0.65, len(kernel_results) - 0.35)
@@ -927,15 +934,6 @@ def plot_llm_figure(
         axis.text(index, label_y, label, transform=axis.get_xaxis_transform(), ha="center", va="top", fontsize=9.1, fontweight="bold", linespacing=1.05, clip_on=False)
         axis.text(index, label_y - 0.052 * (label.count("\n") + 1), venue, transform=axis.get_xaxis_transform(), ha="center", va="top", fontsize=8.2, fontweight="medium", color="#5B6573", linespacing=1.05, clip_on=False)
 
-    if mamba_index is not None:
-        axis.annotate(
-            "Likely served through a\nlegacy GPT routing path",
-            xy=(mamba_index, speedups[mamba_index]), xycoords="data",
-            xytext=(mamba_index + 0.05, min(axis.get_ylim()[1] - 0.3, 1.55)), textcoords="data",
-            ha="center", va="bottom", fontsize=8.4, fontweight="bold", color="#775124",
-            arrowprops={"arrowstyle": "->", "color": "#C77C2E", "lw": 1.1, "shrinkA": 8, "shrinkB": 3, "relpos": (0.5, 0.0)},
-            bbox={"boxstyle": "round,pad=0.28", "fc": "#FFF5E8", "ec": "#C77C2E", "lw": 0.8},
-        )
     figure.subplots_adjust(left=0.09, right=0.995, top=0.88, bottom=0.34)
     saved_paths = _save_figure(
         figure,
