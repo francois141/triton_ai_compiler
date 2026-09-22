@@ -20,6 +20,7 @@ KERNELS = (
     "MatrixMultiplication",
     "Sigmoid",
     "Convolution2D",
+    "FusedGEMMAddSiLU",
 )
 ARRAY_LENGTH = 134217728
 RMS_NORM_WIDTH = 4096
@@ -211,7 +212,7 @@ def verifier_command(volta_bin, target, specs_dir):
     grid_size = (
         f"{MATRIX_MULTIPLICATION_DIM_FULL // matrix_multiplication_rows},"
         f"{MATRIX_MULTIPLICATION_DIM_FULL // matrix_multiplication_cols}"
-        if target.kernel == "MatrixMultiplication"
+        if target.kernel in ("MatrixMultiplication", "FusedGEMMAddSiLU")
         else (
             f"{(convolution_2d_output_rows + convolution_2d_block_m - 1) // convolution_2d_block_m},"
             f"{(CONVOLUTION_2D_OUTPUT_CHANNELS + convolution_2d_block_n - 1) // convolution_2d_block_n}"
@@ -224,7 +225,12 @@ def verifier_command(volta_bin, target, specs_dir):
         if target.kernel == "RMSNorm"
         else TILE_DOT_DYN_SHARED
         if target.kernel
-        in ("MatrixVectorMultiplication", "MatrixMultiplication", "Convolution2D")
+        in (
+            "MatrixVectorMultiplication",
+            "MatrixMultiplication",
+            "Convolution2D",
+            "FusedGEMMAddSiLU",
+        )
         else 4
     )
     command = [
@@ -420,6 +426,48 @@ def verifier_command(volta_bin, target, specs_dir):
                 "ptr:a",
                 "--param",
                 "ptr:b",
+                "--param",
+                "ptr:c",
+                "--param",
+                "int:0",
+                "--param",
+                "int:0",
+                "--dim",
+                f"M={full}",
+                "--dim",
+                f"N={full}",
+                "--dim",
+                f"K={full}",
+                "--sample",
+                str(
+                    min(
+                        matrix_multiplication_rows * matrix_multiplication_cols,
+                        MATRIX_MULTIPLICATION_SAMPLE,
+                    )
+                ),
+                "--verify-numeric",
+            ]
+        )
+        return command
+    if target.kernel == "FusedGEMMAddSiLU":
+        full = MATRIX_MULTIPLICATION_DIM_FULL
+        full_elements = full * full
+        command.extend(
+            [
+                "--array",
+                f"a:0x100000000:{element_width}:{full_elements}:in",
+                "--array",
+                f"b:0x200000000:{element_width}:{full_elements}:in",
+                "--array",
+                f"d:0x300000000:{element_width}:{full_elements}:in",
+                "--array",
+                f"c:0x400000000:2:{full_elements}:out",
+                "--param",
+                "ptr:a",
+                "--param",
+                "ptr:b",
+                "--param",
+                "ptr:d",
                 "--param",
                 "ptr:c",
                 "--param",
