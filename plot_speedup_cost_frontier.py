@@ -10,6 +10,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import tiktoken
 from matplotlib.lines import Line2D
+from matplotlib.ticker import FuncFormatter
 
 from utils.clean_ptx import clean_ptx
 
@@ -50,6 +51,46 @@ AXIS_TITLE_FONT_SIZE = 22
 AXIS_LABEL_FONT_SIZE = 20
 TICK_FONT_SIZE = 17
 GPU_COLORS = plt.rcParams["axes.prop_cycle"].by_key()["color"]
+# Only show a new frontier point when it is visibly better than the previous
+# displayed point.  This prevents tiny benchmark fluctuations from making
+# otherwise comparable panels look more densely sampled.
+MIN_PLOTTED_SPEEDUP_GAIN = 0.01
+FRONTIER_LINE_WIDTH = 4.0
+FRONTIER_MARKER_SIZE = 11.0
+# Edit the strings on the right to change the 12 grid-panel titles.  Keys are
+# the trace-derived kernel names after their Float16/Float8 suffix is removed.
+GRID_TITLE_TRANSLATIONS = {
+    "Convolution2DKernel": "Convolution 2D",
+    "FusedGEMMAddGELUKernel": "Fused GEMM + GELU",
+    "GELUKernel": "GELU",
+    "MatrixMultiplication": "Matrix Multiplication",
+    "MatrixVectorMultiplicationKernel": "Matrix-Vector Multiplication",
+    "RMSNormKernel": "RMSNorm",
+    "ReLUKernel": "ReLU",
+    "ReductionSumKernel": "Reduction Sum",
+    "RoPEKernel": "RoPE",
+    "SiLUKernel": "SiLU",
+    "SoftmaxKernel": "Softmax",
+    "SwiGLUKernel": "SwiGLU",
+}
+# Narrative order for the 3x4 grid: matrix-oriented kernels, activations, then
+# normalization/reduction/positioning kernels. Edit this tuple to reorder panels.
+GRID_KERNEL_ORDER = (
+    "Convolution2DKernel",
+    "FusedGEMMAddGELUKernel",
+    "MatrixMultiplication",
+    "MatrixVectorMultiplicationKernel",
+    "GELUKernel",
+    "ReLUKernel",
+    "SiLUKernel",
+    "SwiGLUKernel",
+    "RMSNormKernel",
+    "ReductionSumKernel",
+    "RoPEKernel",
+    "SoftmaxKernel",
+)
+# Panels within a row share a Y scale; each row is scaled to its workload family.
+GRID_Y_LIMITS_BY_ROW = ((0.5, 2.2), (0.5, 1.15), (0.5, 1.35))
 # The paper figure has a deliberate narrative order rather than alphabetical
 # ordering.  Each tuple is (trace kernel name, operator label, venue label).
 # Measurements remain fully data-driven: a kernel is omitted when no accepted
@@ -367,6 +408,22 @@ def pareto_frontier(points):
     return frontier
 
 
+def plotted_frontier(points, min_relative_gain=MIN_PLOTTED_SPEEDUP_GAIN):
+    """Return Pareto points separated by at least ``min_relative_gain``.
+
+    The threshold is relative: a point at 1.010x is retained after 1.000x,
+    while a point below that is omitted until the cumulative improvement is
+    large enough to be meaningful in the plot.
+    """
+    displayed = []
+    for point in pareto_frontier(points):
+        if not displayed or point["speedup_vs_triton"] >= (
+            displayed[-1]["speedup_vs_triton"] * (1 + min_relative_gain)
+        ):
+            displayed.append(point)
+    return displayed
+
+
 def _display_kernel_name(kernel_name):
     for precision in FLOAT_PRECISION_LABELS:
         kernel_name = kernel_name.replace(precision, "")
@@ -526,7 +583,15 @@ def _plot_frontier(axis, frontier, color, gpu_type, *, include_origin=True):
     if include_origin:
         costs.insert(0, 0.0)
         speedups.insert(0, 0.0)
-    axis.plot(costs, speedups, color=color, label=gpu_type, linewidth=2, marker="o")
+    axis.plot(
+        costs,
+        speedups,
+        color=color,
+        label=gpu_type,
+        linewidth=FRONTIER_LINE_WIDTH,
+        marker="o",
+        markersize=FRONTIER_MARKER_SIZE,
+    )
     return costs[-1], speedups[-1], color
 
 
@@ -536,7 +601,7 @@ def _extend_frontier(axis, endpoint):
         [cost, axis.get_xlim()[1]],
         [speedup, speedup],
         color=color,
-        linewidth=2,
+        linewidth=FRONTIER_LINE_WIDTH,
         scalex=False,
         scaley=False,
     )
@@ -553,6 +618,12 @@ def _format_axis(axis, title, show_axis_labels=True):
         axis.set_ylabel("Speedup vs. Triton", fontsize=AXIS_LABEL_FONT_SIZE)
     axis.tick_params(axis="both", labelsize=TICK_FONT_SIZE)
     axis.grid(True, alpha=0.3)
+
+
+def _format_cost_ticks_as_usd(axis):
+    axis.xaxis.set_major_formatter(
+        FuncFormatter(lambda value, _position: rf"\${value:g}")
+    )
 
 
 def _save_figure(figure, output_directory, basename):
@@ -670,16 +741,32 @@ def write_frontier_grid(
         kernel_name = _display_kernel_name(str(point["kernel"]))
         series = (point["gpu_type"], point["precision"])
         kernels[kernel_name][series].append(point)
-    kernel_names = sorted(kernels)
+    kernel_names = [name for name in GRID_KERNEL_ORDER if name in kernels]
+    kernel_names.extend(sorted(set(kernels) - set(kernel_names)))
     if len(kernel_names) > GRID_SIZE:
         LOGGER.warning(
             "Plotting the first %d of %d kernels.", GRID_SIZE, len(kernel_names)
         )
 
+    plotted_series = {
+        kernel_name: {
+            series: plotted_frontier(points)
+            for series, points in series_by_gpu_and_precision.items()
+        }
+        for kernel_name, series_by_gpu_and_precision in kernels.items()
+    }
+    displayed_points = [
+        point
+        for series_by_gpu_and_precision in plotted_series.values()
+        for points in series_by_gpu_and_precision.values()
+        for point in points
+    ]
+    if not displayed_points:
+        raise RuntimeError("No Pareto frontier points were available to plot.")
     figure, axes = plt.subplots(
         GRID_ROWS,
         GRID_COLUMNS,
-        figsize=(20, 13),
+        figsize=(24, 16),
     )
     figure_legend_handles = []
     figure_legend_labels = []
@@ -688,18 +775,21 @@ def write_frontier_grid(
             kernel_name = kernel_names[index]
             endpoints = []
             for color_index, ((gpu_type, precision), points) in enumerate(
-                sorted(kernels[kernel_name].items())
+                sorted(plotted_series[kernel_name].items())
             ):
                 endpoints.append(
                     _plot_frontier(
                         axis,
-                        pareto_frontier(points),
+                        points,
                         GPU_COLORS[color_index % len(GPU_COLORS)],
                         f"{_display_gpu_type(gpu_type)}: {precision}",
                         include_origin=False,
                     )
                 )
-            _format_axis(axis, kernel_name, show_axis_labels=show_axis_labels)
+            title = GRID_TITLE_TRANSLATIONS.get(kernel_name, kernel_name)
+            _format_axis(axis, title, show_axis_labels=show_axis_labels)
+            axis.set_ylim(*GRID_Y_LIMITS_BY_ROW[index // GRID_COLUMNS])
+            _format_cost_ticks_as_usd(axis)
             if single_legend:
                 legend_handles, legend_labels = axis.get_legend_handles_labels()
                 figure_legend_handles.extend(legend_handles)
@@ -715,15 +805,15 @@ def write_frontier_grid(
             unique_legend.keys(),
             loc="lower center",
             ncols=3,
-            fontsize=12,
+            fontsize=16,
         )
         figure.supxlabel("Cumulative API cost (USD)", fontsize=AXIS_LABEL_FONT_SIZE,
                           fontweight="bold", y=0.075)
         figure.supylabel("Speedup vs. Triton", fontsize=AXIS_LABEL_FONT_SIZE,
                           fontweight="bold", x=0.015)
-        figure.subplots_adjust(left=0.075, bottom=0.15, hspace=0.43, wspace=0.25)
+        figure.subplots_adjust(left=0.075, bottom=0.15, hspace=0.30, wspace=0.16)
     else:
-        figure.subplots_adjust(hspace=0.45, wspace=0.3)
+        figure.subplots_adjust(hspace=0.32, wspace=0.18)
     saved_paths = _save_figure(figure, output_directory, basename)
     plt.close(figure)
     return saved_paths
