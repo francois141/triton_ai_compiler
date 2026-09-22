@@ -504,14 +504,14 @@ def first_symbolic_expression(volta_bin, target, specs_dir, environment):
 def first_output_line(output, fallback):
     return next((line for line in output.splitlines() if line.strip()), fallback)
 
-def print_table(results, kernels=KERNELS):
-    print("| Kernel | GPU | FP8 | FP16 |")
-    print("| --- | --- | --- | --- |")
+def print_table(results, kernels=KERNELS, gpus=GPU_TYPES, precisions=PRECISIONS):
+    header = " | ".join(("Kernel", "GPU", *precisions))
+    print(f"| {header} |")
+    print(f"| {' | '.join('---' for _ in range(2 + len(precisions)))} |")
     for kernel in kernels:
-        for gpu in GPU_TYPES:
-            fp8_status = results[kernel, gpu, "Float8"]
-            fp16_status = results[kernel, gpu, "Float16"]
-            print(f"| {kernel} | {gpu} | {fp8_status} | {fp16_status} |")
+        for gpu in gpus:
+            statuses = [results[kernel, gpu, precision] for precision in precisions]
+            print(f"| {kernel} | {gpu} | {' | '.join(statuses)} |")
 
 def build_volta(volta_dir, z3_lib_dir):
     environment = os.environ.copy()
@@ -544,6 +544,14 @@ def main(args):
         targets = {
             key: target for key, target in targets.items() if key[0] == args.kernel
         }
+    if args.gpu is not None:
+        targets = {
+            key: target for key, target in targets.items() if key[1] == args.gpu
+        }
+    if args.precision is not None:
+        targets = {
+            key: target for key, target in targets.items() if key[2] == args.precision
+        }
 
     results = {}
     for target in targets.values():
@@ -559,7 +567,12 @@ def main(args):
                 volta_bin, target, args.specs_dir, environment
             )
             print(f"{label} symbolic: {expression}")
-    print_table(results, kernels=(args.kernel,) if args.kernel is not None else KERNELS)
+    print_table(
+        results,
+        kernels=(args.kernel,) if args.kernel is not None else KERNELS,
+        gpus=(args.gpu,) if args.gpu is not None else GPU_TYPES,
+        precisions=(args.precision,) if args.precision is not None else PRECISIONS,
+    )
 
 
 if __name__ == "__main__":
@@ -578,6 +591,18 @@ if __name__ == "__main__":
         choices=KERNELS,
         default=None,
         help="Verify only the specified kernel instead of all kernels.",
+    )
+    parser.add_argument(
+        "--gpu",
+        choices=GPU_TYPES,
+        default=None,
+        help="Verify only the specified GPU instead of all GPUs.",
+    )
+    parser.add_argument(
+        "--precision",
+        choices=PRECISIONS,
+        default=None,
+        help="Verify only the specified precision instead of all precisions.",
     )
     parser.add_argument(
         "--verbose",
