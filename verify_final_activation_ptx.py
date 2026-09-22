@@ -8,13 +8,29 @@ from pathlib import Path
 
 GPU_TYPES = ("L40S", "H100", "B200")
 PRECISIONS = ("Float8", "Float16")
-KERNELS = ("ReLU", "SiLU", "SwiGLU", "RMSNorm", "RoPE", "Softmax", "GELU", "Lion")
+KERNELS = (
+    "ReLU",
+    "SiLU",
+    "SwiGLU",
+    "RMSNorm",
+    "RoPE",
+    "Softmax",
+    "GELU",
+    "Lion",
+    "MatrixVectorMultiplication",
+)
 ARRAY_LENGTH = 134217728
 RMS_NORM_WIDTH = 4096
 ROPE_HALF_WIDTH = 64
 SOFTMAX_WIDTH = 256
 LION_BLOCK_SIZE = 256
 LION_ELEMENT_WIDTH = 4
+MATRIX_VECTOR_MULTIPLICATION_COLS = 4096
+MATRIX_VECTOR_MULTIPLICATION_FALLBACK_ROWS = 32
+# tl.dot's cp.async-pipelined shared-memory tiles for a and x need more than
+# the generic 4-byte default; sized with headroom above the largest observed
+# block_k=1024 configuration's usage.
+MATRIX_VECTOR_MULTIPLICATION_DYN_SHARED = 200000
 KERNEL_DIRS = {"Lion": "LionNeurIPS2023Optimizer"}
 RMS_NORM_BLOCK_SIZES = {
     ("L40S", "Float8"): 512,
@@ -77,6 +93,13 @@ def load_hyperparameters(ptx_path):
     return hyperparameters if isinstance(hyperparameters, dict) else None
 
 
+def matrix_vector_rows_from_hyperparameters(hyperparameters):
+    if not hyperparameters:
+        return None
+    rows = hyperparameters.get("block_m")
+    return rows if isinstance(rows, int) else None
+
+
 def block_size_from_hyperparameters(hyperparameters, multi_dim):
     threads_x = hyperparameters.get("num_threads_x")
     if threads_x is None:
@@ -118,6 +141,7 @@ def verifier_command(volta_bin, target, specs_dir):
             "RoPE": "rope.spec",
             "Softmax": "softmax.spec",
             "GELU": "gelu.spec",
+            "MatrixVectorMultiplication": "matrix_vector_multiply.spec",
         }.get(target.kernel, f"{target.kernel.lower()}.spec")
     )
     fallback_block_size = (
@@ -142,7 +166,11 @@ def verifier_command(volta_bin, target, specs_dir):
     )
     block_size = hyperparameter_block_size or fallback_block_size
     dynamic_shared_memory = (
-        int(block_size) // 8 if target.kernel == "RMSNorm" else 4
+        int(block_size) // 8
+        if target.kernel == "RMSNorm"
+        else MATRIX_VECTOR_MULTIPLICATION_DYN_SHARED
+        if target.kernel == "MatrixVectorMultiplication"
+        else 4
     )
     command = [
         str(volta_bin),
@@ -284,6 +312,40 @@ def verifier_command(volta_bin, target, specs_dir):
                 f"N={ARRAY_LENGTH}",
                 "--sample",
                 "256",
+                "--verify-numeric",
+            ]
+        )
+        return command
+    if target.kernel == "MatrixVectorMultiplication":
+        rows = (
+            matrix_vector_rows_from_hyperparameters(target.hyperparameters)
+            or MATRIX_VECTOR_MULTIPLICATION_FALLBACK_ROWS
+        )
+        cols = MATRIX_VECTOR_MULTIPLICATION_COLS
+        command.extend(
+            [
+                "--array",
+                f"a:0x100000000:{element_width}:{rows * cols}:in",
+                "--array",
+                f"x:0x200000000:{element_width}:{cols}:in",
+                "--array",
+                f"y:0x300000000:2:{rows}:out",
+                "--param",
+                "ptr:a",
+                "--param",
+                "ptr:x",
+                "--param",
+                "ptr:y",
+                "--param",
+                "int:0",
+                "--param",
+                "int:0",
+                "--dim",
+                f"M={rows}",
+                "--dim",
+                f"K={cols}",
+                "--sample",
+                f"{rows}",
                 "--verify-numeric",
             ]
         )
