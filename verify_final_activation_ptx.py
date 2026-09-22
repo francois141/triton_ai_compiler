@@ -18,6 +18,7 @@ KERNELS = (
     "GELU",
     "Lion",
     "MatrixVectorMultiplication",
+    "Sigmoid",
 )
 ARRAY_LENGTH = 134217728
 RMS_NORM_WIDTH = 4096
