@@ -17,6 +17,7 @@ KERNELS = (
     "Softmax",
     "Lion",
     "MatrixVectorMultiplication",
+    "MatrixMultiplication",
     "Sigmoid",
 )
 ARRAY_LENGTH = 134217728
@@ -27,11 +28,20 @@ LION_BLOCK_SIZE = 256
 LION_ELEMENT_WIDTH = 4
 MATRIX_VECTOR_MULTIPLICATION_COLS = 4096
 MATRIX_VECTOR_MULTIPLICATION_FALLBACK_ROWS = 32
-# tl.dot's cp.async-pipelined shared-memory tiles for a and x need more than
-# the generic 4-byte default; sized with headroom above the largest observed
+# The reference problem is a square 4096x4096x4096 GEMM, so this doubles as
+# the full extent of every axis (M, N, and the K reduction).
+MATRIX_MULTIPLICATION_DIM_FULL = 4096
+MATRIX_MULTIPLICATION_FALLBACK_M = 32
+MATRIX_MULTIPLICATION_FALLBACK_N = 32
+MATRIX_MULTIPLICATION_SAMPLE = 256
+# tl.dot's cp.async-pipelined shared-memory tiles need more than the generic
+# 4-byte default; sized with headroom above the largest observed
 # block_k=1024 configuration's usage.
-MATRIX_VECTOR_MULTIPLICATION_DYN_SHARED = 200000
-KERNEL_DIRS = {"Lion": "LionNeurIPS2023Optimizer"}
+TILE_DOT_DYN_SHARED = 200000
+KERNEL_DIRS = {
+    "Lion": "LionNeurIPS2023Optimizer",
+    "MatrixMultiplication": "MatrixMultiplication",
+}
 RMS_NORM_BLOCK_SIZES = {
     ("L40S", "Float8"): 512,
     ("L40S", "Float16"): 256,
@@ -89,11 +99,11 @@ def load_hyperparameters(ptx_path):
     return hyperparameters if isinstance(hyperparameters, dict) else None
 
 
-def matrix_vector_rows_from_hyperparameters(hyperparameters):
+def block_dim_from_hyperparameters(hyperparameters, key):
     if not hyperparameters:
         return None
-    rows = hyperparameters.get("block_m")
-    return rows if isinstance(rows, int) else None
+    value = hyperparameters.get(key)
+    return value if isinstance(value, int) else None
 
 
 def block_size_from_hyperparameters(hyperparameters, multi_dim):
@@ -137,6 +147,7 @@ def verifier_command(volta_bin, target, specs_dir):
             "RoPE": "rope.spec",
             "Softmax": "softmax.spec",
             "MatrixVectorMultiplication": "matrix_vector_multiply.spec",
+            "MatrixMultiplication": "gemm.spec",
         }.get(target.kernel, f"{target.kernel.lower()}.spec")
     )
     fallback_block_size = (
@@ -158,11 +169,25 @@ def verifier_command(volta_bin, target, specs_dir):
         else None
     )
     block_size = hyperparameter_block_size or fallback_block_size
+    matrix_multiplication_rows = (
+        block_dim_from_hyperparameters(target.hyperparameters, "block_m")
+        or MATRIX_MULTIPLICATION_FALLBACK_M
+    )
+    matrix_multiplication_cols = (
+        block_dim_from_hyperparameters(target.hyperparameters, "block_n")
+        or MATRIX_MULTIPLICATION_FALLBACK_N
+    )
+    grid_size = (
+        f"{MATRIX_MULTIPLICATION_DIM_FULL // matrix_multiplication_rows},"
+        f"{MATRIX_MULTIPLICATION_DIM_FULL // matrix_multiplication_cols}"
+        if target.kernel == "MatrixMultiplication"
+        else "1"
+    )
     dynamic_shared_memory = (
         int(block_size) // 8
         if target.kernel == "RMSNorm"
-        else MATRIX_VECTOR_MULTIPLICATION_DYN_SHARED
-        if target.kernel == "MatrixVectorMultiplication"
+        else TILE_DOT_DYN_SHARED
+        if target.kernel in ("MatrixVectorMultiplication", "MatrixMultiplication")
         else 4
     )
     command = [
@@ -180,7 +205,7 @@ def verifier_command(volta_bin, target, specs_dir):
             "-b",
             str(block_size),
             "-g",
-            "1",
+            grid_size,
             "--dyn-shared",
             str(dynamic_shared_memory),
         ]
@@ -311,7 +336,7 @@ def verifier_command(volta_bin, target, specs_dir):
         return command
     if target.kernel == "MatrixVectorMultiplication":
         rows = (
-            matrix_vector_rows_from_hyperparameters(target.hyperparameters)
+            block_dim_from_hyperparameters(target.hyperparameters, "block_m")
             or MATRIX_VECTOR_MULTIPLICATION_FALLBACK_ROWS
         )
         cols = MATRIX_VECTOR_MULTIPLICATION_COLS
@@ -339,6 +364,44 @@ def verifier_command(volta_bin, target, specs_dir):
                 f"K={cols}",
                 "--sample",
                 f"{rows}",
+                "--verify-numeric",
+            ]
+        )
+        return command
+    if target.kernel == "MatrixMultiplication":
+        full = MATRIX_MULTIPLICATION_DIM_FULL
+        full_elements = full * full
+        command.extend(
+            [
+                "--array",
+                f"a:0x100000000:{element_width}:{full_elements}:in",
+                "--array",
+                f"b:0x200000000:{element_width}:{full_elements}:in",
+                "--array",
+                f"c:0x300000000:2:{full_elements}:out",
+                "--param",
+                "ptr:a",
+                "--param",
+                "ptr:b",
+                "--param",
+                "ptr:c",
+                "--param",
+                "int:0",
+                "--param",
+                "int:0",
+                "--dim",
+                f"M={full}",
+                "--dim",
+                f"N={full}",
+                "--dim",
+                f"K={full}",
+                "--sample",
+                str(
+                    min(
+                        matrix_multiplication_rows * matrix_multiplication_cols,
+                        MATRIX_MULTIPLICATION_SAMPLE,
+                    )
+                ),
                 "--verify-numeric",
             ]
         )
