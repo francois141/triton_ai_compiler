@@ -7,11 +7,14 @@ from pathlib import Path
 
 GPU_TYPES = ("L40S", "H100", "B200")
 PRECISIONS = ("Float8", "Float16")
-KERNELS = ("ReLU", "SiLU", "SwiGLU", "RMSNorm", "RoPE", "Softmax", "GELU")
+KERNELS = ("ReLU", "SiLU", "SwiGLU", "RMSNorm", "RoPE", "Softmax", "GELU", "Lion")
 ARRAY_LENGTH = 134217728
 RMS_NORM_WIDTH = 4096
 ROPE_HALF_WIDTH = 64
 SOFTMAX_WIDTH = 256
+LION_BLOCK_SIZE = 256
+LION_ELEMENT_WIDTH = 4
+KERNEL_DIRS = {"Lion": "LionNeurIPS2023Optimizer"}
 RMS_NORM_BLOCK_SIZES = {
     ("L40S", "Float8"): 512,
     ("L40S", "Float16"): 256,
@@ -52,6 +55,14 @@ def normalize_gpu(filename):
         return "B200"
     return None
 
+def normalize_precision(filename):
+    precision = next(
+        (value for value in PRECISIONS if f"_{value}_" in filename), None
+    )
+    if precision is None and "_Unknown_" in filename:
+        return "Float16"
+    return precision
+
 def find_targets(final_ptx_dir):
     targets = {}
     for kernel in KERNELS:
@@ -61,13 +72,10 @@ def find_targets(final_ptx_dir):
                     kernel, gpu, precision, None
                 )
 
-        kernel_dir = final_ptx_dir / f"{kernel}Kernel"
+        kernel_dir = final_ptx_dir / KERNEL_DIRS.get(kernel, f"{kernel}Kernel")
         for ptx_path in kernel_dir.glob("*.ptx"):
             gpu = normalize_gpu(ptx_path.name)
-            precision = next(
-                (value for value in PRECISIONS if f"_{value}_" in ptx_path.name),
-                None,
-            )
+            precision = normalize_precision(ptx_path.name)
             if gpu is None or precision is None:
                 continue
             key = kernel, gpu, precision
@@ -95,6 +103,8 @@ def verifier_command(volta_bin, target, specs_dir):
         if target.kernel == "Softmax"
         else GELU_BLOCK_SIZES.get((target.gpu, target.precision), 128)
         if target.kernel == "GELU"
+        else LION_BLOCK_SIZE
+        if target.kernel == "Lion"
         else 128
     )
     dynamic_shared_memory = (
@@ -213,6 +223,33 @@ def verifier_command(volta_bin, target, specs_dir):
                 f"D={SOFTMAX_WIDTH}",
                 "--sample",
                 f"{length}",
+                "--verify-numeric",
+            ]
+        )
+        return command
+    if target.kernel == "Lion":
+        command.extend(
+            [
+                "--array",
+                f"p:0x100000000:{LION_ELEMENT_WIDTH}:{ARRAY_LENGTH}:inout",
+                "--array",
+                f"grad:0x200000000:{LION_ELEMENT_WIDTH}:{ARRAY_LENGTH}:in",
+                "--array",
+                f"exp_avg:0x300000000:{LION_ELEMENT_WIDTH}:{ARRAY_LENGTH}:inout",
+                "--param",
+                "ptr:p",
+                "--param",
+                "ptr:grad",
+                "--param",
+                "ptr:exp_avg",
+                "--param",
+                "int:0",
+                "--param",
+                "int:0",
+                "--dim",
+                f"N={ARRAY_LENGTH}",
+                "--sample",
+                "256",
                 "--verify-numeric",
             ]
         )
