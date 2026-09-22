@@ -19,6 +19,7 @@ KERNELS = (
     "MatrixVectorMultiplication",
     "MatrixMultiplication",
     "Sigmoid",
+    "Convolution2D",
 )
 ARRAY_LENGTH = 134217728
 RMS_NORM_WIDTH = 4096
@@ -38,6 +39,22 @@ MATRIX_MULTIPLICATION_SAMPLE = 256
 # 4-byte default; sized with headroom above the largest observed
 # block_k=1024 configuration's usage.
 TILE_DOT_DYN_SHARED = 200000
+CONVOLUTION_2D_BATCH = 32
+CONVOLUTION_2D_INPUT_CHANNELS = 64
+CONVOLUTION_2D_INPUT_HEIGHT = 56
+CONVOLUTION_2D_INPUT_WIDTH = 56
+CONVOLUTION_2D_OUTPUT_CHANNELS = 128
+CONVOLUTION_2D_KERNEL_HEIGHT = 3
+CONVOLUTION_2D_KERNEL_WIDTH = 3
+CONVOLUTION_2D_OUTPUT_HEIGHT = (
+    CONVOLUTION_2D_INPUT_HEIGHT - CONVOLUTION_2D_KERNEL_HEIGHT + 1
+)
+CONVOLUTION_2D_OUTPUT_WIDTH = (
+    CONVOLUTION_2D_INPUT_WIDTH - CONVOLUTION_2D_KERNEL_WIDTH + 1
+)
+CONVOLUTION_2D_FALLBACK_BLOCK_M = 128
+CONVOLUTION_2D_FALLBACK_BLOCK_N = 128
+CONVOLUTION_2D_SAMPLE = 256
 KERNEL_DIRS = {
     "Lion": "LionNeurIPS2023Optimizer",
     "MatrixMultiplication": "MatrixMultiplication",
@@ -148,6 +165,7 @@ def verifier_command(volta_bin, target, specs_dir):
             "Softmax": "softmax.spec",
             "MatrixVectorMultiplication": "matrix_vector_multiply.spec",
             "MatrixMultiplication": "gemm.spec",
+            "Convolution2D": "conv2d.spec",
         }.get(target.kernel, f"{target.kernel.lower()}.spec")
     )
     fallback_block_size = (
@@ -177,17 +195,36 @@ def verifier_command(volta_bin, target, specs_dir):
         block_dim_from_hyperparameters(target.hyperparameters, "block_n")
         or MATRIX_MULTIPLICATION_FALLBACK_N
     )
+    convolution_2d_block_m = (
+        block_dim_from_hyperparameters(target.hyperparameters, "block_m")
+        or CONVOLUTION_2D_FALLBACK_BLOCK_M
+    )
+    convolution_2d_block_n = (
+        block_dim_from_hyperparameters(target.hyperparameters, "block_n")
+        or CONVOLUTION_2D_FALLBACK_BLOCK_N
+    )
+    convolution_2d_output_rows = (
+        CONVOLUTION_2D_BATCH
+        * CONVOLUTION_2D_OUTPUT_HEIGHT
+        * CONVOLUTION_2D_OUTPUT_WIDTH
+    )
     grid_size = (
         f"{MATRIX_MULTIPLICATION_DIM_FULL // matrix_multiplication_rows},"
         f"{MATRIX_MULTIPLICATION_DIM_FULL // matrix_multiplication_cols}"
         if target.kernel == "MatrixMultiplication"
+        else (
+            f"{(convolution_2d_output_rows + convolution_2d_block_m - 1) // convolution_2d_block_m},"
+            f"{(CONVOLUTION_2D_OUTPUT_CHANNELS + convolution_2d_block_n - 1) // convolution_2d_block_n}"
+        )
+        if target.kernel == "Convolution2D"
         else "1"
     )
     dynamic_shared_memory = (
         int(block_size) // 8
         if target.kernel == "RMSNorm"
         else TILE_DOT_DYN_SHARED
-        if target.kernel in ("MatrixVectorMultiplication", "MatrixMultiplication")
+        if target.kernel
+        in ("MatrixVectorMultiplication", "MatrixMultiplication", "Convolution2D")
         else 4
     )
     command = [
@@ -402,6 +439,65 @@ def verifier_command(volta_bin, target, specs_dir):
                         MATRIX_MULTIPLICATION_SAMPLE,
                     )
                 ),
+                "--verify-numeric",
+            ]
+        )
+        return command
+    if target.kernel == "Convolution2D":
+        batch = CONVOLUTION_2D_BATCH
+        input_channels = CONVOLUTION_2D_INPUT_CHANNELS
+        input_height = CONVOLUTION_2D_INPUT_HEIGHT
+        input_width = CONVOLUTION_2D_INPUT_WIDTH
+        output_channels = CONVOLUTION_2D_OUTPUT_CHANNELS
+        kernel_height = CONVOLUTION_2D_KERNEL_HEIGHT
+        kernel_width = CONVOLUTION_2D_KERNEL_WIDTH
+        output_height = CONVOLUTION_2D_OUTPUT_HEIGHT
+        output_width = CONVOLUTION_2D_OUTPUT_WIDTH
+        output_elements = batch * output_channels * output_height * output_width
+        command.extend(
+            [
+                "--array",
+                (
+                    "x_ptr:0x100000000:"
+                    f"{element_width}:{batch * input_channels * input_height * input_width}:in"
+                ),
+                "--array",
+                (
+                    "weight_ptr:0x200000000:"
+                    f"{element_width}:{output_channels * input_channels * kernel_height * kernel_width}:in"
+                ),
+                "--array",
+                f"output_ptr:0x300000000:2:{output_elements}:out",
+                "--param",
+                "ptr:x_ptr",
+                "--param",
+                "ptr:weight_ptr",
+                "--param",
+                "ptr:output_ptr",
+                "--param",
+                "int:0",
+                "--param",
+                "int:0",
+                "--dim",
+                f"BATCH={batch}",
+                "--dim",
+                f"CIN={input_channels}",
+                "--dim",
+                f"IH={input_height}",
+                "--dim",
+                f"IW={input_width}",
+                "--dim",
+                f"COUT={output_channels}",
+                "--dim",
+                f"OH={output_height}",
+                "--dim",
+                f"OW={output_width}",
+                "--dim",
+                f"KH={kernel_height}",
+                "--dim",
+                f"KW={kernel_width}",
+                "--sample",
+                str(min(output_elements, CONVOLUTION_2D_SAMPLE)),
                 "--verify-numeric",
             ]
         )
