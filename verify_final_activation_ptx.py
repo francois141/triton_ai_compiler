@@ -1,4 +1,5 @@
 import argparse
+import json
 import os
 import re
 import subprocess
@@ -38,6 +39,7 @@ GELU_BLOCK_SIZES = {
     ("B200", "Float8"): 256,
     ("B200", "Float16"): 256,
 }
+MULTI_DIM_BLOCK_KERNELS = ("RoPE", "Softmax")
 
 @dataclass(frozen=True)
 class VerificationTarget:
@@ -45,6 +47,7 @@ class VerificationTarget:
     gpu: str
     precision: str
     ptx_path: Path | None
+    hyperparameters: dict | None = None
 
 def normalize_gpu(filename):
     if "NVIDIA_L40S_" in filename:
@@ -62,6 +65,27 @@ def normalize_precision(filename):
     if precision is None and "_Unknown_" in filename:
         return "Float16"
     return precision
+
+def load_hyperparameters(ptx_path):
+    sidecar_path = ptx_path.with_suffix(".json")
+    if not sidecar_path.is_file():
+        return None
+    try:
+        hyperparameters = json.loads(sidecar_path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    return hyperparameters if isinstance(hyperparameters, dict) else None
+
+
+def block_size_from_hyperparameters(hyperparameters, multi_dim):
+    threads_x = hyperparameters.get("num_threads_x")
+    if threads_x is None:
+        return None
+    threads_y = hyperparameters.get("num_threads_y", 1)
+    if multi_dim and threads_y not in (None, 1):
+        return f"{threads_x},{threads_y}"
+    return str(threads_x)
+
 
 def find_targets(final_ptx_dir):
     targets = {}
@@ -81,7 +105,9 @@ def find_targets(final_ptx_dir):
             key = kernel, gpu, precision
             current = targets[key]
             if current.ptx_path is None or ptx_path.name > current.ptx_path.name:
-                targets[key] = VerificationTarget(kernel, gpu, precision, ptx_path)
+                targets[key] = VerificationTarget(
+                    kernel, gpu, precision, ptx_path, load_hyperparameters(ptx_path)
+                )
     return targets
 
 def verifier_command(volta_bin, target, specs_dir):
@@ -94,7 +120,7 @@ def verifier_command(volta_bin, target, specs_dir):
             "GELU": "gelu.spec",
         }.get(target.kernel, f"{target.kernel.lower()}.spec")
     )
-    block_size = (
+    fallback_block_size = (
         RMS_NORM_BLOCK_SIZES.get((target.gpu, target.precision), 128)
         if target.kernel == "RMSNorm"
         else ROPE_BLOCK_SIZES.get((target.gpu, target.precision), "128")
@@ -107,6 +133,14 @@ def verifier_command(volta_bin, target, specs_dir):
         if target.kernel == "Lion"
         else 128
     )
+    hyperparameter_block_size = (
+        block_size_from_hyperparameters(
+            target.hyperparameters, target.kernel in MULTI_DIM_BLOCK_KERNELS
+        )
+        if target.hyperparameters
+        else None
+    )
+    block_size = hyperparameter_block_size or fallback_block_size
     dynamic_shared_memory = (
         int(block_size) // 8 if target.kernel == "RMSNorm" else 4
     )

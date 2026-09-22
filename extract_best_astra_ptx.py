@@ -16,7 +16,16 @@ MISSING_GPU_TYPE = "NVIDIA L40S"
 
 Candidate = namedtuple(
     "Candidate",
-    ("kernel_dir", "kernel_name", "gpu", "precision", "speedup", "ptx", "source"),
+    (
+        "kernel_dir",
+        "kernel_name",
+        "gpu",
+        "precision",
+        "speedup",
+        "ptx",
+        "source",
+        "hyperparameters",
+    ),
 )
 
 
@@ -78,6 +87,28 @@ def candidate_from_json(path, data):
     return data.get("ptx"), parse_speedup(path, data)
 
 
+def extract_hyperparameters(data):
+    threads_source = data.get("ptx_hyperparameters") or data.get("candidate") or data
+    hyperparameters = {}
+    if isinstance(threads_source, dict):
+        for key in ("num_threads_x", "num_threads_y", "num_threads_z"):
+            if key in threads_source:
+                hyperparameters[key] = threads_source[key]
+
+    autotune_metrics = data.get("autotune_metrics")
+    selected_config = (
+        autotune_metrics.get("selected_config")
+        if isinstance(autotune_metrics, dict)
+        else None
+    )
+    if isinstance(selected_config, dict):
+        for key in ("block_m", "block_n", "block_k", "num_warps"):
+            if key in selected_config:
+                hyperparameters[key] = selected_config[key]
+
+    return hyperparameters
+
+
 def tool_output_metadata_path(ptx_path):
     stem, _, _ = ptx_path.stem.partition("_speedup_vs_triton_")
     return ptx_path.with_name(f"{stem}.json")
@@ -97,7 +128,15 @@ def tool_output_speedup(metadata_path, data):
 
 
 def append_candidate(
-    candidates, run_directory, kernel_name, precision, gpu, speedup, ptx, source
+    candidates,
+    run_directory,
+    kernel_name,
+    precision,
+    gpu,
+    speedup,
+    ptx,
+    source,
+    hyperparameters,
 ):
     if not isinstance(ptx, str) or not ptx.strip() or speedup is None:
         return
@@ -113,6 +152,7 @@ def append_candidate(
             speedup=speedup,
             ptx=ptx,
             source=source,
+            hyperparameters=hyperparameters,
         )
     )
 
@@ -148,6 +188,7 @@ def collect_candidates(astra_dir):
                 speedup,
                 ptx,
                 json_path,
+                extract_hyperparameters(data),
             )
 
         for ptx_path in sorted(
@@ -172,6 +213,7 @@ def collect_candidates(astra_dir):
                 tool_output_speedup(metadata_path, metadata),
                 ptx,
                 ptx_path,
+                extract_hyperparameters(metadata),
             )
 
     return candidates
@@ -198,15 +240,21 @@ def write_best_ptx(best, output_dir):
     output_dir.mkdir(parents=True, exist_ok=True)
     for output_path in output_dir.rglob("*.ptx"):
         output_path.unlink()
+    for sidecar_path in output_dir.rglob("*.json"):
+        sidecar_path.unlink()
     for candidate in sorted(best.values(), key=lambda item: item.source.as_posix()):
         kernel_dir = output_dir / safe_filename(candidate.kernel_name)
-        filename = (
+        stem = (
             f"{safe_filename(candidate.gpu)}_{candidate.precision}_"
-            f"{candidate.speedup:.4f}x.ptx"
+            f"{candidate.speedup:.4f}x"
         )
-        output_path = kernel_dir / filename
         kernel_dir.mkdir(parents=True, exist_ok=True)
+        output_path = kernel_dir / f"{stem}.ptx"
         output_path.write_text(candidate.ptx)
+        if candidate.hyperparameters:
+            (kernel_dir / f"{stem}.json").write_text(
+                json.dumps(candidate.hyperparameters, indent=2)
+            )
         LOGGER.info(
             "Wrote %.4fx %s to %s", candidate.speedup, candidate.source, output_path
         )
