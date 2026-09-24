@@ -23,6 +23,7 @@ KERNELS = (
     "FusedGEMMAddSiLU",
     "BitDeltaMatrixMultiplication",
     "BitDeltaBatchedMatrixMultiplication",
+    "FlashAttention",
 )
 ARRAY_LENGTH = 134217728
 RMS_NORM_WIDTH = 4096
@@ -63,11 +64,23 @@ CONVOLUTION_2D_OUTPUT_WIDTH = (
 CONVOLUTION_2D_FALLBACK_BLOCK_M = 128
 CONVOLUTION_2D_FALLBACK_BLOCK_N = 128
 CONVOLUTION_2D_SAMPLE = 256
+# FlashAttention runs 64 batches of 64 heads over 128 queries of 64 features,
+# and its launcher fixes the dynamic shared-memory budget at 32800 bytes.
+FLASH_ATTENTION_BATCH = 64
+FLASH_ATTENTION_HEADS = 64
+FLASH_ATTENTION_SEQUENCE = 128
+FLASH_ATTENTION_HEAD_DIM = 64
+FLASH_ATTENTION_FALLBACK_BLOCK_M = 64
+FLASH_ATTENTION_DYN_SHARED = 32800
+# One full query row of the output: every element of a row shares the same
+# reduction over keys, so a wider sample costs unfolding time for no reach.
+FLASH_ATTENTION_SAMPLE = FLASH_ATTENTION_HEAD_DIM
 KERNEL_DIRS = {
     "Lion": "LionNeurIPS2023Optimizer",
     "MatrixMultiplication": "MatrixMultiplication",
     "BitDeltaMatrixMultiplication": "BitDeltaNeurIPS2024Matmul",
     "BitDeltaBatchedMatrixMultiplication": "BitDeltaNeurIPS2024BatchedMatmul",
+    "FlashAttention": "FlashAttentionNeurIPS2022Forward",
 }
 RMS_NORM_BLOCK_SIZES = {
     ("L40S", "Float8"): 512,
@@ -250,6 +263,7 @@ def verifier_command(volta_bin, target, specs_dir):
             "Convolution2D": "conv2d.spec",
             "BitDeltaMatrixMultiplication": "bitdelta_matmul.spec",
             "BitDeltaBatchedMatrixMultiplication": "bitdelta_batched_matmul.spec",
+            "FlashAttention": "flash_attention.spec",
         }.get(target.kernel, f"{target.kernel.lower()}.spec")
     )
     fallback_block_size = (
@@ -291,6 +305,10 @@ def verifier_command(volta_bin, target, specs_dir):
         block_dim_from_hyperparameters(target.hyperparameters, "block_n")
         or CONVOLUTION_2D_FALLBACK_BLOCK_N
     )
+    flash_attention_block_m = (
+        block_dim_from_hyperparameters(target.hyperparameters, "block_m")
+        or FLASH_ATTENTION_FALLBACK_BLOCK_M
+    )
     convolution_2d_output_rows = (
         CONVOLUTION_2D_BATCH
         * CONVOLUTION_2D_OUTPUT_HEIGHT
@@ -306,6 +324,11 @@ def verifier_command(volta_bin, target, specs_dir):
             f"{(CONVOLUTION_2D_OUTPUT_CHANNELS + convolution_2d_block_n - 1) // convolution_2d_block_n}"
         )
         if target.kernel == "Convolution2D"
+        else (
+            f"{-(-FLASH_ATTENTION_SEQUENCE // flash_attention_block_m)},"
+            f"{FLASH_ATTENTION_BATCH * FLASH_ATTENTION_HEADS}"
+        )
+        if target.kernel == "FlashAttention"
         else "1"
     )
     dynamic_shared_memory = (
@@ -321,6 +344,8 @@ def verifier_command(volta_bin, target, specs_dir):
             "BitDeltaMatrixMultiplication",
             "BitDeltaBatchedMatrixMultiplication",
         )
+        else FLASH_ATTENTION_DYN_SHARED
+        if target.kernel == "FlashAttention"
         else 4
     )
     command = [
@@ -579,6 +604,58 @@ def verifier_command(volta_bin, target, specs_dir):
                 f"KW={kernel_width}",
                 "--sample",
                 str(min(output_elements, CONVOLUTION_2D_SAMPLE)),
+                "--verify-numeric",
+            ]
+        )
+        return command
+    if target.kernel == "FlashAttention":
+        heads = FLASH_ATTENTION_BATCH * FLASH_ATTENTION_HEADS
+        rows = heads * FLASH_ATTENTION_SEQUENCE
+        elements = rows * FLASH_ATTENTION_HEAD_DIM
+        command.extend(
+            [
+                "--array",
+                f"q:0x100000000:{element_width}:{elements}:in",
+                "--array",
+                f"k:0x200000000:{element_width}:{elements}:in",
+                "--array",
+                f"v:0x300000000:{element_width}:{elements}:in",
+                "--array",
+                f"bias:0x400000000:{element_width}:1:in",
+                "--array",
+                f"o:0x500000000:2:{elements}:out",
+                "--array",
+                f"lse:0x600000000:4:{rows}:out",
+                "--array",
+                f"tmp:0x700000000:4:{rows}:out",
+                "--param",
+                "ptr:q",
+                "--param",
+                "ptr:k",
+                "--param",
+                "ptr:v",
+                "--param",
+                "ptr:bias",
+                "--param",
+                "ptr:o",
+                "--param",
+                "ptr:lse",
+                "--param",
+                "ptr:tmp",
+                "--param",
+                "int:0",
+                "--param",
+                "int:0",
+                "--dim",
+                f"B={FLASH_ATTENTION_BATCH}",
+                "--dim",
+                f"H={FLASH_ATTENTION_HEADS}",
+                "--dim",
+                f"T={FLASH_ATTENTION_SEQUENCE}",
+                "--dim",
+                f"D={FLASH_ATTENTION_HEAD_DIM}",
+                "--sample",
+                f"{FLASH_ATTENTION_SAMPLE}",
                 "--verify-numeric",
             ]
         )
