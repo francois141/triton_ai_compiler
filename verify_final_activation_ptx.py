@@ -26,6 +26,8 @@ KERNELS = (
     "FlashAttention",
     "FlashSinkhorn",
     "SageAttention",
+    "Mamba2ChunkState",
+    "Mamba2ChunkScan",
 )
 ARRAY_LENGTH = 134217728
 RMS_NORM_WIDTH = 4096
@@ -99,6 +101,27 @@ SAGE_ATTENTION_QUERY_BLOCKS = 8
 SAGE_ATTENTION_KEY_BLOCKS = 2
 SAGE_ATTENTION_DYN_SHARED = 40968
 SAGE_ATTENTION_SAMPLE = SAGE_ATTENTION_HEAD_DIM
+# Mamba-2 chunk state: 64 batches of 8 chunks of 256 tokens, 4 B/C groups
+# shared by 2 heads each, 64 head channels and 128 state channels.
+MAMBA2_STATE_BATCH = 64
+MAMBA2_STATE_CHUNKS = 8
+MAMBA2_STATE_CHUNK_SIZE = 256
+MAMBA2_STATE_GROUPS = 4
+MAMBA2_STATE_GROUP_HEADS = 2
+MAMBA2_STATE_HEAD_DIM = 64
+MAMBA2_STATE_DSTATE = 128
+MAMBA2_STATE_DYN_SHARED = 50176
+# Mamba-2 chunk scan: 4 batches of 16 chunks of 128 tokens, 2 groups shared
+# by 4 heads each, 128 head channels and 32 state channels.
+MAMBA2_SCAN_BATCH = 4
+MAMBA2_SCAN_CHUNKS = 16
+MAMBA2_SCAN_CHUNK_SIZE = 128
+MAMBA2_SCAN_GROUPS = 2
+MAMBA2_SCAN_GROUP_HEADS = 4
+MAMBA2_SCAN_HEAD_DIM = 128
+MAMBA2_SCAN_DSTATE = 32
+MAMBA2_SCAN_BLOCK_M = 32
+MAMBA2_SCAN_DYN_SHARED = 25088
 KERNEL_DIRS = {
     "Lion": "LionNeurIPS2023Optimizer",
     "MatrixMultiplication": "MatrixMultiplication",
@@ -107,6 +130,8 @@ KERNEL_DIRS = {
     "FlashAttention": "FlashAttentionNeurIPS2022Forward",
     "FlashSinkhorn": "FlashSinkhornFusedSchurMatvec",
     "SageAttention": "SageAttentionICLR2025",
+    "Mamba2ChunkState": "Mamba2ChunkStateForward",
+    "Mamba2ChunkScan": "Mamba2ChunkScanForward",
 }
 RMS_NORM_BLOCK_SIZES = {
     ("L40S", "Float8"): 512,
@@ -290,6 +315,8 @@ def verifier_command(volta_bin, target, specs_dir):
             "FlashAttention": "flash_attention.spec",
             "FlashSinkhorn": "flash_sinkhorn.spec",
             "SageAttention": "sage_attention.spec",
+            "Mamba2ChunkState": "mamba2_chunk_state.spec",
+            "Mamba2ChunkScan": "mamba2_chunk_scan.spec",
         }.get(target.kernel, f"{target.kernel.lower()}.spec")
     )
     fallback_block_size = (
@@ -366,6 +393,19 @@ def verifier_command(volta_bin, target, specs_dir):
             f"{SAGE_ATTENTION_BATCH}"
         )
         if target.kernel == "SageAttention"
+        # Both Mamba-2 passes fold batch and chunk into the second grid axis
+        # and take the head from the third.
+        else (
+            f"1,{MAMBA2_STATE_BATCH * MAMBA2_STATE_CHUNKS},"
+            f"{MAMBA2_STATE_GROUPS * MAMBA2_STATE_GROUP_HEADS}"
+        )
+        if target.kernel == "Mamba2ChunkState"
+        else (
+            f"{MAMBA2_SCAN_CHUNK_SIZE // MAMBA2_SCAN_BLOCK_M},"
+            f"{MAMBA2_SCAN_BATCH * MAMBA2_SCAN_CHUNKS},"
+            f"{MAMBA2_SCAN_GROUPS * MAMBA2_SCAN_GROUP_HEADS}"
+        )
+        if target.kernel == "Mamba2ChunkScan"
         else "1"
     )
     dynamic_shared_memory = (
@@ -387,6 +427,10 @@ def verifier_command(volta_bin, target, specs_dir):
         if target.kernel == "FlashSinkhorn"
         else SAGE_ATTENTION_DYN_SHARED
         if target.kernel == "SageAttention"
+        else MAMBA2_STATE_DYN_SHARED
+        if target.kernel == "Mamba2ChunkState"
+        else MAMBA2_SCAN_DYN_SHARED
+        if target.kernel == "Mamba2ChunkScan"
         else 4
     )
     command = [
@@ -739,6 +783,100 @@ def verifier_command(volta_bin, target, specs_dir):
                     ("D", SAGE_ATTENTION_HEAD_DIM),
                 ],
                 SAGE_ATTENTION_SAMPLE,
+            )
+        )
+        return command
+    if target.kernel == "Mamba2ChunkState":
+        heads = MAMBA2_STATE_GROUPS * MAMBA2_STATE_GROUP_HEADS
+        tokens = MAMBA2_STATE_BATCH * MAMBA2_STATE_CHUNKS * MAMBA2_STATE_CHUNK_SIZE
+        chunk_rows = MAMBA2_STATE_BATCH * heads * MAMBA2_STATE_CHUNKS
+        command.extend(
+            launch_arguments(
+                [
+                    ("x", element_width, tokens * heads * MAMBA2_STATE_HEAD_DIM, "in"),
+                    (
+                        "b",
+                        element_width,
+                        tokens * MAMBA2_STATE_GROUPS * MAMBA2_STATE_DSTATE,
+                        "in",
+                    ),
+                    (
+                        "states",
+                        4,
+                        MAMBA2_STATE_BATCH
+                        * MAMBA2_STATE_CHUNKS
+                        * heads
+                        * MAMBA2_STATE_HEAD_DIM
+                        * MAMBA2_STATE_DSTATE,
+                        "out",
+                    ),
+                    ("dt", 4, chunk_rows * MAMBA2_STATE_CHUNK_SIZE, "in"),
+                    ("dA_cumsum", 4, chunk_rows * MAMBA2_STATE_CHUNK_SIZE, "in"),
+                    ("seq_idx", 4, tokens, "in"),
+                ],
+                [
+                    ("BATCH", MAMBA2_STATE_BATCH),
+                    ("NC", MAMBA2_STATE_CHUNKS),
+                    ("CHUNK", MAMBA2_STATE_CHUNK_SIZE),
+                    ("NGROUPS", MAMBA2_STATE_GROUPS),
+                    ("RATIO", MAMBA2_STATE_GROUP_HEADS),
+                    ("HDIM", MAMBA2_STATE_HEAD_DIM),
+                    ("DSTATE", MAMBA2_STATE_DSTATE),
+                ],
+                MAMBA2_STATE_DSTATE,
+            )
+        )
+        return command
+    if target.kernel == "Mamba2ChunkScan":
+        heads = MAMBA2_SCAN_GROUPS * MAMBA2_SCAN_GROUP_HEADS
+        tokens = MAMBA2_SCAN_BATCH * MAMBA2_SCAN_CHUNKS * MAMBA2_SCAN_CHUNK_SIZE
+        activations = tokens * heads * MAMBA2_SCAN_HEAD_DIM
+        chunk_rows = MAMBA2_SCAN_BATCH * heads * MAMBA2_SCAN_CHUNKS
+        states = (
+            MAMBA2_SCAN_BATCH
+            * MAMBA2_SCAN_CHUNKS
+            * heads
+            * MAMBA2_SCAN_HEAD_DIM
+            * MAMBA2_SCAN_DSTATE
+        )
+        command.extend(
+            launch_arguments(
+                [
+                    (
+                        "cb",
+                        4,
+                        MAMBA2_SCAN_BATCH
+                        * MAMBA2_SCAN_CHUNKS
+                        * MAMBA2_SCAN_GROUPS
+                        * MAMBA2_SCAN_CHUNK_SIZE**2,
+                        "in",
+                    ),
+                    ("x", element_width, activations, "in"),
+                    ("z", element_width, activations, "in"),
+                    ("out", 2, activations, "out"),
+                    ("out_x", 2, activations, "out"),
+                    ("dt", 4, chunk_rows * MAMBA2_SCAN_CHUNK_SIZE, "in"),
+                    ("dA_cumsum", 4, chunk_rows * MAMBA2_SCAN_CHUNK_SIZE, "in"),
+                    ("seq_idx", 4, tokens, "in"),
+                    (
+                        "C",
+                        element_width,
+                        tokens * MAMBA2_SCAN_GROUPS * MAMBA2_SCAN_DSTATE,
+                        "in",
+                    ),
+                    ("prev_states", 4, states, "in"),
+                    ("D", 4, heads * MAMBA2_SCAN_HEAD_DIM, "in"),
+                ],
+                [
+                    ("BATCH", MAMBA2_SCAN_BATCH),
+                    ("NC", MAMBA2_SCAN_CHUNKS),
+                    ("CHUNK", MAMBA2_SCAN_CHUNK_SIZE),
+                    ("NGROUPS", MAMBA2_SCAN_GROUPS),
+                    ("RATIO", MAMBA2_SCAN_GROUP_HEADS),
+                    ("HDIM", MAMBA2_SCAN_HEAD_DIM),
+                    ("DSTATE", MAMBA2_SCAN_DSTATE),
+                ],
+                MAMBA2_SCAN_HEAD_DIM,
             )
         )
         return command
