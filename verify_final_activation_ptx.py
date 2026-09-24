@@ -28,6 +28,7 @@ KERNELS = (
     "SageAttention",
     "Mamba2ChunkState",
     "Mamba2ChunkScan",
+    "ForgettingAttention",
 )
 ARRAY_LENGTH = 134217728
 RMS_NORM_WIDTH = 4096
@@ -122,6 +123,15 @@ MAMBA2_SCAN_HEAD_DIM = 128
 MAMBA2_SCAN_DSTATE = 32
 MAMBA2_SCAN_BLOCK_M = 32
 MAMBA2_SCAN_DYN_SHARED = 25088
+# ForgettingAttention: 16 batches of 16 heads over 1024 queries and keys of
+# 64 features, whose scores carry a per-position log-decay bias.
+FORGETTING_ATTENTION_BATCH = 16
+FORGETTING_ATTENTION_HEADS = 16
+FORGETTING_ATTENTION_SEQUENCE = 1024
+FORGETTING_ATTENTION_HEAD_DIM = 64
+FORGETTING_ATTENTION_FALLBACK_BLOCK_M = 128
+FORGETTING_ATTENTION_DYN_SHARED = 66592
+FORGETTING_ATTENTION_SAMPLE = FORGETTING_ATTENTION_HEAD_DIM
 KERNEL_DIRS = {
     "Lion": "LionNeurIPS2023Optimizer",
     "MatrixMultiplication": "MatrixMultiplication",
@@ -132,6 +142,7 @@ KERNEL_DIRS = {
     "SageAttention": "SageAttentionICLR2025",
     "Mamba2ChunkState": "Mamba2ChunkStateForward",
     "Mamba2ChunkScan": "Mamba2ChunkScanForward",
+    "ForgettingAttention": "ForgettingAttentionICLR2025Forward",
 }
 RMS_NORM_BLOCK_SIZES = {
     ("L40S", "Float8"): 512,
@@ -317,6 +328,7 @@ def verifier_command(volta_bin, target, specs_dir):
             "SageAttention": "sage_attention.spec",
             "Mamba2ChunkState": "mamba2_chunk_state.spec",
             "Mamba2ChunkScan": "mamba2_chunk_scan.spec",
+            "ForgettingAttention": "forgetting_attention.spec",
         }.get(target.kernel, f"{target.kernel.lower()}.spec")
     )
     fallback_block_size = (
@@ -357,6 +369,10 @@ def verifier_command(volta_bin, target, specs_dir):
     convolution_2d_block_n = (
         block_dim_from_hyperparameters(target.hyperparameters, "block_n")
         or CONVOLUTION_2D_FALLBACK_BLOCK_N
+    )
+    forgetting_attention_block_m = (
+        block_dim_from_hyperparameters(target.hyperparameters, "block_m")
+        or FORGETTING_ATTENTION_FALLBACK_BLOCK_M
     )
     flash_attention_block_m = (
         block_dim_from_hyperparameters(target.hyperparameters, "block_m")
@@ -406,6 +422,11 @@ def verifier_command(volta_bin, target, specs_dir):
             f"{MAMBA2_SCAN_GROUPS * MAMBA2_SCAN_GROUP_HEADS}"
         )
         if target.kernel == "Mamba2ChunkScan"
+        else (
+            f"{-(-FORGETTING_ATTENTION_SEQUENCE // forgetting_attention_block_m)},"
+            f"{FORGETTING_ATTENTION_HEADS},{FORGETTING_ATTENTION_BATCH}"
+        )
+        if target.kernel == "ForgettingAttention"
         else "1"
     )
     dynamic_shared_memory = (
@@ -431,6 +452,8 @@ def verifier_command(volta_bin, target, specs_dir):
         if target.kernel == "Mamba2ChunkState"
         else MAMBA2_SCAN_DYN_SHARED
         if target.kernel == "Mamba2ChunkScan"
+        else FORGETTING_ATTENTION_DYN_SHARED
+        if target.kernel == "ForgettingAttention"
         else 4
     )
     command = [
@@ -783,6 +806,33 @@ def verifier_command(volta_bin, target, specs_dir):
                     ("D", SAGE_ATTENTION_HEAD_DIM),
                 ],
                 SAGE_ATTENTION_SAMPLE,
+            )
+        )
+        return command
+    if target.kernel == "ForgettingAttention":
+        rows = (
+            FORGETTING_ATTENTION_BATCH
+            * FORGETTING_ATTENTION_HEADS
+            * FORGETTING_ATTENTION_SEQUENCE
+        )
+        elements = rows * FORGETTING_ATTENTION_HEAD_DIM
+        command.extend(
+            launch_arguments(
+                [
+                    ("q", element_width, elements, "in"),
+                    ("k", element_width, elements, "in"),
+                    ("v", element_width, elements, "in"),
+                    ("log_lambda", 4, rows, "in"),
+                    ("l", 4, rows, "out"),
+                    ("o", 2, elements, "out"),
+                ],
+                [
+                    ("Z", FORGETTING_ATTENTION_BATCH),
+                    ("H", FORGETTING_ATTENTION_HEADS),
+                    ("T", FORGETTING_ATTENTION_SEQUENCE),
+                    ("D", FORGETTING_ATTENTION_HEAD_DIM),
+                ],
+                FORGETTING_ATTENTION_SAMPLE,
             )
         )
         return command
