@@ -24,6 +24,8 @@ KERNELS = (
     "BitDeltaMatrixMultiplication",
     "BitDeltaBatchedMatrixMultiplication",
     "FlashAttention",
+    "FlashSinkhorn",
+    "SageAttention",
 )
 ARRAY_LENGTH = 134217728
 RMS_NORM_WIDTH = 4096
@@ -75,12 +77,36 @@ FLASH_ATTENTION_DYN_SHARED = 32800
 # One full query row of the output: every element of a row shares the same
 # reduction over keys, so a wider sample costs unfolding time for no reach.
 FLASH_ATTENTION_SAMPLE = FLASH_ATTENTION_HEAD_DIM
+# FlashSinkhorn updates both potentials in one launch: the first half of the
+# flat grid covers the source blocks, the second half the target blocks.
+FLASH_SINKHORN_SOURCE_SIZE = 1024
+FLASH_SINKHORN_TARGET_SIZE = 1024
+FLASH_SINKHORN_FEATURE_DIM = 64
+FLASH_SINKHORN_CLASSES = 1
+FLASH_SINKHORN_BLOCK_M = 32
+FLASH_SINKHORN_BLOCK_N = 32
+FLASH_SINKHORN_DYN_SHARED = 20992
+FLASH_SINKHORN_SAMPLE = 32
+# SageAttention runs int8 queries and keys with one scale per query and key
+# block, over 16 batches of 2 key heads shared by 8 query heads each.
+SAGE_ATTENTION_BATCH = 16
+SAGE_ATTENTION_KEY_HEADS = 2
+SAGE_ATTENTION_QUERY_GROUPS = 8
+SAGE_ATTENTION_HEAD_DIM = 64
+SAGE_ATTENTION_BLOCK_M = 128
+SAGE_ATTENTION_BLOCK_N = 64
+SAGE_ATTENTION_QUERY_BLOCKS = 8
+SAGE_ATTENTION_KEY_BLOCKS = 2
+SAGE_ATTENTION_DYN_SHARED = 40968
+SAGE_ATTENTION_SAMPLE = SAGE_ATTENTION_HEAD_DIM
 KERNEL_DIRS = {
     "Lion": "LionNeurIPS2023Optimizer",
     "MatrixMultiplication": "MatrixMultiplication",
     "BitDeltaMatrixMultiplication": "BitDeltaNeurIPS2024Matmul",
     "BitDeltaBatchedMatrixMultiplication": "BitDeltaNeurIPS2024BatchedMatmul",
     "FlashAttention": "FlashAttentionNeurIPS2022Forward",
+    "FlashSinkhorn": "FlashSinkhornFusedSchurMatvec",
+    "SageAttention": "SageAttentionICLR2025",
 }
 RMS_NORM_BLOCK_SIZES = {
     ("L40S", "Float8"): 512,
@@ -205,7 +231,7 @@ GEMM_ARRAY_LAYOUTS = {
         ("c", 2, False, "out"),
     ),
 }
-GEMM_ARRAY_BASE_STRIDE = 0x100000000
+ARRAY_BASE_STRIDE = 0x100000000
 # Batch extent of the GEMM-shaped kernels whose arrays carry a leading batch
 # axis; the others run a single 4096-cubed problem.
 GEMM_BATCH_SIZES = {"BitDeltaBatchedMatrixMultiplication": BITDELTA_BATCH_SIZE}
@@ -217,17 +243,15 @@ GEMM_FALLBACK_TILES = {
 }
 
 
-def gemm_arguments(arrays, batch, sample):
+def launch_arguments(arrays, axes, sample):
     arguments = []
     for index, (name, width, length, kind) in enumerate(arrays):
-        base = (index + 1) * GEMM_ARRAY_BASE_STRIDE
+        base = (index + 1) * ARRAY_BASE_STRIDE
         arguments.extend(["--array", f"{name}:{base:#x}:{width}:{length}:{kind}"])
     arguments.extend(
         argument for name, *_ in arrays for argument in ("--param", f"ptr:{name}")
     )
     arguments.extend(["--param", "int:0", "--param", "int:0"])
-    axes = [("BATCH", batch)] if batch > 1 else []
-    axes.extend((axis, MATRIX_MULTIPLICATION_DIM_FULL) for axis in ("M", "N", "K"))
     arguments.extend(
         argument for axis, extent in axes for argument in ("--dim", f"{axis}={extent}")
     )
@@ -264,6 +288,8 @@ def verifier_command(volta_bin, target, specs_dir):
             "BitDeltaMatrixMultiplication": "bitdelta_matmul.spec",
             "BitDeltaBatchedMatrixMultiplication": "bitdelta_batched_matmul.spec",
             "FlashAttention": "flash_attention.spec",
+            "FlashSinkhorn": "flash_sinkhorn.spec",
+            "SageAttention": "sage_attention.spec",
         }.get(target.kernel, f"{target.kernel.lower()}.spec")
     )
     fallback_block_size = (
@@ -329,6 +355,17 @@ def verifier_command(volta_bin, target, specs_dir):
             f"{FLASH_ATTENTION_BATCH * FLASH_ATTENTION_HEADS}"
         )
         if target.kernel == "FlashAttention"
+        else str(
+            -(-FLASH_SINKHORN_SOURCE_SIZE // FLASH_SINKHORN_BLOCK_M)
+            + -(-FLASH_SINKHORN_TARGET_SIZE // FLASH_SINKHORN_BLOCK_N)
+        )
+        if target.kernel == "FlashSinkhorn"
+        else (
+            f"{SAGE_ATTENTION_QUERY_BLOCKS},"
+            f"{SAGE_ATTENTION_KEY_HEADS * SAGE_ATTENTION_QUERY_GROUPS},"
+            f"{SAGE_ATTENTION_BATCH}"
+        )
+        if target.kernel == "SageAttention"
         else "1"
     )
     dynamic_shared_memory = (
@@ -346,6 +383,10 @@ def verifier_command(volta_bin, target, specs_dir):
         )
         else FLASH_ATTENTION_DYN_SHARED
         if target.kernel == "FlashAttention"
+        else FLASH_SINKHORN_DYN_SHARED
+        if target.kernel == "FlashSinkhorn"
+        else SAGE_ATTENTION_DYN_SHARED
+        if target.kernel == "SageAttention"
         else 4
     )
     command = [
@@ -531,7 +572,7 @@ def verifier_command(volta_bin, target, specs_dir):
         full_elements = batch * MATRIX_MULTIPLICATION_DIM_FULL**2
         packed_elements = full_elements // BITDELTA_BITS_PER_WORD
         command.extend(
-            gemm_arguments(
+            launch_arguments(
                 [
                     (
                         name,
@@ -541,7 +582,8 @@ def verifier_command(volta_bin, target, specs_dir):
                     )
                     for name, width, packed, kind in GEMM_ARRAY_LAYOUTS[target.kernel]
                 ],
-                batch,
+                ([("BATCH", batch)] if batch > 1 else [])
+                + [(axis, MATRIX_MULTIPLICATION_DIM_FULL) for axis in ("M", "N", "K")],
                 min(
                     matrix_multiplication_rows * matrix_multiplication_cols,
                     MATRIX_MULTIPLICATION_SAMPLE,
@@ -609,55 +651,95 @@ def verifier_command(volta_bin, target, specs_dir):
         )
         return command
     if target.kernel == "FlashAttention":
-        heads = FLASH_ATTENTION_BATCH * FLASH_ATTENTION_HEADS
-        rows = heads * FLASH_ATTENTION_SEQUENCE
+        rows = FLASH_ATTENTION_BATCH * FLASH_ATTENTION_HEADS * FLASH_ATTENTION_SEQUENCE
         elements = rows * FLASH_ATTENTION_HEAD_DIM
         command.extend(
-            [
-                "--array",
-                f"q:0x100000000:{element_width}:{elements}:in",
-                "--array",
-                f"k:0x200000000:{element_width}:{elements}:in",
-                "--array",
-                f"v:0x300000000:{element_width}:{elements}:in",
-                "--array",
-                f"bias:0x400000000:{element_width}:1:in",
-                "--array",
-                f"o:0x500000000:2:{elements}:out",
-                "--array",
-                f"lse:0x600000000:4:{rows}:out",
-                "--array",
-                f"tmp:0x700000000:4:{rows}:out",
-                "--param",
-                "ptr:q",
-                "--param",
-                "ptr:k",
-                "--param",
-                "ptr:v",
-                "--param",
-                "ptr:bias",
-                "--param",
-                "ptr:o",
-                "--param",
-                "ptr:lse",
-                "--param",
-                "ptr:tmp",
-                "--param",
-                "int:0",
-                "--param",
-                "int:0",
-                "--dim",
-                f"B={FLASH_ATTENTION_BATCH}",
-                "--dim",
-                f"H={FLASH_ATTENTION_HEADS}",
-                "--dim",
-                f"T={FLASH_ATTENTION_SEQUENCE}",
-                "--dim",
-                f"D={FLASH_ATTENTION_HEAD_DIM}",
-                "--sample",
-                f"{FLASH_ATTENTION_SAMPLE}",
-                "--verify-numeric",
-            ]
+            launch_arguments(
+                [
+                    ("q", element_width, elements, "in"),
+                    ("k", element_width, elements, "in"),
+                    ("v", element_width, elements, "in"),
+                    ("bias", element_width, 1, "in"),
+                    ("o", 2, elements, "out"),
+                    ("lse", 4, rows, "out"),
+                    ("tmp", 4, rows, "out"),
+                ],
+                [
+                    ("B", FLASH_ATTENTION_BATCH),
+                    ("H", FLASH_ATTENTION_HEADS),
+                    ("T", FLASH_ATTENTION_SEQUENCE),
+                    ("D", FLASH_ATTENTION_HEAD_DIM),
+                ],
+                FLASH_ATTENTION_SAMPLE,
+            )
+        )
+        return command
+    if target.kernel == "FlashSinkhorn":
+        source_points = FLASH_SINKHORN_SOURCE_SIZE
+        target_points = FLASH_SINKHORN_TARGET_SIZE
+        features = FLASH_SINKHORN_FEATURE_DIM
+        command.extend(
+            launch_arguments(
+                [
+                    ("x", element_width, source_points * features, "in"),
+                    ("y", element_width, target_points * features, "in"),
+                    ("f_hat", 4, source_points, "in"),
+                    ("g_hat", 4, target_points, "in"),
+                    ("log_a", 4, source_points, "in"),
+                    ("log_b", 4, target_points, "in"),
+                    ("f_out", 4, source_points, "out"),
+                    ("g_out", 4, target_points, "out"),
+                    ("label_x", 4, source_points, "in"),
+                    ("label_y", 4, target_points, "in"),
+                    ("w_cost", 4, FLASH_SINKHORN_CLASSES**2, "in"),
+                ],
+                [
+                    ("N", source_points),
+                    ("M", target_points),
+                    ("D", features),
+                ],
+                FLASH_SINKHORN_SAMPLE,
+            )
+        )
+        return command
+    if target.kernel == "SageAttention":
+        queries = (
+            SAGE_ATTENTION_BATCH
+            * SAGE_ATTENTION_KEY_HEADS
+            * SAGE_ATTENTION_QUERY_GROUPS
+            * SAGE_ATTENTION_QUERY_BLOCKS
+            * SAGE_ATTENTION_BLOCK_M
+        )
+        keys = (
+            SAGE_ATTENTION_BATCH
+            * SAGE_ATTENTION_KEY_HEADS
+            * SAGE_ATTENTION_KEY_BLOCKS
+            * SAGE_ATTENTION_BLOCK_N
+        )
+        command.extend(
+            launch_arguments(
+                [
+                    ("q", 1, queries * SAGE_ATTENTION_HEAD_DIM, "in"),
+                    ("k", 1, keys * SAGE_ATTENTION_HEAD_DIM, "in"),
+                    ("v", 2, keys * SAGE_ATTENTION_HEAD_DIM, "in"),
+                    ("q_scale", 4, queries // SAGE_ATTENTION_BLOCK_M, "in"),
+                    ("k_scale", 4, keys // SAGE_ATTENTION_BLOCK_N, "in"),
+                    ("o", 2, queries * SAGE_ATTENTION_HEAD_DIM, "out"),
+                    ("mask", 4, 1, "in"),
+                    ("lse", 4, 1, "out"),
+                ],
+                [
+                    ("Z", SAGE_ATTENTION_BATCH),
+                    ("KVH", SAGE_ATTENTION_KEY_HEADS),
+                    ("G", SAGE_ATTENTION_QUERY_GROUPS),
+                    ("MB", SAGE_ATTENTION_QUERY_BLOCKS),
+                    ("BM", SAGE_ATTENTION_BLOCK_M),
+                    ("NB", SAGE_ATTENTION_KEY_BLOCKS),
+                    ("BN", SAGE_ATTENTION_BLOCK_N),
+                    ("D", SAGE_ATTENTION_HEAD_DIM),
+                ],
+                SAGE_ATTENTION_SAMPLE,
+            )
         )
         return command
     if target.kernel == "SwiGLU":
