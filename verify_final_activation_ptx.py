@@ -21,6 +21,7 @@ KERNELS = (
     "Sigmoid",
     "Convolution2D",
     "FusedGEMMAddSiLU",
+    "BitDeltaMatrixMultiplication",
 )
 ARRAY_LENGTH = 134217728
 RMS_NORM_WIDTH = 4096
@@ -36,6 +37,14 @@ MATRIX_MULTIPLICATION_DIM_FULL = 4096
 MATRIX_MULTIPLICATION_FALLBACK_M = 32
 MATRIX_MULTIPLICATION_FALLBACK_N = 32
 MATRIX_MULTIPLICATION_SAMPLE = 256
+# BitDelta packs 32 binary weights into every int32 weight element, so the
+# weight buffer of the same 4096-cubed problem holds 32 times fewer elements.
+BITDELTA_BITS_PER_WORD = 32
+BITDELTA_PACKED_ELEMENT_WIDTH = 4
+# BitDelta groups its output tiles inside a flat grid, and the sidecar does
+# not record the tile, so the fallback carries the shape the candidate uses.
+BITDELTA_FALLBACK_BLOCK_M = 64
+BITDELTA_FALLBACK_BLOCK_N = 128
 # tl.dot's cp.async-pipelined shared-memory tiles need more than the generic
 # 4-byte default; sized with headroom above the largest observed
 # block_k=1024 configuration's usage.
@@ -59,6 +68,7 @@ CONVOLUTION_2D_SAMPLE = 256
 KERNEL_DIRS = {
     "Lion": "LionNeurIPS2023Optimizer",
     "MatrixMultiplication": "MatrixMultiplication",
+    "BitDeltaMatrixMultiplication": "BitDeltaNeurIPS2024Matmul",
 }
 RMS_NORM_BLOCK_SIZES = {
     ("L40S", "Float8"): 512,
@@ -157,6 +167,48 @@ def find_targets(final_ptx_dir):
                 )
     return targets
 
+# Arrays of the 4096-cubed GEMM-shaped kernels, in parameter order: name,
+# element width in bytes (None follows the run's precision), whether the
+# array holds BitDelta's packed weights, and the access kind.
+GEMM_ARRAY_LAYOUTS = {
+    "MatrixMultiplication": (
+        ("a", None, False, "in"),
+        ("b", None, False, "in"),
+        ("c", 2, False, "out"),
+    ),
+    "FusedGEMMAddSiLU": (
+        ("a", None, False, "in"),
+        ("b", None, False, "in"),
+        ("d", None, False, "in"),
+        ("c", 2, False, "out"),
+    ),
+    "BitDeltaMatrixMultiplication": (
+        ("a", None, False, "in"),
+        ("b", BITDELTA_PACKED_ELEMENT_WIDTH, True, "in"),
+        ("c", 2, False, "out"),
+    ),
+}
+GEMM_ARRAY_BASE_STRIDE = 0x100000000
+
+
+def gemm_arguments(arrays, sample):
+    arguments = []
+    for index, (name, width, length, kind) in enumerate(arrays):
+        base = (index + 1) * GEMM_ARRAY_BASE_STRIDE
+        arguments.extend(["--array", f"{name}:{base:#x}:{width}:{length}:{kind}"])
+    arguments.extend(
+        argument for name, *_ in arrays for argument in ("--param", f"ptr:{name}")
+    )
+    arguments.extend(["--param", "int:0", "--param", "int:0"])
+    arguments.extend(
+        argument
+        for axis in ("M", "N", "K")
+        for argument in ("--dim", f"{axis}={MATRIX_MULTIPLICATION_DIM_FULL}")
+    )
+    arguments.extend(["--sample", str(sample), "--verify-numeric"])
+    return arguments
+
+
 def verifier_command(volta_bin, target, specs_dir):
     element_width = 1 if target.precision == "Float8" else 2
     spec_name = (
@@ -167,6 +219,7 @@ def verifier_command(volta_bin, target, specs_dir):
             "MatrixVectorMultiplication": "matrix_vector_multiply.spec",
             "MatrixMultiplication": "gemm.spec",
             "Convolution2D": "conv2d.spec",
+            "BitDeltaMatrixMultiplication": "bitdelta_matmul.spec",
         }.get(target.kernel, f"{target.kernel.lower()}.spec")
     )
     fallback_block_size = (
@@ -188,13 +241,19 @@ def verifier_command(volta_bin, target, specs_dir):
         else None
     )
     block_size = hyperparameter_block_size or fallback_block_size
+    is_bitdelta = target.kernel == "BitDeltaMatrixMultiplication"
+    fallback_rows, fallback_cols = (
+        (BITDELTA_FALLBACK_BLOCK_M, BITDELTA_FALLBACK_BLOCK_N)
+        if is_bitdelta
+        else (MATRIX_MULTIPLICATION_FALLBACK_M, MATRIX_MULTIPLICATION_FALLBACK_N)
+    )
     matrix_multiplication_rows = (
         block_dim_from_hyperparameters(target.hyperparameters, "block_m")
-        or MATRIX_MULTIPLICATION_FALLBACK_M
+        or fallback_rows
     )
     matrix_multiplication_cols = (
         block_dim_from_hyperparameters(target.hyperparameters, "block_n")
-        or MATRIX_MULTIPLICATION_FALLBACK_N
+        or fallback_cols
     )
     convolution_2d_block_m = (
         block_dim_from_hyperparameters(target.hyperparameters, "block_m")
@@ -213,6 +272,12 @@ def verifier_command(volta_bin, target, specs_dir):
         f"{MATRIX_MULTIPLICATION_DIM_FULL // matrix_multiplication_rows},"
         f"{MATRIX_MULTIPLICATION_DIM_FULL // matrix_multiplication_cols}"
         if target.kernel in ("MatrixMultiplication", "FusedGEMMAddSiLU")
+        else str(
+            MATRIX_MULTIPLICATION_DIM_FULL
+            // matrix_multiplication_rows
+            * (MATRIX_MULTIPLICATION_DIM_FULL // matrix_multiplication_cols)
+        )
+        if is_bitdelta
         else (
             f"{(convolution_2d_output_rows + convolution_2d_block_m - 1) // convolution_2d_block_m},"
             f"{(CONVOLUTION_2D_OUTPUT_CHANNELS + convolution_2d_block_n - 1) // convolution_2d_block_n}"
@@ -230,6 +295,7 @@ def verifier_command(volta_bin, target, specs_dir):
             "MatrixMultiplication",
             "Convolution2D",
             "FusedGEMMAddSiLU",
+            "BitDeltaMatrixMultiplication",
         )
         else 4
     )
@@ -411,84 +477,25 @@ def verifier_command(volta_bin, target, specs_dir):
             ]
         )
         return command
-    if target.kernel == "MatrixMultiplication":
-        full = MATRIX_MULTIPLICATION_DIM_FULL
-        full_elements = full * full
+    if target.kernel in GEMM_ARRAY_LAYOUTS:
+        full_elements = MATRIX_MULTIPLICATION_DIM_FULL**2
+        packed_elements = full_elements // BITDELTA_BITS_PER_WORD
         command.extend(
-            [
-                "--array",
-                f"a:0x100000000:{element_width}:{full_elements}:in",
-                "--array",
-                f"b:0x200000000:{element_width}:{full_elements}:in",
-                "--array",
-                f"c:0x300000000:2:{full_elements}:out",
-                "--param",
-                "ptr:a",
-                "--param",
-                "ptr:b",
-                "--param",
-                "ptr:c",
-                "--param",
-                "int:0",
-                "--param",
-                "int:0",
-                "--dim",
-                f"M={full}",
-                "--dim",
-                f"N={full}",
-                "--dim",
-                f"K={full}",
-                "--sample",
-                str(
-                    min(
-                        matrix_multiplication_rows * matrix_multiplication_cols,
-                        MATRIX_MULTIPLICATION_SAMPLE,
+            gemm_arguments(
+                [
+                    (
+                        name,
+                        element_width if width is None else width,
+                        packed_elements if packed else full_elements,
+                        kind,
                     )
+                    for name, width, packed, kind in GEMM_ARRAY_LAYOUTS[target.kernel]
+                ],
+                min(
+                    matrix_multiplication_rows * matrix_multiplication_cols,
+                    MATRIX_MULTIPLICATION_SAMPLE,
                 ),
-                "--verify-numeric",
-            ]
-        )
-        return command
-    if target.kernel == "FusedGEMMAddSiLU":
-        full = MATRIX_MULTIPLICATION_DIM_FULL
-        full_elements = full * full
-        command.extend(
-            [
-                "--array",
-                f"a:0x100000000:{element_width}:{full_elements}:in",
-                "--array",
-                f"b:0x200000000:{element_width}:{full_elements}:in",
-                "--array",
-                f"d:0x300000000:{element_width}:{full_elements}:in",
-                "--array",
-                f"c:0x400000000:2:{full_elements}:out",
-                "--param",
-                "ptr:a",
-                "--param",
-                "ptr:b",
-                "--param",
-                "ptr:d",
-                "--param",
-                "ptr:c",
-                "--param",
-                "int:0",
-                "--param",
-                "int:0",
-                "--dim",
-                f"M={full}",
-                "--dim",
-                f"N={full}",
-                "--dim",
-                f"K={full}",
-                "--sample",
-                str(
-                    min(
-                        matrix_multiplication_rows * matrix_multiplication_cols,
-                        MATRIX_MULTIPLICATION_SAMPLE,
-                    )
-                ),
-                "--verify-numeric",
-            ]
+            )
         )
         return command
     if target.kernel == "Convolution2D":
