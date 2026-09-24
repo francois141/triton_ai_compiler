@@ -3,6 +3,7 @@ import json
 import os
 import re
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -1092,11 +1093,13 @@ def main(args):
 
     results = {}
     for target in targets.values():
+        start = time.perf_counter()
         status, output = verify_target(volta_bin, target, args.specs_dir, environment)
+        elapsed = time.perf_counter() - start
         results[target.kernel, target.gpu, target.precision] = status
         label = f"{target.kernel} {target.gpu} {target.precision}"
         if status == "VERIFIED":
-            print(f"{label}: successful")
+            print(f"{label}: successful in {elapsed:.2f}s")
         if status == "NOT VERIFIED" and target.ptx_path is not None:
             print(f"{label}: {first_output_line(output, status)}")
         if args.verbose and status == "NOT VERIFIED" and target.ptx_path is not None:
