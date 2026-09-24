@@ -22,6 +22,7 @@ KERNELS = (
     "Convolution2D",
     "FusedGEMMAddSiLU",
     "BitDeltaMatrixMultiplication",
+    "BitDeltaBatchedMatrixMultiplication",
 )
 ARRAY_LENGTH = 134217728
 RMS_NORM_WIDTH = 4096
@@ -41,10 +42,7 @@ MATRIX_MULTIPLICATION_SAMPLE = 256
 # weight buffer of the same 4096-cubed problem holds 32 times fewer elements.
 BITDELTA_BITS_PER_WORD = 32
 BITDELTA_PACKED_ELEMENT_WIDTH = 4
-# BitDelta groups its output tiles inside a flat grid, and the sidecar does
-# not record the tile, so the fallback carries the shape the candidate uses.
-BITDELTA_FALLBACK_BLOCK_M = 64
-BITDELTA_FALLBACK_BLOCK_N = 128
+BITDELTA_BATCH_SIZE = 8
 # tl.dot's cp.async-pipelined shared-memory tiles need more than the generic
 # 4-byte default; sized with headroom above the largest observed
 # block_k=1024 configuration's usage.
@@ -69,6 +67,7 @@ KERNEL_DIRS = {
     "Lion": "LionNeurIPS2023Optimizer",
     "MatrixMultiplication": "MatrixMultiplication",
     "BitDeltaMatrixMultiplication": "BitDeltaNeurIPS2024Matmul",
+    "BitDeltaBatchedMatrixMultiplication": "BitDeltaNeurIPS2024BatchedMatmul",
 }
 RMS_NORM_BLOCK_SIZES = {
     ("L40S", "Float8"): 512,
@@ -187,11 +186,25 @@ GEMM_ARRAY_LAYOUTS = {
         ("b", BITDELTA_PACKED_ELEMENT_WIDTH, True, "in"),
         ("c", 2, False, "out"),
     ),
+    "BitDeltaBatchedMatrixMultiplication": (
+        ("a", None, False, "in"),
+        ("b", BITDELTA_PACKED_ELEMENT_WIDTH, True, "in"),
+        ("c", 2, False, "out"),
+    ),
 }
 GEMM_ARRAY_BASE_STRIDE = 0x100000000
+# Batch extent of the GEMM-shaped kernels whose arrays carry a leading batch
+# axis; the others run a single 4096-cubed problem.
+GEMM_BATCH_SIZES = {"BitDeltaBatchedMatrixMultiplication": BITDELTA_BATCH_SIZE}
+# Output tile of the candidates whose sidecar does not record one. BitDelta
+# decodes a grouped 64 by 128 tile, its batched form a 128 by 256 tile.
+GEMM_FALLBACK_TILES = {
+    "BitDeltaMatrixMultiplication": (64, 128),
+    "BitDeltaBatchedMatrixMultiplication": (128, 256),
+}
 
 
-def gemm_arguments(arrays, sample):
+def gemm_arguments(arrays, batch, sample):
     arguments = []
     for index, (name, width, length, kind) in enumerate(arrays):
         base = (index + 1) * GEMM_ARRAY_BASE_STRIDE
@@ -200,13 +213,29 @@ def gemm_arguments(arrays, sample):
         argument for name, *_ in arrays for argument in ("--param", f"ptr:{name}")
     )
     arguments.extend(["--param", "int:0", "--param", "int:0"])
+    axes = [("BATCH", batch)] if batch > 1 else []
+    axes.extend((axis, MATRIX_MULTIPLICATION_DIM_FULL) for axis in ("M", "N", "K"))
     arguments.extend(
-        argument
-        for axis in ("M", "N", "K")
-        for argument in ("--dim", f"{axis}={MATRIX_MULTIPLICATION_DIM_FULL}")
+        argument for axis, extent in axes for argument in ("--dim", f"{axis}={extent}")
     )
     arguments.extend(["--sample", str(sample), "--verify-numeric"])
     return arguments
+
+
+def gemm_grid_size(kernel, rows, cols):
+    tiles = (MATRIX_MULTIPLICATION_DIM_FULL // rows) * (
+        MATRIX_MULTIPLICATION_DIM_FULL // cols
+    )
+    # BitDelta groups both tile axes into a flat grid and takes its batch,
+    # when it has one, from the second grid axis.
+    if kernel == "BitDeltaMatrixMultiplication":
+        return str(tiles)
+    if kernel == "BitDeltaBatchedMatrixMultiplication":
+        return f"{tiles},{BITDELTA_BATCH_SIZE}"
+    return (
+        f"{MATRIX_MULTIPLICATION_DIM_FULL // rows},"
+        f"{MATRIX_MULTIPLICATION_DIM_FULL // cols}"
+    )
 
 
 def verifier_command(volta_bin, target, specs_dir):
@@ -220,6 +249,7 @@ def verifier_command(volta_bin, target, specs_dir):
             "MatrixMultiplication": "gemm.spec",
             "Convolution2D": "conv2d.spec",
             "BitDeltaMatrixMultiplication": "bitdelta_matmul.spec",
+            "BitDeltaBatchedMatrixMultiplication": "bitdelta_batched_matmul.spec",
         }.get(target.kernel, f"{target.kernel.lower()}.spec")
     )
     fallback_block_size = (
@@ -241,11 +271,9 @@ def verifier_command(volta_bin, target, specs_dir):
         else None
     )
     block_size = hyperparameter_block_size or fallback_block_size
-    is_bitdelta = target.kernel == "BitDeltaMatrixMultiplication"
-    fallback_rows, fallback_cols = (
-        (BITDELTA_FALLBACK_BLOCK_M, BITDELTA_FALLBACK_BLOCK_N)
-        if is_bitdelta
-        else (MATRIX_MULTIPLICATION_FALLBACK_M, MATRIX_MULTIPLICATION_FALLBACK_N)
+    fallback_rows, fallback_cols = GEMM_FALLBACK_TILES.get(
+        target.kernel,
+        (MATRIX_MULTIPLICATION_FALLBACK_M, MATRIX_MULTIPLICATION_FALLBACK_N),
     )
     matrix_multiplication_rows = (
         block_dim_from_hyperparameters(target.hyperparameters, "block_m")
@@ -269,15 +297,10 @@ def verifier_command(volta_bin, target, specs_dir):
         * CONVOLUTION_2D_OUTPUT_WIDTH
     )
     grid_size = (
-        f"{MATRIX_MULTIPLICATION_DIM_FULL // matrix_multiplication_rows},"
-        f"{MATRIX_MULTIPLICATION_DIM_FULL // matrix_multiplication_cols}"
-        if target.kernel in ("MatrixMultiplication", "FusedGEMMAddSiLU")
-        else str(
-            MATRIX_MULTIPLICATION_DIM_FULL
-            // matrix_multiplication_rows
-            * (MATRIX_MULTIPLICATION_DIM_FULL // matrix_multiplication_cols)
+        gemm_grid_size(
+            target.kernel, matrix_multiplication_rows, matrix_multiplication_cols
         )
-        if is_bitdelta
+        if target.kernel in GEMM_ARRAY_LAYOUTS
         else (
             f"{(convolution_2d_output_rows + convolution_2d_block_m - 1) // convolution_2d_block_m},"
             f"{(CONVOLUTION_2D_OUTPUT_CHANNELS + convolution_2d_block_n - 1) // convolution_2d_block_n}"
@@ -296,6 +319,7 @@ def verifier_command(volta_bin, target, specs_dir):
             "Convolution2D",
             "FusedGEMMAddSiLU",
             "BitDeltaMatrixMultiplication",
+            "BitDeltaBatchedMatrixMultiplication",
         )
         else 4
     )
@@ -478,7 +502,8 @@ def verifier_command(volta_bin, target, specs_dir):
         )
         return command
     if target.kernel in GEMM_ARRAY_LAYOUTS:
-        full_elements = MATRIX_MULTIPLICATION_DIM_FULL**2
+        batch = GEMM_BATCH_SIZES.get(target.kernel, 1)
+        full_elements = batch * MATRIX_MULTIPLICATION_DIM_FULL**2
         packed_elements = full_elements // BITDELTA_BITS_PER_WORD
         command.extend(
             gemm_arguments(
@@ -491,6 +516,7 @@ def verifier_command(volta_bin, target, specs_dir):
                     )
                     for name, width, packed, kind in GEMM_ARRAY_LAYOUTS[target.kernel]
                 ],
+                batch,
                 min(
                     matrix_multiplication_rows * matrix_multiplication_cols,
                     MATRIX_MULTIPLICATION_SAMPLE,
