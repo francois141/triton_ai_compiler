@@ -30,6 +30,19 @@ KERNELS = (
     "Mamba2ChunkScan",
     "ForgettingAttention",
 )
+# Kernels taken from published conference papers, as opposed to the generic
+# activation and linear-algebra baselines.
+CONFERENCE_KERNELS = (
+    "Lion",
+    "BitDeltaMatrixMultiplication",
+    "BitDeltaBatchedMatrixMultiplication",
+    "FlashAttention",
+    "FlashSinkhorn",
+    "SageAttention",
+    "Mamba2ChunkState",
+    "Mamba2ChunkScan",
+    "ForgettingAttention",
+)
 ARRAY_LENGTH = 134217728
 RMS_NORM_WIDTH = 4096
 ROPE_HALF_WIDTH = 64
@@ -1063,19 +1076,19 @@ def main(args):
             value for value in (str(args.z3_lib_dir), old_library_path) if value
         )
 
-    targets = find_targets(args.final_ptx_dir)
     if args.kernel is not None:
-        targets = {
-            key: target for key, target in targets.items() if key[0] == args.kernel
-        }
-    if args.gpu is not None:
-        targets = {
-            key: target for key, target in targets.items() if key[1] == args.gpu
-        }
-    if args.precision is not None:
-        targets = {
-            key: target for key, target in targets.items() if key[2] == args.precision
-        }
+        kernels = (args.kernel,)
+    elif args.real:
+        kernels = CONFERENCE_KERNELS
+    else:
+        kernels = KERNELS
+    targets = {
+        key: target
+        for key, target in find_targets(args.final_ptx_dir).items()
+        if key[0] in kernels
+        and (args.gpu is None or key[1] == args.gpu)
+        and (args.precision is None or key[2] == args.precision)
+    }
 
     results = {}
     for target in targets.values():
@@ -1093,7 +1106,7 @@ def main(args):
             print(f"{label} symbolic: {expression}")
     print_table(
         results,
-        kernels=(args.kernel,) if args.kernel is not None else KERNELS,
+        kernels=kernels,
         gpus=(args.gpu,) if args.gpu is not None else GPU_TYPES,
         precisions=(args.precision,) if args.precision is not None else PRECISIONS,
     )
@@ -1110,11 +1123,17 @@ if __name__ == "__main__":
         "--z3-lib-dir", type=Path, default=Path("/opt/homebrew/opt/z3/lib")
     )
     parser.add_argument("--no-build", action="store_true")
-    parser.add_argument(
+    kernel_selection = parser.add_mutually_exclusive_group()
+    kernel_selection.add_argument(
         "--kernel",
         choices=KERNELS,
         default=None,
         help="Verify only the specified kernel instead of all kernels.",
+    )
+    kernel_selection.add_argument(
+        "--real",
+        action="store_true",
+        help="Verify only the kernels taken from conference papers.",
     )
     parser.add_argument(
         "--gpu",
