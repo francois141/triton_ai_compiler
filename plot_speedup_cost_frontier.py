@@ -4,6 +4,7 @@ import json
 import logging
 import math
 import re
+import statistics
 from collections import defaultdict
 from pathlib import Path
 
@@ -23,6 +24,8 @@ TOKEN_EXPANSION_PLOT_BASENAME = "ptx_token_expansion_factors"
 GEMM_LLM_FRONTIER_OPENAI_PLOT_BASENAME = "gemm_llm_cost_frontier_openai"
 SPEEDUP_ORIGINAL_PLOT_BASENAME = "speedup_original"
 CONFERENCE_KERNEL_SPEEDUP_PLOT_BASENAME = "conference_kernel_speedups_b200"
+FIVE_TRIAL_TABLE_BASENAME = "five_trial_speedups_b200"
+FIVE_TRIAL_TABLE_FILENAME = f"{FIVE_TRIAL_TABLE_BASENAME}.tex"
 REPRESENTATIVE_RESULTS_TABLE_FILENAME = "representative_kernel_results.tex"
 GEMM_GPU_TYPE = "NVIDIA L40S"
 GEMM_COST_LIMIT_USD = 15.0
@@ -51,6 +54,18 @@ AXIS_TITLE_FONT_SIZE = 22
 AXIS_LABEL_FONT_SIZE = 20
 TICK_FONT_SIZE = 17
 GPU_COLORS = plt.rcParams["axes.prop_cycle"].by_key()["color"]
+# Fix the colour of each (GPU, precision) series so a series looks the same in
+# every grid panel and matches the single shared legend.  Panels do not all
+# contain the same series, so per-panel colour cycling would break the legend.
+GRID_SERIES_COLORS = {
+    ("NVIDIA B200", "Floating Point 16"): GPU_COLORS[0],
+    ("NVIDIA B200", "Floating Point 8"): GPU_COLORS[1],
+    ("NVIDIA H100", "Floating Point 16"): GPU_COLORS[3],
+    ("NVIDIA H100", "Floating Point 8"): GPU_COLORS[4],
+    ("NVIDIA L40S", "Floating Point 16"): GPU_COLORS[2],
+    ("NVIDIA L40S", "Floating Point 8"): GPU_COLORS[6],
+}
+GRID_FALLBACK_SERIES_COLOR = GPU_COLORS[7 % len(GPU_COLORS)]
 # Only show a new frontier point when it is visibly better than the previous
 # displayed point.  This prevents tiny benchmark fluctuations from making
 # otherwise comparable panels look more densely sampled.
@@ -61,8 +76,9 @@ FRONTIER_MARKER_SIZE = 11.0
 # the trace-derived kernel names after their Float16/Float8 suffix is removed.
 GRID_TITLE_TRANSLATIONS = {
     "Convolution2DKernel": "Convolution 2D",
-    "FusedGEMMAddGELUKernel": "Fused GEMM + GELU",
+    "FusedGEMMAddSiLUKernel": "Fused GEMM + SiLU",
     "GELUKernel": "GELU",
+    "SigmoidKernel": "Sigmoid",
     "MatrixMultiplication": "Matrix Multiplication",
     "MatrixVectorMultiplicationKernel": "Matrix-Vector Multiplication",
     "RMSNormKernel": "RMSNorm",
@@ -77,10 +93,10 @@ GRID_TITLE_TRANSLATIONS = {
 # normalization/reduction/positioning kernels. Edit this tuple to reorder panels.
 GRID_KERNEL_ORDER = (
     "Convolution2DKernel",
-    "FusedGEMMAddGELUKernel",
+    "FusedGEMMAddSiLUKernel",
     "MatrixMultiplication",
     "MatrixVectorMultiplicationKernel",
-    "GELUKernel",
+    "SigmoidKernel",
     "ReLUKernel",
     "SiLUKernel",
     "SwiGLUKernel",
@@ -90,7 +106,7 @@ GRID_KERNEL_ORDER = (
     "SoftmaxKernel",
 )
 # Panels within a row share a Y scale; each row is scaled to its workload family.
-GRID_Y_LIMITS_BY_ROW = ((0.5, 2.2), (0.5, 1.15), (0.5, 1.35))
+GRID_Y_LIMITS_BY_ROW = ((0.5, 2.5), (0.5, 1.15), (0.5, 1.35))
 # The paper figure has a deliberate narrative order rather than alphabetical
 # ordering. Measurements remain fully data-driven: a kernel is omitted when
 # no accepted B200 result is present in the supplied traces.
@@ -129,18 +145,33 @@ FLOAT_PRECISION_LABELS = {
     "Float8": "Floating Point 8",
 }
 REPRESENTATIVE_KERNELS = (
-    ("Fused GEMM + GELU", "FusedGEMMAddGELUFloat16Kernel"),
+    ("Fused GEMM + SiLU", "FusedGEMMAddSiLUFloat16Kernel"),
     ("Softmax", "SoftmaxFloat16Kernel"),
     ("Matrix multiplication", "MatrixMultiplicationFloat16"),
 )
 REPRESENTATIVE_GPU_TYPES = ("NVIDIA H100", "NVIDIA B200", "NVIDIA L40S")
+FIVE_TRIAL_COUNT = 5
+FIVE_TRIAL_KERNELS = (
+    ("Convolution (FP8)", "Convolution2DFloat8Kernel", 5.0),
+    ("Matrix multiplication (FP16)", "MatrixMultiplicationFloat16", 5.0),
+    ("SwiGLU (FP16)", "SwiGLUFloat16Kernel", 1.0),
+    (
+        "FlashAttention forward (FP16)",
+        "FlashAttentionNeurIPS2022Forward",
+        5.0,
+    ),
+)
 RUN_DIRECTORY_PATTERN = re.compile(r"^\d{12}_")
+# Duplicated trace directories (for example "..._max copy") hold the same
+# measurements as their original and must not be counted or plotted twice.
+DUPLICATE_RUN_SUFFIX = " copy"
 REASONING_EFFORT_PATTERN = re.compile(
     r"_(?:low|medium|high|max|xhigh|ultra|none)$", re.IGNORECASE
 )
 KERNEL_SOURCE_DIRECTORY = (
     Path(__file__).resolve().parent / "triton_ptx" / "triton_ptx" / "kernels"
 )
+ASTRA_TRACE_DIRECTORY = Path(__file__).resolve().parent / "astra"
 TOKEN_ENCODING = tiktoken.get_encoding("o200k_base")
 
 
@@ -197,7 +228,13 @@ def _model_from_run_directory(run_directory):
     return REASONING_EFFORT_PATTERN.sub("", name_parts[2])
 
 
+def _is_duplicate_run(run_directory):
+    return run_directory.name.endswith(DUPLICATE_RUN_SUFFIX)
+
+
 def _is_included_run(run_directory, model_prefixes):
+    if _is_duplicate_run(run_directory):
+        return False
     return model_prefixes is None or _model_from_run_directory(
         run_directory
     ).startswith(model_prefixes)
@@ -379,6 +416,9 @@ def load_accepted_kernels(
         accepted_kernels.append(
             {
                 "cost_usd": cost,
+                # Cost within this run only.  "cost_usd" additionally
+                # accumulates the cost of earlier runs of the same kernel.
+                "run_cost_usd": cost,
                 "speedup_vs_triton": speedup * _correction_factor(run_directory),
                 "kernel": kernel_name,
                 "precision": precision,
@@ -403,7 +443,6 @@ def load_accepted_kernels(
         point["provider"] = _provider_group(
             providers_by_run.get(point["run_directory"]), point["model"]
         )
-        point.pop("run_directory")
     return accepted_kernels
 
 
@@ -467,6 +506,24 @@ def _triton_source_path(kernel_name):
 def _triton_kernel_source(kernel_name):
     source_path = _triton_source_path(kernel_name)
     if source_path is None:
+        # The fused GEMM + SiLU benchmark is retained as an experiment trace
+        # rather than a checked-in Triton kernel class.  Its prompt records the
+        # exact Triton source used for compilation, which is sufficient for the
+        # token-expansion analysis.
+        if kernel_name.startswith("FusedGEMMAddSiLU"):
+            for prompt_path in sorted(
+                ASTRA_TRACE_DIRECTORY.glob(
+                    f"*{kernel_name}*/iteration_000_try_00_initial_candidate_prompt.txt"
+                )
+            ):
+                prompt = prompt_path.read_text(encoding="utf-8")
+                match = re.search(
+                    r"## Triton Kernel\s*```python\s*(.*?)\s*```",
+                    prompt,
+                    flags=re.DOTALL,
+                )
+                if match is not None:
+                    return match.group(1)
         LOGGER.warning("No Triton source was found for %s.", kernel_name)
         return None
 
@@ -647,6 +704,166 @@ def _save_figure(figure, output_directory, basename):
     return saved_paths
 
 
+def _best_speedup_for_run(run_directory):
+    best_speedup = None
+    gpu_type = None
+    pending_gpu_type = None
+    for json_path in run_directory.rglob("*.json"):
+        try:
+            with json_path.open(encoding="utf-8") as json_file:
+                data = json.load(json_file)
+        except (json.JSONDecodeError, OSError) as error:
+            LOGGER.warning("Skipping unreadable JSON %s: %s", json_path, error)
+            continue
+        if json_path.name in PENDING_SPEEDUP_EVENTS_FILENAMES:
+            pending_gpu_type = _pending_events_gpu_type(data) or pending_gpu_type
+            continue
+        if not isinstance(data, dict):
+            continue
+        gpu_type = _gpu_type(data) or gpu_type
+        speedup = _accepted_speedup(data, json_path)
+        if speedup is not None:
+            best_speedup = (
+                speedup if best_speedup is None else max(best_speedup, speedup)
+            )
+    if not _is_b200_gpu(gpu_type or pending_gpu_type or ""):
+        return None
+    return best_speedup
+
+
+def load_five_trial_results(trace_directory):
+    results = []
+    for display_name, kernel_name, budget in FIVE_TRIAL_KERNELS:
+        trial_results = []
+        for run_directory in sorted(trace_directory.glob(f"*_{kernel_name}_*")):
+            if not run_directory.is_dir() or run_directory.name.endswith(" copy"):
+                continue
+            speedup = _best_speedup_for_run(run_directory)
+            if speedup is not None:
+                trial_results.append((run_directory.name, speedup))
+        if len(trial_results) < FIVE_TRIAL_COUNT:
+            raise RuntimeError(
+                f"Expected {FIVE_TRIAL_COUNT} B200 trials for {kernel_name}; "
+                f"found {len(trial_results)}."
+            )
+        if len(trial_results) > FIVE_TRIAL_COUNT:
+            LOGGER.warning(
+                "Using the latest %d of %d B200 trials for %s.",
+                FIVE_TRIAL_COUNT,
+                len(trial_results),
+                kernel_name,
+            )
+        speedups = [speedup for _, speedup in trial_results[-FIVE_TRIAL_COUNT:]]
+        results.append(
+            {
+                "display_name": display_name,
+                "budget": budget,
+                "speedups": speedups,
+                "mean": statistics.fmean(speedups),
+                "stdev": statistics.stdev(speedups),
+                "best": max(speedups),
+            }
+        )
+    return results
+
+
+def write_five_trial_results_table(output_directory, results):
+    headers = [
+        "Kernel",
+        "Budget",
+        *(f"Trial {index}" for index in range(1, FIVE_TRIAL_COUNT + 1)),
+        "Mean ± SD",
+        "Best",
+    ]
+    rows = [
+        [
+            result["display_name"],
+            f"${result['budget']:g}",
+            *(f"{speedup:.3f}x" for speedup in result["speedups"]),
+            f"{result['mean']:.3f} ± {result['stdev']:.3f}",
+            f"{result['best']:.3f}x",
+        ]
+        for result in results
+    ]
+    figure, axis = plt.subplots(figsize=(16, 3.25))
+    axis.axis("off")
+    table = axis.table(
+        cellText=rows,
+        colLabels=headers,
+        cellLoc="center",
+        colLoc="center",
+        loc="center",
+        colWidths=[0.22, 0.08, *([0.075] * FIVE_TRIAL_COUNT), 0.16, 0.08],
+    )
+    table.auto_set_font_size(False)
+    table.set_fontsize(10.5)
+    table.scale(1.0, 1.8)
+    for (row, column), cell in table.get_celld().items():
+        cell.set_edgecolor("#D1D5DB")
+        if row == 0:
+            cell.set_facecolor("#E8F0F8")
+            cell.set_text_props(weight="bold", color="#1F2937")
+        elif row % 2 == 0:
+            cell.set_facecolor("#F8FAFC")
+        if column == 0:
+            cell.set_text_props(ha="left", weight="bold")
+    figure.suptitle(
+        "Five independent neural-lowering trials on NVIDIA B200",
+        fontsize=15,
+        fontweight="bold",
+        y=0.96,
+    )
+    axis.set_title(
+        "Speedup versus Triton; trials are ordered chronologically",
+        fontsize=10.5,
+        color="#4B5563",
+        pad=10,
+    )
+    figure.subplots_adjust(left=0.015, right=0.985, top=0.79, bottom=0.05)
+    saved_paths = _save_figure(figure, output_directory, FIVE_TRIAL_TABLE_BASENAME)
+    plt.close(figure)
+
+    latex_rows = []
+    for result in results:
+        trials = " & ".join(
+            f"${speedup:.3f}\\times$" for speedup in result["speedups"]
+        )
+        latex_rows.append(
+            f"{result['display_name']} & \\${result['budget']:g} & {trials} & "
+            f"${result['mean']:.3f} \\pm {result['stdev']:.3f}$ & "
+            f"${result['best']:.3f}\\times$ \\\\"
+        )
+    latex_table = "\n".join(
+        (
+            r"\begin{table*}[h]",
+            r"\centering",
+            r"\small",
+            r"\setlength{\tabcolsep}{5pt}",
+            r"\resizebox{\textwidth}{!}{%",
+            r"\begin{tabular}{@{}lcrrrrrrr@{}}",
+            r"\toprule",
+            r"\textbf{Kernel} & \textbf{Budget} & \textbf{Trial 1}",
+            r"& \textbf{Trial 2} & \textbf{Trial 3} & \textbf{Trial 4}",
+            r"& \textbf{Trial 5} & \textbf{Mean $\pm$ SD} & \textbf{Best} \\",
+            r"\midrule",
+            *latex_rows,
+            r"\bottomrule",
+            r"\end{tabular}",
+            r"}",
+            r"\caption{Repeatability on NVIDIA B200 across five independent",
+            r"\neuralcompiler{} runs. Values are speedups over the same autotuned",
+            r"Triton baseline. Budget is the configured per-run API-cost gate, checked",
+            r"before each new model request; an in-flight request can finish above it.}",
+            r"\label{tab:five-trial-speedups}",
+            r"\end{table*}",
+            "",
+        )
+    )
+    latex_path = output_directory / FIVE_TRIAL_TABLE_FILENAME
+    latex_path.write_text(latex_table, encoding="utf-8")
+    return [latex_path, *saved_paths]
+
+
 def _ptx_path_for_accepted_point(trace_directory, point):
     json_path = trace_directory / point["source"]
     candidate_paths = (
@@ -740,6 +957,42 @@ def write_representative_results_table(
     return output_path
 
 
+def _grid_series_color(series):
+    return GRID_SERIES_COLORS.get(series, GRID_FALLBACK_SERIES_COLOR)
+
+
+def _grid_series_by_kernel(accepted_kernels):
+    """Group frontier points by kernel and displayed (GPU, precision) series.
+
+    One kernel and configuration is usually compiled several times: repeated
+    runs, reasoning-effort variants, and devices that share a displayed name
+    (the H100 PCIe and HBM3 parts both appear as "NVIDIA H100").  Each run is
+    an independent compilation, so show the single best run instead of merging
+    them: merging draws several identically labelled lines and chains the cost
+    of unrelated runs onto one frontier, overstating what reaching a speedup
+    costs.  Costs are therefore reported within the plotted run.
+    """
+    points_by_run = defaultdict(lambda: defaultdict(list))
+    for point in accepted_kernels:
+        kernel_name = _display_kernel_name(str(point["kernel"]))
+        series = (_display_gpu_type(point["gpu_type"]), point["precision"])
+        points_by_run[kernel_name][series, point["run_directory"]].append(point)
+
+    kernels = defaultdict(dict)
+    for kernel_name, points_by_series_and_run in points_by_run.items():
+        best_by_series = {}
+        for (series, _), points in sorted(points_by_series_and_run.items()):
+            best_speedup = max(point["speedup_vs_triton"] for point in points)
+            if series not in best_by_series or best_speedup > best_by_series[series][0]:
+                best_by_series[series] = (
+                    best_speedup,
+                    [{**point, "cost_usd": point["run_cost_usd"]} for point in points],
+                )
+        for series, (_, points) in best_by_series.items():
+            kernels[kernel_name][series] = points
+    return kernels
+
+
 def write_frontier_grid(
     output_directory,
     accepted_kernels,
@@ -748,11 +1001,7 @@ def write_frontier_grid(
     show_axis_labels=True,
     single_legend=True,
 ):
-    kernels = defaultdict(lambda: defaultdict(list))
-    for point in accepted_kernels:
-        kernel_name = _display_kernel_name(str(point["kernel"]))
-        series = (point["gpu_type"], point["precision"])
-        kernels[kernel_name][series].append(point)
+    kernels = _grid_series_by_kernel(accepted_kernels)
     kernel_names = [name for name in GRID_KERNEL_ORDER if name in kernels]
     kernel_names.extend(sorted(set(kernels) - set(kernel_names)))
     if len(kernel_names) > GRID_SIZE:
@@ -786,15 +1035,14 @@ def write_frontier_grid(
         if index < len(kernel_names) and index < GRID_SIZE:
             kernel_name = kernel_names[index]
             endpoints = []
-            for color_index, ((gpu_type, precision), points) in enumerate(
-                sorted(plotted_series[kernel_name].items())
-            ):
+            for series, points in sorted(plotted_series[kernel_name].items()):
+                gpu_type, precision = series
                 endpoints.append(
                     _plot_frontier(
                         axis,
                         points,
-                        GPU_COLORS[color_index % len(GPU_COLORS)],
-                        f"{_display_gpu_type(gpu_type)}: {precision}",
+                        _grid_series_color(series),
+                        f"{gpu_type}: {precision}",
                         include_origin=False,
                     )
                 )
@@ -811,7 +1059,12 @@ def write_frontier_grid(
         else:
             axis.set_visible(False)
     if single_legend and figure_legend_handles:
-        unique_legend = dict(zip(figure_legend_labels, figure_legend_handles))
+        unique_legend = dict(
+            sorted(
+                zip(figure_legend_labels, figure_legend_handles),
+                key=lambda entry: entry[0],
+            )
+        )
         figure.legend(
             unique_legend.values(),
             unique_legend.keys(),
@@ -1066,6 +1319,10 @@ def main():
             include_non_floating_point=True,
         ),
     )
+    five_trial_table_paths = write_five_trial_results_table(
+        output_directory,
+        load_five_trial_results(trace_directory),
+    )
     token_expansion_data = load_token_expansion_data(trace_directory)
     if not token_expansion_data:
         raise RuntimeError("No Triton-generated PTX files were found.")
@@ -1078,6 +1335,7 @@ def main():
         *grid_paths,
         *gemm_llm_frontier_paths,
         *conference_kernel_speedup_paths,
+        *five_trial_table_paths,
         *speedup_original_paths,
         *token_expansion_paths,
     ]:

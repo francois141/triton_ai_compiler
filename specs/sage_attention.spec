@@ -6,7 +6,12 @@
 // expression cannot express. Every split axis is the outer half of a
 // row-major pair, so the flat layout matches the kernel's.
 //
-// The kernel exponentiates base 2, which is a softmax over ln(2) * logits.
+// The kernel exponentiates base 2. Volta reads ex2 through float32's
+// log2(e) - the constant kernels actually multiply by - so 2^x is
+// exactly exp(x / 1.4426950216293335), which is how the scale is
+// written below. Spelling it as a product with a decimal ln(2)
+// instead would be off by about 1e-8, which an exact check will not
+// absorb.
 
 dim Z;
 dim KVH;
@@ -26,15 +31,13 @@ array o[Z, KVH, G, MB, BM, D];
 
 o[batch, kv_head, group, row_block, row, feature] =
     sum(key_block in 0..NB, sum(key in 0..BN,
-        exp(0.6931471805599453 *
-            sum(e in 0..D, q[batch, kv_head, group, row_block, row, e] *
+        exp(sum(e in 0..D, q[batch, kv_head, group, row_block, row, e] *
                 k[batch, kv_head, key_block, key, e]) *
             q_scale[batch, kv_head, group, row_block] *
-            k_scale[batch, kv_head, key_block]) *
+            k_scale[batch, kv_head, key_block] / 1.4426950216293335) *
         v[batch, kv_head, key_block, key, feature])) /
     sum(key_block in 0..NB, sum(key in 0..BN,
-        exp(0.6931471805599453 *
-            sum(e in 0..D, q[batch, kv_head, group, row_block, row, e] *
+        exp(sum(e in 0..D, q[batch, kv_head, group, row_block, row, e] *
                 k[batch, kv_head, key_block, key, e]) *
             q_scale[batch, kv_head, group, row_block] *
-            k_scale[batch, kv_head, key_block])));
+            k_scale[batch, kv_head, key_block] / 1.4426950216293335)));
