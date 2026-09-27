@@ -1,6 +1,5 @@
 import re
 
-
 DEBUG_DIRECTIVE_PATTERN = re.compile(r"^\s*\.(?:file|loc)\b")
 SECTION_DIRECTIVE_PATTERN = re.compile(r"^\s*\.section\b")
 FUNCTION_DIRECTIVE_PATTERN = re.compile(

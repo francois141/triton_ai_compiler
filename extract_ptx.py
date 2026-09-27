@@ -7,7 +7,7 @@ from triton_ptx.helpers.triton import dump_kernel_assembly
 from triton_ptx.kernels import kernel_list
 from triton_ptx.kernels.base import TritonPTXKernel
 
-from clean_ptx import clean_ptx
+from utils.clean_ptx import clean_ptx
 
 ASSEMBLY_STAGE_EXTENSIONS = {
     "ttir": ".ttir",

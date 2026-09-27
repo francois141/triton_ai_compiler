@@ -11,7 +11,7 @@ import matplotlib.pyplot as plt
 import tiktoken
 from matplotlib.lines import Line2D
 
-from clean_ptx import clean_ptx
+from utils.clean_ptx import clean_ptx
 
 plt.switch_backend("Agg")
 
