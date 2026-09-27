@@ -1,30 +1,95 @@
-# Triton PTX Client
+<p align="center">
+  <img alt="Triton AI Compiler logo" src="logo.png" width="200">
+</p>
 
-An OpenAI-, Anthropic-, and OpenRouter-compatible tool-calling agent for
-optimizing Triton kernels as PTX. It compiles,
-verifies, benchmarks, and records every candidate it evaluates.
+# Triton AI Compiler
+
+<p align="center">
+  <strong>The agent client for TCEnv: it drives an LLM through the loop of
+  writing, verifying, and benchmarking PTX for a Triton kernel.</strong>
+</p>
+
+<p align="center">
+  <img alt="Status: research preview" src="https://img.shields.io/badge/status-research%20preview-orange">
+  <img alt="Role: TCEnv client" src="https://img.shields.io/badge/role-TCEnv%20client-blueviolet">
+  <img alt="Task: Triton to PTX" src="https://img.shields.io/badge/task-Triton%20%E2%86%92%20PTX-blue">
+  <img alt="Hardware: NVIDIA GPU" src="https://img.shields.io/badge/hardware-NVIDIA%20GPU-76B900">
+</p>
+
+<p align="center">
+  <a href="#overview">Overview</a> ·
+  <a href="#setup">Setup</a> ·
+  <a href="#environment-variables">Environment</a> ·
+  <a href="#test-installation">Test installation</a> ·
+  <a href="#optimize-a-kernel">Optimize a kernel</a> ·
+  <a href="#utilities">Utilities</a> ·
+  <a href="#validation">Validation</a> ·
+  <a href="#citation">Citation</a>
+</p>
+
+## Overview
+
+[TCEnv](triton_ptx/README.md) is the environment: it fixes the compilation
+contract for a kernel, evaluates a candidate PTX against it, and reports
+correctness, formal verification, and speed. It answers whether a given PTX is
+valid and fast, but it does not decide what PTX to try next.
+
+**This repository is the client.** It is an OpenAI-, Anthropic-, and
+OpenRouter-compatible tool-calling agent that holds the other half of the loop:
+it prompts a model for PTX, submits each candidate to TCEnv, reads back the
+verdict and the Nsight Compute report, plans the next edit, and records every
+candidate it evaluated.
+
+The two live in separate repositories on purpose. TCEnv is the benchmark and
+must stay independent of any particular agent; the client is one agent
+implementation among possible others, free to change its prompting, its
+provider, and its search strategy without touching the environment it is
+measured in. TCEnv is vendored here as the `triton_ptx` submodule, so a
+checkout of this repository gives you both halves.
 
 ## Setup
 
-From the shared workspace, initialize the submodules and create the local
-environment:
+### Install
+
+From the shared workspace, initialize the submodules and install every
+dependency at once. `uv sync` reads `pyproject.toml`, creates `.venv`, and
+installs the OpenAI and Anthropic SDKs, PyTorch, the plotting libraries, and
+TCEnv (`triton_ptx`, editable) at the versions pinned in `uv.lock`. The three
+exported variables only affect the Triton build: they cap its parallelism and
+make `uv` copy instead of hardlink.
 
 ```bash
 export MAX_JOBS=8
 export CMAKE_BUILD_PARALLEL_LEVEL=8
 export UV_LINK_MODE=copy
 git submodule update --init --recursive
-uv venv .venv
-uv pip install -e triton_ptx
-uv pip install numpy matplotlib tiktoken
+uv sync
+```
+
+### Environment variables
+
+One provider key is required, and which one depends on `--provider`. Nothing
+else is read from the environment by the agent itself; the remaining variables
+are consumed by TCEnv while it evaluates a candidate.
+
+| Variable | Needed for |
+| --- | --- |
+| `OPENAI_API_KEY` | The default provider (`--provider openai`). |
+| `ANTHROPIC_API_KEY` | `--provider anthropic`. |
+| `OPENROUTER_API_KEY` | `--provider openrouter`. |
+| `OPENAI_BASE_URL` | Optional. Points the OpenAI provider at an OpenAI-compatible endpoint instead of `api.openai.com`. |
+| `PTX_MEMORY_SANITIZER` | Path to the `compute-sanitizer` executable. Required unless you pass `--disable-sanitizer`. |
+| `NCU_PATH` | Path to the `ncu` executable. Required for profiling; without it, improvement planning falls back to source-only hypotheses. |
+
+A complete setup for the default provider, with both GPU tools present:
+
+```bash
+export OPENAI_API_KEY=sk-...
+export PTX_MEMORY_SANITIZER=$(which compute-sanitizer)
+export NCU_PATH=$(which ncu)
 ```
 
 Both providers upload the bundled PTX and NCU-report skills before each run.
-The NCU skill is the full upstream Nsight Compute diagnosis reference, stored
-as the `skills/external_skills/ncu-report-skill` submodule and packaged at
-`skills/external_skills/ncu-report-skill.zip`. The Anthropic provider uses
-Anthropic's Skills API and code-execution tool; initialize submodules before
-running the agent.
 
 The OpenRouter harness gives the model on-demand access to the same bundled
 PTX and NCU-reference files through local tools. This makes the skills usable
@@ -47,12 +112,10 @@ By default, the agent starts from
 `triton_generated_ptx/<kernel>.ptx`, evaluates it, and applies localized PTX
 patches. It does not generate an initial PTX implementation from scratch.
 
-Use Claude through Anthropic's Messages API by installing the optional SDK and
-selecting the provider. This reads `ANTHROPIC_API_KEY`; the OpenAI default reads
-`OPENAI_API_KEY`.
+Use Claude through Anthropic's Messages API by selecting the provider. This
+reads `ANTHROPIC_API_KEY`; the OpenAI default reads `OPENAI_API_KEY`.
 
 ```bash
-uv pip install anthropic
 python -m agent MatrixMultiplicationFloat16 \
   --provider anthropic
 ```
@@ -114,31 +177,10 @@ python -m agent MatrixMultiplicationFloat16 \
   --initial-prompt-ptx path/to/reference.ptx
 ```
 
-### Local fixed-PTX mock
-
-To exercise the initial-candidate path without an API call, run the local
-OpenAI-compatible endpoint in one terminal:
-
-```bash
-.venv/bin/python fake_openai_endpoint.py --ptx /path/to/candidate.ptx
-# For francois to test
-.venv/bin/python fake_openai_endpoint.py --ptx output_traces/260813050848_MatrixMultiplicationFloat16_gpt-5.6-sol_max/iteration_001_candidate_02_try_00_candidate_speedup_vs_triton_0.9860x.ptx
-```
-
-Then run the agent in another terminal with a placeholder key and the mock
-base URL. Use zero improvement rounds because this mock returns a fixed initial
-candidate only:
-
-```bash
-OPENAI_API_KEY=fake OPENAI_BASE_URL=http://127.0.0.1:8000/v1 \
-  .venv/bin/python -m agent MatrixMultiplicationFloat16 \
-  --model fake-ptx --max-tool-rounds 0
-```
-
 Improvement planning uses the current Nsight Compute report when available.
-Set `NCU_PATH` to enable profiling. When usable NCU metrics are unavailable,
-planning falls back to one to three ideas based on the current kernel source,
-PTX, launch configuration, and benchmark results. These ideas label suspected
+When usable NCU metrics are unavailable, planning falls back to one to three
+ideas based on the current kernel source, PTX, launch configuration, and
+benchmark results. These ideas label suspected
 bottlenecks as hypotheses and require only correctness checks and timing
 benchmarks. NCU-backed plans use the bundled NCU report skill and cite only
 metrics present in the current report.
@@ -192,7 +234,7 @@ by the speedup plot:
 ```
 
 The command writes `correction factor.txt` to each immediate run directory in
-`astra`. Each factor is the fresh Triton p50 divided by that run's archived
+`kernels`. Each factor is the fresh Triton p50 divided by that run's archived
 Triton p50, so the plot adjusts its saved speedups to the fresh baseline.
 
 ## Validation
@@ -200,4 +242,17 @@ Triton p50, so the plot adjusts its saved speedups to the fresh baseline.
 ```bash
 python -m ruff check --exclude triton_ptx .
 python -m compileall .
+```
+
+## Citation
+
+The environment and this client are both part of the same work:
+
+```bibtex
+@inproceedings{aicompiler2027,
+  title     = {AI as a Compiler: Compiling Triton Kernels without the Triton Compiler},
+  author    = {Anonymous},
+  booktitle = {Under review at ICLR},
+  year      = {2027}
+}
 ```

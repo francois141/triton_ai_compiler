@@ -34,17 +34,17 @@ def instructions_in_ptx(ptx_path: Path) -> set[str]:
     return instructions
 
 
-def ptx_files(astra_dir: Path) -> Iterable[Path]:
-    return sorted(path for path in astra_dir.rglob("*.ptx") if path.is_file())
+def ptx_files(kernels_dir: Path) -> Iterable[Path]:
+    return sorted(path for path in kernels_dir.rglob("*.ptx") if path.is_file())
 
 
-def collect_instructions(astra_dir: Path) -> tuple[set[str], set[str], int, int]:
+def collect_instructions(kernels_dir: Path) -> tuple[set[str], set[str], int, int]:
     llm_instructions: set[str] = set()
     triton_instructions: set[str] = set()
     llm_files = 0
     triton_files = 0
 
-    for ptx_path in ptx_files(astra_dir):
+    for ptx_path in ptx_files(kernels_dir):
         instructions = instructions_in_ptx(ptx_path)
         if ptx_path.name == "triton_generated.ptx":
             triton_instructions.update(instructions)
@@ -65,22 +65,22 @@ def print_instructions(title: str, instructions: set[str]) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
-            "Compare distinct PTX instruction mnemonics in Astra LLM candidates "
-            "against triton_generated.ptx baselines."
+            "Compare distinct PTX instruction mnemonics in the LLM candidates "
+            "against their triton_generated.ptx baselines."
         )
     )
     parser.add_argument(
-        "--astra-dir",
+        "--kernels-dir",
         type=Path,
-        default=Path("astra"),
-        help="directory containing Astra run directories (default: astra)",
+        default=Path("kernels"),
+        help="directory containing the per-kernel run directories (default: kernels)",
     )
     args = parser.parse_args()
 
-    if not args.astra_dir.is_dir():
-        parser.error(f"Astra directory does not exist: {args.astra_dir}")
+    if not args.kernels_dir.is_dir():
+        parser.error(f"Kernels directory does not exist: {args.kernels_dir}")
 
-    llm, triton, llm_files, triton_files = collect_instructions(args.astra_dir)
+    llm, triton, llm_files, triton_files = collect_instructions(args.kernels_dir)
     llm_only = llm - triton
     triton_only = triton - llm
 

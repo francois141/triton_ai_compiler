@@ -157,9 +157,11 @@ def append_candidate(
     )
 
 
-def collect_candidates(astra_dir):
+def collect_candidates(kernels_dir):
     candidates = []
-    for run_directory in sorted(path for path in astra_dir.iterdir() if path.is_dir()):
+    for run_directory in sorted(
+        path for path in kernels_dir.iterdir() if path.is_dir()
+    ):
         try:
             kernel_name, precision = parse_kernel_name(run_directory.name)
         except ValueError as exc:
@@ -260,8 +262,8 @@ def write_best_ptx(best, output_dir):
         )
 
 
-def main(astra_dir, output_dir):
-    candidates = collect_candidates(astra_dir)
+def main(kernels_dir, output_dir):
+    candidates = collect_candidates(kernels_dir)
     best = select_best(candidates)
     write_best_ptx(best, output_dir)
     LOGGER.info("Wrote %d PTX files from %d candidates", len(best), len(candidates))
@@ -269,20 +271,20 @@ def main(astra_dir, output_dir):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Extract the fastest PTX candidate from an Astra run directory."
+        description="Extract the fastest PTX candidate per kernel, GPU and precision."
     )
     parser.add_argument(
-        "astra_dir",
+        "kernels_dir",
         nargs="?",
         type=Path,
-        default=Path("astra"),
-        help="Directory containing Astra kernel run directories.",
+        default=Path("kernels"),
+        help="Directory containing the per-kernel run directories.",
     )
     parser.add_argument(
         "-o",
         "--output-dir",
         type=Path,
-        default=Path("final_ptx"),
+        default=Path("kernels_best"),
         help="Directory where selected PTX files are written.",
     )
     parser.add_argument("-v", "--verbose", action="store_true")
@@ -292,6 +294,6 @@ if __name__ == "__main__":
         level=logging.INFO if args.verbose else logging.WARNING,
         format="%(levelname)s: %(message)s",
     )
-    if not args.astra_dir.is_dir():
-        parser.error(f"Astra directory does not exist: {args.astra_dir}")
-    main(args.astra_dir, args.output_dir)
+    if not args.kernels_dir.is_dir():
+        parser.error(f"Kernels directory does not exist: {args.kernels_dir}")
+    main(args.kernels_dir, args.output_dir)

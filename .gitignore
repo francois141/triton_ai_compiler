@@ -23,5 +23,7 @@ matmul/direct_cutlass_kernel_fp16
 /paper_results/
 /ablation/
 /random/
+/kernels/
+/kernels_best/
 /astra/
 /final_ptx/
