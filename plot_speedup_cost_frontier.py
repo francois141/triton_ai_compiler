@@ -54,18 +54,22 @@ AXIS_TITLE_FONT_SIZE = 22
 AXIS_LABEL_FONT_SIZE = 20
 TICK_FONT_SIZE = 17
 GPU_COLORS = plt.rcParams["axes.prop_cycle"].by_key()["color"]
-# Fix the colour of each (GPU, precision) series so a series looks the same in
-# every grid panel and matches the single shared legend.  Panels do not all
-# contain the same series, so per-panel colour cycling would break the legend.
-GRID_SERIES_COLORS = {
-    ("NVIDIA B200", "Floating Point 16"): GPU_COLORS[0],
-    ("NVIDIA B200", "Floating Point 8"): GPU_COLORS[1],
-    ("NVIDIA H100", "Floating Point 16"): GPU_COLORS[3],
-    ("NVIDIA H100", "Floating Point 8"): GPU_COLORS[4],
-    ("NVIDIA L40S", "Floating Point 16"): GPU_COLORS[2],
-    ("NVIDIA L40S", "Floating Point 8"): GPU_COLORS[6],
+# Fix the colour of each GPU so a series looks the same in every grid panel and
+# matches the single shared legend.  Panels do not all contain the same series,
+# so per-panel colour cycling would break the legend.  Precision is encoded by
+# marker and line style instead of colour: FP16 uses solid lines with circles,
+# FP8 dashed lines with triangles in the same colour.
+GRID_GPU_COLORS = {
+    "NVIDIA B200": "#4E79A7",
+    "NVIDIA H100": "#E15759",
+    "NVIDIA L40S": "#59A14F",
 }
-GRID_FALLBACK_SERIES_COLOR = GPU_COLORS[7 % len(GPU_COLORS)]
+GRID_FALLBACK_SERIES_COLOR = "#8C8C8C"
+GRID_PRECISION_STYLES = {
+    "Floating Point 16": {"marker": "o", "linestyle": "-"},
+    "Floating Point 8": {"marker": "^", "linestyle": "--"},
+}
+GRID_FALLBACK_PRECISION_STYLE = {"marker": "s", "linestyle": ":"}
 # Only show a new frontier point when it is visibly better than the previous
 # displayed point.  This prevents tiny benchmark fluctuations from making
 # otherwise comparable panels look more densely sampled.
@@ -151,14 +155,17 @@ REPRESENTATIVE_KERNELS = (
 )
 REPRESENTATIVE_GPU_TYPES = ("NVIDIA H100", "NVIDIA B200", "NVIDIA L40S")
 FIVE_TRIAL_COUNT = 5
+# The configured per-run API-cost gate for each repeatability experiment.
+# Traces do not persist the budget, so it is recorded here from the run
+# commands; the observed run totals stay within these gates.
 FIVE_TRIAL_KERNELS = (
-    ("Convolution (FP8)", "Convolution2DFloat8Kernel", 5.0),
-    ("Matrix multiplication (FP16)", "MatrixMultiplicationFloat16", 5.0),
+    ("Convolution (FP8)", "Convolution2DFloat8Kernel", 15.0),
+    ("Matrix multiplication (FP16)", "MatrixMultiplicationFloat16", 15.0),
     ("SwiGLU (FP16)", "SwiGLUFloat16Kernel", 1.0),
     (
         "FlashAttention forward (FP16)",
         "FlashAttentionNeurIPS2022Forward",
-        5.0,
+        15.0,
     ),
 )
 RUN_DIRECTORY_PATTERN = re.compile(r"^\d{12}_")
@@ -646,7 +653,16 @@ def load_token_expansion_data(trace_directory):
     return token_counts
 
 
-def _plot_frontier(axis, frontier, color, gpu_type, *, include_origin=True):
+def _plot_frontier(
+    axis,
+    frontier,
+    color,
+    gpu_type,
+    *,
+    include_origin=True,
+    marker="o",
+    linestyle="-",
+):
     costs = [point["cost_usd"] for point in frontier]
     speedups = [point["speedup_vs_triton"] for point in frontier]
     if include_origin:
@@ -658,7 +674,8 @@ def _plot_frontier(axis, frontier, color, gpu_type, *, include_origin=True):
         color=color,
         label=gpu_type,
         linewidth=FRONTIER_LINE_WIDTH,
-        marker="o",
+        linestyle=linestyle,
+        marker=marker,
         markersize=FRONTIER_MARKER_SIZE,
     )
     return costs[-1], speedups[-1], color
@@ -677,7 +694,7 @@ def _extend_frontier(axis, endpoint):
 
 
 def _format_axis(axis, title, show_axis_labels=True):
-    axis.axhline(1.0, color="#2563eb", linestyle="--", linewidth=1)
+    axis.axhline(1.0, color="#6B7280", linestyle="--", linewidth=1)
     # Keep the enlarged panel headings inside their own panels.
     if len(title) > 18 and title.endswith("Kernel"):
         title = f"{title[:-6]}\nKernel"
@@ -851,7 +868,7 @@ def write_five_trial_results_table(output_directory, results):
             r"\end{tabular}",
             r"}",
             r"\caption{Repeatability on NVIDIA B200 across five independent",
-            r"\neuralcompiler{} runs. Values are speedups over the same autotuned",
+            r"\aicompiler{} runs. Values are speedups over the same autotuned",
             r"Triton baseline. Budget is the configured per-run API-cost gate, checked",
             r"before each new model request; an in-flight request can finish above it.}",
             r"\label{tab:five-trial-speedups}",
@@ -958,7 +975,13 @@ def write_representative_results_table(
 
 
 def _grid_series_color(series):
-    return GRID_SERIES_COLORS.get(series, GRID_FALLBACK_SERIES_COLOR)
+    gpu_type, _precision = series
+    return GRID_GPU_COLORS.get(gpu_type, GRID_FALLBACK_SERIES_COLOR)
+
+
+def _grid_series_style(series):
+    _gpu_type, precision = series
+    return GRID_PRECISION_STYLES.get(precision, GRID_FALLBACK_PRECISION_STYLE)
 
 
 def _grid_series_by_kernel(accepted_kernels):
@@ -1044,6 +1067,7 @@ def write_frontier_grid(
                         _grid_series_color(series),
                         f"{gpu_type}: {precision}",
                         include_origin=False,
+                        **_grid_series_style(series),
                     )
                 )
             title = GRID_TITLE_TRANSLATIONS.get(kernel_name, kernel_name)
@@ -1167,27 +1191,36 @@ def plot_llm_figure(
     ]
     labels, venues, speedups = zip(*kernel_results)
     indices = range(len(kernel_results))
-    figure, axis = plt.subplots(figsize=(13.2, 5.6))
+    figure, axis = plt.subplots(figsize=(13.2, 4.05))
     bars = axis.bar(indices, speedups, width=0.78, color="#2C7FB8", edgecolor="white", linewidth=0.8)
     axis.axhline(1.0, color="#4E79A7", linestyle="--", linewidth=1.15, zorder=0)
-    axis.text(len(kernel_results) - 0.25, 1.045, "parity", color="#4E79A7", fontsize=8, ha="right", va="bottom")
     axis.set_xlim(-0.65, len(kernel_results) - 0.35)
     axis.set_ylim(0, max(1.8, max(speedups) + 0.28))
     axis.set_ylabel("Best speedup vs. Triton", fontsize=13, fontweight="bold")
     axis.set_title("Best LLM speedup for conference kernels on NVIDIA B200", pad=8, fontsize=16, fontweight="bold")
     axis.set_xticks([])
-    axis.tick_params(axis="both", labelsize=11)
+    axis.tick_params(axis="both", labelsize=12)
     axis.grid(axis="y", color="#D9D9D9", linewidth=0.7, alpha=0.75)
     axis.spines[["top", "right"]].set_visible(False)
     axis.set_axisbelow(True)
 
-    for index, (bar, speedup, label, venue) in enumerate(zip(bars, speedups, labels, venues)):
-        axis.text(bar.get_x() + bar.get_width() / 2, speedup + 0.055, f"{speedup:.2f}x", ha="center", va="bottom", fontsize=10, fontweight="bold")
-        label_y = -0.115 if index % 2 == 0 else -0.255
-        axis.text(index, label_y, label, transform=axis.get_xaxis_transform(), ha="center", va="top", fontsize=9.1, fontweight="bold", linespacing=1.05, clip_on=False)
-        axis.text(index, label_y - 0.052 * (label.count("\n") + 1), venue, transform=axis.get_xaxis_transform(), ha="center", va="top", fontsize=8.2, fontweight="medium", color="#5B6573", linespacing=1.05, clip_on=False)
+    label_font_size = 10.4
+    label_line_spacing = 1.05
+    axes_top, axes_bottom = 0.88, 0.40
+    # One rendered line of the kernel label, as a fraction of the axes height,
+    # so the venue clears a multi-line label instead of overprinting it.
+    axes_height_points = figure.get_figheight() * 72.0 * (axes_top - axes_bottom)
+    label_line_fraction = label_font_size * label_line_spacing / axes_height_points
+    venue_gap_fraction = 0.030
 
-    figure.subplots_adjust(left=0.09, right=0.995, top=0.88, bottom=0.34)
+    for index, (bar, speedup, label, venue) in enumerate(zip(bars, speedups, labels, venues)):
+        axis.text(bar.get_x() + bar.get_width() / 2, speedup + 0.055, f"{speedup:.2f}x", ha="center", va="bottom", fontsize=11, fontweight="bold")
+        label_y = -0.115 if index % 2 == 0 else -0.335
+        axis.text(index, label_y, label, transform=axis.get_xaxis_transform(), ha="center", va="top", fontsize=label_font_size, fontweight="bold", linespacing=label_line_spacing, clip_on=False)
+        venue_y = label_y - (label.count("\n") + 1) * label_line_fraction - venue_gap_fraction
+        axis.text(index, venue_y, venue, transform=axis.get_xaxis_transform(), ha="center", va="top", fontsize=9.4, fontweight="bold", color="#5B6573", linespacing=1.05, clip_on=False)
+
+    figure.subplots_adjust(left=0.09, right=0.995, top=axes_top, bottom=axes_bottom)
     saved_paths = _save_figure(
         figure,
         output_directory,
