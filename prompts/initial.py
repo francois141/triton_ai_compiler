@@ -111,7 +111,6 @@ def build_prompt_sections(
     include_flash_attention=False,
     include_convolution_memory_layout=False,
     provider="openai",
-    enable_web_search=True,
     shared_memory_bytes=None,
 ):
     if provider not in {"anthropic", "openai", "openrouter"}:
@@ -147,7 +146,7 @@ def build_prompt_sections(
                     shared_memory_bytes=shared_memory_bytes,
                 )
                 if is_anthropic
-                else float16_gemm_research_rules(enable_web_search=enable_web_search)
+                else float16_gemm_research_rules()
             )
             if include_float16_gemm_research
             else ""
@@ -173,7 +172,6 @@ def prompt_builder(
     include_flash_attention=False,
     include_convolution_memory_layout=False,
     provider="openai",
-    enable_web_search=True,
     shared_memory_bytes=None,
 ):
     prompt_sections = build_prompt_sections(
@@ -186,7 +184,6 @@ def prompt_builder(
         include_flash_attention=include_flash_attention,
         include_convolution_memory_layout=include_convolution_memory_layout,
         provider=provider,
-        enable_web_search=enable_web_search,
         shared_memory_bytes=shared_memory_bytes,
     )
     return render_prompt_sections(
@@ -227,7 +224,6 @@ def build_prompt_sections_for_operator(
     address_size,
     ptx_signature=None,
     provider="openai",
-    enable_web_search=True,
 ):
     spec = extract_specification_from_operator(operator)
     include_float16_gemm_research = _is_float16_operator(operator)
@@ -241,6 +237,5 @@ def build_prompt_sections_for_operator(
         include_flash_attention=_is_flash_attention_float16_operator(operator),
         include_convolution_memory_layout=_is_convolution_2d_float16_operator(operator),
         provider=provider,
-        enable_web_search=enable_web_search,
         shared_memory_bytes=get_kernel_shared_memory_bytes(operator),
     )

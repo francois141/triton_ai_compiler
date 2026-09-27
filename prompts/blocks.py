@@ -314,36 +314,8 @@ Hardware rule:
 """.strip()
 
 
-FLOAT16_GEMM_RESEARCH_SOURCES = (
-    "https://leimao.github.io/article/CUDA-Matrix-Multiplication-Optimization/",
-    "https://docs.nvidia.com/cutlass/4.2.1/media/docs/cpp/efficient_gemm.html",
-    "https://www.rimikawrites.com/6-step-optimization-of-gemms-in-cuda/",
-    "https://qsysarch.com/posts/gemm-kernels/",
-    "https://siboehm.com/articles/22/CUDA-MMM",
-    (
-        "https://alexarmbr.github.io/2024/08/10/How-To-Write-A-Fast-"
-        "Matrix-Multiplication-From-Scratch-With-Tensor-Cores.htm"
-    ),
-    "https://hazyresearch.stanford.edu/blog/2024-05-12-tk",
-    "https://maharshi.bearblog.dev/optimizing-sgemv-cuda/",
-    "https://tilelang.com/deeplearning_operators/gemv.html",
-)
-
-
-def float16_gemm_research_rules(*, enable_web_search=True):
-    sources = "\n".join(f"- {source}" for source in FLOAT16_GEMM_RESEARCH_SOURCES)
-    research_instruction = (
-        "Use the available web search tool before designing or improving a candidate "
-        "to review the following sources:"
-        if enable_web_search
-        else "Web search is unavailable. Use the following sources only as optional "
-        "background references:"
-    )
-    return _float16_gemm_research_rules(f"{research_instruction}\n{sources}")
-
-
 def anthropic_float16_gemm_research_rules(*, shared_memory_bytes):
-    return _float16_gemm_research_rules(
+    return float16_gemm_research_rules(
         f"""## Dynamic Shared-Memory Allocation
 
 The launcher allocates exactly {shared_memory_bytes} bytes of dynamic shared
@@ -375,16 +347,15 @@ memory can be requested. Account for this fixed budget when choosing tile
 shapes, pipeline stages, and any epilogue workspace."""
 
 
-def _float16_gemm_research_rules(provider_guidance):
+def float16_gemm_research_rules(provider_guidance=""):
+    guidance = f"\n\n{provider_guidance}" if provider_guidance else ""
     return f"""
 ## FP16 GEMM Research and Tensor Core Requirements
 
 This is generic FP16 GEMM optimization advice. Apply it only when it is
 consistent with the operator's supplied shapes, indexing, and memory layout.
 It does not change the computation, imply a 4096 x 4096 problem, or permit
-treating a non-contiguous operand as a contiguous matrix.
-
-{provider_guidance}
+treating a non-contiguous operand as a contiguous matrix.{guidance}
 
 For a true FP16 GEMM, use Tensor Cores when they are valid for the supplied
 target and exact operand layout. Choose block, warp, and K tiling from the
