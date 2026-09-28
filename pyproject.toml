@@ -8,12 +8,15 @@ dependencies = [
     "openai",
     "pydantic",
     "tiktoken",
+    "ptx_gym",
     "torch",
-    "triton",
 ]
 
 [tool.uv]
 package = false
+# ptx_gym ships the patched triton package, so keep torch from installing stock
+# Triton over it.
+override-dependencies = ["triton; sys_platform == 'never'"]
 
 [tool.uv.sources]
-triton = { path = "ptx_gym", editable = true }
+ptx_gym = { path = "ptx_gym", editable = true }

@@ -5,13 +5,13 @@
 # Triton AI Compiler
 
 <p align="center">
-  <strong>The agent client for TCEnv: it drives an LLM through the loop of
+  <strong>The agent client for PTX Gym: it drives an LLM through the loop of
   writing, verifying, and benchmarking PTX for a Triton kernel.</strong>
 </p>
 
 <p align="center">
   <img alt="Status: research preview" src="https://img.shields.io/badge/status-research%20preview-orange">
-  <img alt="Role: TCEnv client" src="https://img.shields.io/badge/role-TCEnv%20client-blueviolet">
+  <img alt="Role: PTX Gym client" src="https://img.shields.io/badge/role-PTX%20Gym%20client-blueviolet">
   <img alt="Task: Triton to PTX" src="https://img.shields.io/badge/task-Triton%20%E2%86%92%20PTX-blue">
   <img alt="Hardware: NVIDIA GPU" src="https://img.shields.io/badge/hardware-NVIDIA%20GPU-76B900">
 </p>
@@ -29,22 +29,22 @@
 
 ## Overview
 
-[TCEnv](ptx_gym/README.md) is the environment: it fixes the compilation
+[PTX Gym](ptx_gym/README.md) is the environment: it fixes the compilation
 contract for a kernel, evaluates a candidate PTX against it, and reports
 correctness, formal verification, and speed. It answers whether a given PTX is
 valid and fast, but it does not decide what PTX to try next.
 
 **This repository is the client.** It is an OpenAI-, Anthropic-, and
 OpenRouter-compatible tool-calling agent that holds the other half of the loop:
-it prompts a model for PTX, submits each candidate to TCEnv, reads back the
+it prompts a model for PTX, submits each candidate to PTX Gym, reads back the
 verdict and the Nsight Compute report, plans the next edit, and records every
 candidate it evaluated.
 
-The two live in separate repositories on purpose. TCEnv is the benchmark and
+The two live in separate repositories on purpose. PTX Gym is the benchmark and
 must stay independent of any particular agent; the client is one agent
 implementation among possible others, free to change its prompting, its
 provider, and its search strategy without touching the environment it is
-measured in. TCEnv is vendored here as the `ptx_gym` submodule, so a
+measured in. PTX Gym is vendored here as the `ptx_gym` submodule, so a
 checkout of this repository gives you both halves.
 
 ## Setup
@@ -54,7 +54,7 @@ checkout of this repository gives you both halves.
 From the shared workspace, initialize the submodules and install every
 dependency at once. `uv sync` reads `pyproject.toml`, creates `.venv`, and
 installs the OpenAI and Anthropic SDKs, PyTorch, the plotting libraries, and
-TCEnv (`ptx_gym`, editable) at the versions pinned in `uv.lock`. The three
+PTX Gym (`ptx_gym`, editable) at the versions pinned in `uv.lock`. The three
 exported variables only affect the Triton build: they cap its parallelism and
 make `uv` copy instead of hardlink.
 
@@ -70,7 +70,7 @@ uv sync
 
 One provider key is required, and which one depends on `--provider`. Nothing
 else is read from the environment by the agent itself; the remaining variables
-are consumed by TCEnv while it evaluates a candidate.
+are consumed by PTX Gym while it evaluates a candidate.
 
 | Variable | Needed for |
 | --- | --- |
