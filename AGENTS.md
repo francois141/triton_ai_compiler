@@ -16,6 +16,21 @@ All code you write MUST be fully optimized.
 
 If the code is not fully optimized before handing it to the user, perform another optimization and quality pass.
 
+## Kernel Files
+
+Each kernel file under `ptx_gym/ptx_gym/kernels/` is a self-contained benchmark
+case. This rule overrides the DRY and code-reuse principles above.
+
+* Never compress, deduplicate, or refactor code within a kernel file or across kernel
+  files, even when several kernels look alike.
+* Never move kernel code or `@triton.jit` helpers into a shared module. The prompt
+  builder sends the kernel source to the model verbatim through `inspect.getsource`,
+  and it only includes helpers that are defined in the kernel's own module.
+* Never run `ruff format` or other rewriting tools on kernel files. Any change to the
+  kernel source changes the prompt and invalidates comparisons with earlier runs.
+* Fix only real defects in kernel files, such as a wrong reference implementation,
+  input generation, launch configuration, or tolerance, and keep each fix minimal.
+
 ## Preferred Tools
 
 * Use `uv` for Python package management and to create a `.venv` if it is not present.
