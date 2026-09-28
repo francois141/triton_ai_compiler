@@ -21,7 +21,7 @@ from prompts.improvement import (
     build_repair_prompt,
 )
 from prompts.initial import initial_prompt_section_names, render_prompt_sections
-from triton_ptx import Payload, dump_kernel_ptx
+from ptx_gym import Payload, dump_kernel_ptx
 from utils.cost import append_daily_cost_summary, read_cost_total
 from utils.evaluation import (
     candidate_from_evaluation,

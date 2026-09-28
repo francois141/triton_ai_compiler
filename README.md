@@ -29,7 +29,7 @@
 
 ## Overview
 
-[TCEnv](triton_ptx/README.md) is the environment: it fixes the compilation
+[TCEnv](ptx_gym/README.md) is the environment: it fixes the compilation
 contract for a kernel, evaluates a candidate PTX against it, and reports
 correctness, formal verification, and speed. It answers whether a given PTX is
 valid and fast, but it does not decide what PTX to try next.
@@ -44,7 +44,7 @@ The two live in separate repositories on purpose. TCEnv is the benchmark and
 must stay independent of any particular agent; the client is one agent
 implementation among possible others, free to change its prompting, its
 provider, and its search strategy without touching the environment it is
-measured in. TCEnv is vendored here as the `triton_ptx` submodule, so a
+measured in. TCEnv is vendored here as the `ptx_gym` submodule, so a
 checkout of this repository gives you both halves.
 
 ## Setup
@@ -54,7 +54,7 @@ checkout of this repository gives you both halves.
 From the shared workspace, initialize the submodules and install every
 dependency at once. `uv sync` reads `pyproject.toml`, creates `.venv`, and
 installs the OpenAI and Anthropic SDKs, PyTorch, the plotting libraries, and
-TCEnv (`triton_ptx`, editable) at the versions pinned in `uv.lock`. The three
+TCEnv (`ptx_gym`, editable) at the versions pinned in `uv.lock`. The three
 exported variables only affect the Triton build: they cap its parallelism and
 make `uv` copy instead of hardlink.
 
@@ -99,7 +99,7 @@ with providers that do not implement proprietary skill-upload APIs.
 
 ```bash
 .venv/bin/python run_kernel.py SoftmaxFloat16Kernel
-python -m pytest triton_ptx/triton_ptx/kernels/test_triton_kernels.py
+python -m pytest ptx_gym/ptx_gym/kernels/test_triton_kernels.py
 ```
 
 ## Optimize a kernel
@@ -240,7 +240,7 @@ Triton p50, so the plot adjusts its saved speedups to the fresh baseline.
 ## Validation
 
 ```bash
-python -m ruff check --exclude triton_ptx .
+python -m ruff check --exclude ptx_gym .
 python -m compileall .
 ```
 

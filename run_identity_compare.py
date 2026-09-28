@@ -3,10 +3,10 @@ import logging
 import re
 
 import torch
-from triton_ptx.evaluation.performance import evaluate_ptx_performance
-from triton_ptx.evaluation.verification import OutputVerifier
-from triton_ptx.helpers.triton import dump_kernel_ptx
-from triton_ptx.kernels import resolve_kernel
+from ptx_gym.evaluation.performance import evaluate_ptx_performance
+from ptx_gym.evaluation.verification import OutputVerifier
+from ptx_gym.helpers.triton import dump_kernel_ptx
+from ptx_gym.kernels import resolve_kernel
 
 LOGGER = logging.getLogger(__name__)
 

@@ -176,7 +176,7 @@ REASONING_EFFORT_PATTERN = re.compile(
     r"_(?:low|medium|high|max|xhigh|ultra|none)$", re.IGNORECASE
 )
 KERNEL_SOURCE_DIRECTORY = (
-    Path(__file__).resolve().parent / "triton_ptx" / "triton_ptx" / "kernels"
+    Path(__file__).resolve().parent / "ptx_gym" / "ptx_gym" / "kernels"
 )
 ASTRA_TRACE_DIRECTORY = Path(__file__).resolve().parent / "astra"
 TOKEN_ENCODING = tiktoken.get_encoding("o200k_base")

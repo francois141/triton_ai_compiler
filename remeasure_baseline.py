@@ -51,8 +51,8 @@ def archived_baseline(run_directory):
 
 def measure_triton_p50(kernel_name):
     import torch
-    from triton_ptx.evaluation.performance import benchmark
-    from triton_ptx.kernels import resolve_kernel
+    from ptx_gym.evaluation.performance import benchmark
+    from ptx_gym.kernels import resolve_kernel
 
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is required to remeasure a Triton baseline.")

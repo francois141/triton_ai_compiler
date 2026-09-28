@@ -16,4 +16,4 @@ dependencies = [
 package = false
 
 [tool.uv.sources]
-triton = { path = "triton_ptx", editable = true }
+triton = { path = "ptx_gym", editable = true }

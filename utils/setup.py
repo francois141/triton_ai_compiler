@@ -5,7 +5,7 @@ from pathlib import Path
 from anthropic import transform_schema
 
 from prompts import build_prompt_sections_for_operator
-from triton_ptx import (
+from ptx_gym import (
     dump_kernel_ptx,
     get_ptx_system_config,
     parse_ptx_signature,

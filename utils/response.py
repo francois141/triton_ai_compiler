@@ -9,8 +9,8 @@ from pathlib import Path
 from anthropic import transform_schema
 
 from prompts.blocks import anthropic_system_prompt, system_prompt
+from ptx_gym import Payload, TritonPTXCandidateEvaluator, resolve_kernel
 from skills.load_ptx import NCU_REPORT_SKILL_DIR, PTX_SKILL_DIR
-from triton_ptx import Payload, TritonPTXCandidateEvaluator, resolve_kernel
 
 from .cost import (
     COST_LOG_PATH,

@@ -2598,7 +2598,7 @@ wheels = [
 
 [[package]]
 name = "triton"
-source = { editable = "triton_ptx" }
+source = { editable = "ptx_gym" }
 dependencies = [
     { name = "anthropic" },
     { name = "google-genai" },
@@ -2645,7 +2645,7 @@ requires-dist = [
     { name = "pydantic" },
     { name = "tiktoken" },
     { name = "torch" },
-    { name = "triton", editable = "triton_ptx" },
+    { name = "triton", editable = "ptx_gym" },
 ]
 
 [[package]]

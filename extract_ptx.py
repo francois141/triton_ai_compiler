@@ -2,10 +2,10 @@ import argparse
 from contextlib import contextmanager
 from pathlib import Path
 
-from triton_ptx.helpers.environment import is_gpu_available
-from triton_ptx.helpers.triton import dump_kernel_assembly
-from triton_ptx.kernels import kernel_list
-from triton_ptx.kernels.base import TritonPTXKernel
+from ptx_gym.helpers.environment import is_gpu_available
+from ptx_gym.helpers.triton import dump_kernel_assembly
+from ptx_gym.kernels import kernel_list
+from ptx_gym.kernels.base import TritonPTXKernel
 
 from utils.clean_ptx import clean_ptx
 

@@ -82,7 +82,7 @@ def remeasure_candidate(
     *,
     kernel_name=None,
 ):
-    from triton_ptx.evaluation import Payload
+    from ptx_gym.evaluation import Payload
 
     resolved_kernel_name = resolve_kernel_name(record, kernel_name)
     payload = Payload.from_input(extract_payload(record))

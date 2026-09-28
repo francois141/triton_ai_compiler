@@ -4,9 +4,9 @@ import argparse
 import logging
 
 import torch
-from triton_ptx.evaluation.performance import benchmark
-from triton_ptx.evaluation.verification import OutputVerifier
-from triton_ptx.kernels import resolve_kernel
+from ptx_gym.evaluation.performance import benchmark
+from ptx_gym.evaluation.verification import OutputVerifier
+from ptx_gym.kernels import resolve_kernel
 
 LOGGER = logging.getLogger(__name__)
 

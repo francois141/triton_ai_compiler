@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from triton_ptx.helpers.kernels import extract_specification_from_operator
-from triton_ptx.helpers.triton import get_kernel_shared_memory_bytes
+from ptx_gym.helpers.kernels import extract_specification_from_operator
+from ptx_gym.helpers.triton import get_kernel_shared_memory_bytes
 
 from .blocks import (
     anthropic_float16_gemm_research_rules,
@@ -76,7 +76,7 @@ def initial_prompt_section_names(provider):
 
 def _is_float16_operator(operator):
     return _operator_class(operator).__module__.startswith(
-        "triton_ptx.kernels.level2_float16"
+        "ptx_gym.kernels.level2_float16"
     )
 
 
