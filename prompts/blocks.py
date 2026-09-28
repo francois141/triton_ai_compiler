@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from ptx_gym.helpers.kernels import is_constexpr_annotation
+
 
 def system_prompt():
     return """
@@ -133,7 +135,7 @@ features. Dynamic shared memory is already available through the declared
 
 def constexpr_values_block(spec):
     constexpr_params = [
-        param for param in spec.parameters if _is_constexpr_annotation(param.annotation)
+        param for param in spec.parameters if is_constexpr_annotation(param.annotation)
     ]
     if not constexpr_params:
         return "\n\n".join(
@@ -176,16 +178,6 @@ def launch_configuration_block(num_warps):
     )
 
 
-def _is_constexpr_annotation(annotation):
-    annotation_text = str(annotation).lower()
-    return (
-        annotation_text == "constexpr"
-        or annotation_text.endswith(".constexpr")
-        or "triton.language.core.constexpr" in annotation_text
-        or ("triton.language" in annotation_text and "constexpr" in annotation_text)
-    )
-
-
 def signature_template(
     parameters,
     *,
@@ -200,7 +192,7 @@ def signature_template(
     ),
 ):
     runtime_params = [
-        param for param in parameters if not _is_constexpr_annotation(param.annotation)
+        param for param in parameters if not is_constexpr_annotation(param.annotation)
     ]
 
     lines = []
@@ -433,15 +425,9 @@ for every row and batch-head pair.
 
 
 def triton_kernel_block(source, supporting_source=""):
-    source_parts = [source]
-    if supporting_source:
-        source_parts.insert(0, supporting_source)
-    return "\n\n".join(
-        [
-            "## Triton Kernel",
-            f"```python\n{'\n\n'.join(source_parts)}\n```",
-        ]
-    )
+    source_parts = [supporting_source, source] if supporting_source else [source]
+    kernel_source = "\n\n".join(source_parts)
+    return f"## Triton Kernel\n\n```python\n{kernel_source}\n```"
 
 
 def output_contract(spec):
