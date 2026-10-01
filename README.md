@@ -58,12 +58,12 @@ cd triton_ai_compiler
 uv venv .triton_ai_compiler
 source .triton_ai_compiler/bin/activate
 
+uv pip install -r requirements.txt
+
 cd ptx_gym
 uv pip install torch numpy
 MAX_JOBS=64 uv pip install -e . -v   # builds the patched Triton and ptx_gym
 cd ..
-
-uv pip install anthropic openai matplotlib pydantic tiktoken ruff
 ```
 
 `MAX_JOBS` caps the parallelism of the Triton build; lower it on smaller
