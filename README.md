@@ -18,79 +18,72 @@
 
 <p align="center">
   <a href="#overview">Overview</a> ·
-  <a href="#setup">Setup</a> ·
-  <a href="#environment-variables">Environment</a> ·
-  <a href="#test-installation">Test installation</a> ·
-  <a href="#optimize-a-kernel">Optimize a kernel</a> ·
-  <a href="#utilities">Utilities</a> ·
-  <a href="#validation">Validation</a> ·
-  <a href="#citation">Citation</a>
+  <a href="#installation">Installation</a> ·
+  <a href="#quick-start">Quick start</a> ·
+  <a href="#quick-run">Quick run</a> ·
+  <a href="#agent-options">Agent options</a> ·
+  <a href="#run-outputs">Run outputs</a> ·
+  <a href="#utilities">Utilities</a>
 </p>
 
 ## Overview
 
 [PTX Gym](ptx_gym/README.md) is the environment: it fixes the compilation
 contract for a kernel, evaluates a candidate PTX against it, and reports
-correctness, formal verification, and speed. It answers whether a given PTX is
-valid and fast, but it does not decide what PTX to try next.
+correctness, formal verification, and speed. It does not decide what PTX to
+try next.
 
-**This repository is the client.** It is an OpenAI-, Anthropic-, and
-OpenRouter-compatible tool-calling agent that holds the other half of the loop:
-it prompts a model for PTX, submits each candidate to PTX Gym, reads back the
-verdict and the Nsight Compute report, plans the next edit, and records every
-candidate it evaluated.
+**This repository is the client.** It is a tool-calling agent for OpenAI,
+Anthropic, and OpenRouter models. It prompts a model for PTX, submits each
+candidate to PTX Gym, reads back the verdict and the Nsight Compute report,
+plans the next edit, and records every candidate it evaluated.
 
-The two live in separate repositories on purpose. PTX Gym is the benchmark and
-must stay independent of any particular agent; the client is one agent
-implementation among possible others, free to change its prompting, its
-provider, and its search strategy without touching the environment it is
-measured in. PTX Gym is vendored here as the `ptx_gym` submodule, so a
-checkout of this repository gives you both halves.
+The two are kept separate on purpose: PTX Gym is the benchmark and stays
+independent of any agent, while this client is free to change its prompting,
+provider, and search strategy. PTX Gym is vendored here as the `ptx_gym`
+submodule, so one checkout gives you both.
 
-## Setup
+## Installation
+
+> [!CAUTION]
+> Model-generated PTX is untrusted low-level code. Run the agent on isolated,
+> non-production machines.
 
 ### Install
 
-From the shared workspace, initialize the submodules and install every
-dependency at once. `uv sync` reads `pyproject.toml`, creates `.venv`, and
-installs the OpenAI and Anthropic SDKs, PyTorch, the plotting libraries, and
-PTX Gym (`ptx_gym`, editable) at the versions pinned in `uv.lock`. The three
-exported variables only affect the Triton build: they cap its parallelism and
-make `uv` copy instead of hardlink.
-
 ```bash
-git clone https://github.com/francois141/triton_ai_compiler
+git clone --recursive https://github.com/francois141/triton_ai_compiler
 cd triton_ai_compiler
-git submodule update --init --recursive
-source .triton_ai_compiler/bin/activate
+
 uv venv .triton_ai_compiler
+source .triton_ai_compiler/bin/activate
 
 cd ptx_gym
 uv pip install torch numpy
-MAX_JOBS=64 uv pip install -e . -v 
-
+MAX_JOBS=64 uv pip install -e . -v   # builds the patched Triton and ptx_gym
 cd ..
 
+uv pip install anthropic openai matplotlib pydantic tiktoken
 ```
+
+`MAX_JOBS` caps the parallelism of the Triton build; lower it on smaller
+machines.
 
 ### TODO: Add the instruction to fetch the previous results
 
 ### Environment variables
 
-One provider key is required, and which one depends on `--provider`. Nothing
-else is read from the environment by the agent itself; the remaining variables
-are consumed by PTX Gym while it evaluates a candidate.
+Set the API key for the provider you use. The GPU tool paths are read by PTX
+Gym while it evaluates a candidate.
 
 | Variable | Needed for |
 | --- | --- |
-| `OPENAI_API_KEY` | The default provider (`--provider openai`). |
+| `OPENAI_API_KEY` | `--provider openai` (the default). |
 | `ANTHROPIC_API_KEY` | `--provider anthropic`. |
 | `OPENROUTER_API_KEY` | `--provider openrouter`. |
-| `OPENAI_BASE_URL` | Optional. Points the OpenAI provider at an OpenAI-compatible endpoint instead of `api.openai.com`. |
-| `PTX_MEMORY_SANITIZER` | Path to the `compute-sanitizer` executable. Required unless you pass `--disable-sanitizer`. |
-| `NCU_PATH` | Path to the `ncu` executable. Required for profiling; without it, improvement planning falls back to source-only hypotheses. |
-
-A complete setup for the default provider, with both GPU tools present:
+| `OPENAI_BASE_URL` | Optional. Points the OpenAI provider at an OpenAI-compatible endpoint. |
+| `PTX_MEMORY_SANITIZER` | Path to `compute-sanitizer`. Required unless you pass `--disable-sanitizer`. |
+| `NCU_PATH` | Path to `ncu`. Without it, planning falls back to source-only hypotheses. |
 
 ```bash
 export OPENAI_API_KEY=sk-...
@@ -98,153 +91,107 @@ export PTX_MEMORY_SANITIZER=$(which compute-sanitizer)
 export NCU_PATH=$(which ncu)
 ```
 
-Both providers upload the bundled PTX and NCU-report skills before each run.
+## Quick start
 
-The OpenRouter harness gives the model on-demand access to the same bundled
-PTX and NCU-reference files through local tools. This makes the skills usable
-with providers that do not implement proprietary skill-upload APIs.
-
-## Test installation
+Check that the GPU, the patched Triton, and the kernel suite work, without
+calling any model:
 
 ```bash
-.venv/bin/python run_kernel.py SoftmaxFloat16Kernel
-python -m pytest ptx_gym/ptx_gym/kernels/test_triton_kernels.py
+python run_kernel.py SoftmaxFloat16Kernel                       # verify + benchmark one baseline
+python -m pytest ptx_gym/ptx_gym/kernels/test_triton_kernels.py  # all baselines vs PyTorch
 ```
 
-## Optimize a kernel
+## Quick run
+
+Optimize a kernel with the default provider (OpenAI):
 
 ```bash
 python -m agent MatrixMultiplicationFloat16
 ```
 
-By default, the agent starts from
-`triton_generated_ptx/<kernel>.ptx`, evaluates it, and applies localized PTX
-patches. It does not generate an initial PTX implementation from scratch.
+The agent starts from Triton's own PTX (`triton_generated_ptx/<kernel>.ptx`),
+evaluates it, and then applies small PTX patches, evaluating each one. The
+best candidate and the full trace land in `output_traces/`.
 
-Use Claude through Anthropic's Messages API by selecting the provider. This
-reads `ANTHROPIC_API_KEY`; the OpenAI default reads `OPENAI_API_KEY`.
+Switch provider with `--provider`, and model with `--model`:
+
+```bash
+python -m agent MatrixMultiplicationFloat16 --provider anthropic
+python -m agent MatrixMultiplicationFloat16 --provider openrouter --model qwen/qwen3-coder
+```
+
+| Provider | Default model |
+| --- | --- |
+| `openai` | `gpt-6-astra` |
+| `anthropic` | `claude-opus-4-8` |
+| `openrouter` | `google/gemini-3.8-flash` |
+
+On OpenRouter, pick a model that supports both `tools` and `response_format`
+(see the [model catalog](https://openrouter.ai/models)); `qwen/qwen3-coder`,
+`deepseek/deepseek-v3.2`, and `meta-llama/llama-3.3-70b-instruct` work well.
+
+## Agent options
+
+### Starting point
+
+| Flag | Behavior |
+| --- | --- |
+| *(none)* | Start from Triton's generated PTX. `--start-triton-generated-ptx` is an explicit alias. |
+| `--start-json PATH_OR_JSON` | Continue from a saved candidate JSON. Its autotuner metrics are reused, so autotuning is skipped. |
+| `--start-ptx PATH` | Edit an existing PTX file with small unified diffs. The result is written to `final_candidate.ptx`. |
+| `--initial-prompt-ptx PATH` | Include a reference PTX in the first prompt only; it does not become the working candidate. |
 
 ```bash
 python -m agent MatrixMultiplicationFloat16 \
-  --provider anthropic
+  --start-json output_traces/<run>/final_speedup_vs_triton_*.json
 ```
 
-Use OpenRouter by setting `OPENROUTER_API_KEY`. Its default model is Gemini
-Flash; select any compatible model with `--model`.
+### Run controls
 
-```bash
-OPENROUTER_API_KEY=... .venv/bin/python -m agent MatrixMultiplicationFloat16 \
-  --provider openrouter --model google/gemini-3.8-flash
-```
+| Flag | Default | Description |
+| --- | --- | --- |
+| `--max-tool-rounds` | `3` | Tool-call rounds per model turn. |
+| `--max-repair-attempts` | `2` | Repair attempts per failed candidate. |
+| `--max-budget` | none | Stop starting new requests once the run's cost reaches this many USD. |
+| `--reasoning-effort` | `max` | OpenAI reasoning effort. |
+| `--trace-path` | `output_traces` | Where the per-run trace directory is created. |
 
-The following OpenRouter model families are useful alternatives when their
-selected variant supports both tools and structured JSON output:
+### Skills and checks
 
-```bash
-OPENROUTER_API_KEY=... .venv/bin/python -m agent MatrixMultiplicationFloat16 \
-  --provider openrouter --model qwen/qwen3-coder
-OPENROUTER_API_KEY=... .venv/bin/python -m agent MatrixMultiplicationFloat16 \
-  --provider openrouter --model deepseek/deepseek-v3.2
-OPENROUTER_API_KEY=... .venv/bin/python -m agent MatrixMultiplicationFloat16 \
-  --provider openrouter --model meta-llama/llama-3.3-70b-instruct
-```
+The OpenAI and Anthropic providers upload the bundled PTX and NCU-report
+skills before each run; on OpenRouter the model reads the same files through
+local tools.
 
-Check a specific model's `tools` and `response_format` support in the
-[OpenRouter model catalog](https://openrouter.ai/models) before running it.
+| Flag | Effect |
+| --- | --- |
+| `--disable-ptx-skill` | Do not provide the PTX ISA reference skill. |
+| `--disable-ncu-skill` | Do not provide the Nsight Compute diagnosis skill. |
+| `--disable-ncu-report` | Do not profile; plan from source only. |
+| `--disable-sanitizer` | Skip `compute-sanitizer` before correctness checks. |
 
-To continue from a candidate JSON file or inline JSON, use `--start-json`:
+With an NCU report, improvement plans cite only metrics present in the
+report. Without one, the planner proposes one to three hypotheses from the
+kernel source, PTX, launch configuration, and benchmark results.
 
-```bash
-python -m agent MatrixMultiplicationFloat16 \
-  --start-json output_traces/folder/final_speedup_vs_triton_*.json
-```
+## Run outputs
 
-`--start-triton-generated-ptx` remains available as a compatibility flag; it
-has the same behavior as the default:
+Each run creates a timestamped directory under `--trace-path` containing:
 
-```bash
-python -m agent MatrixMultiplicationFloat16 \
-  --start-triton-generated-ptx
-```
-
-To optimize an existing PTX file without asking the model to reproduce the
-entire file, pass it with `--start-ptx`. The model edits the working PTX using
-small unified diffs, each edit is evaluated, and the final source is written to
-`final_candidate.ptx` in the run's trace directory.
-
-```bash
-python -m agent MatrixMultiplicationFloat16 \
-  --start-ptx path/to/candidate.ptx
-```
-
-To provide a PTX implementation as reference while still generating a new
-initial candidate, use `--initial-prompt-ptx`. Its content is included only in
-the first generation prompt; it does not become the working candidate.
-
-```bash
-python -m agent MatrixMultiplicationFloat16 \
-  --initial-prompt-ptx path/to/reference.ptx
-```
-
-Improvement planning uses the current Nsight Compute report when available.
-When usable NCU metrics are unavailable, planning falls back to one to three
-ideas based on the current kernel source, PTX, launch configuration, and
-benchmark results. These ideas label suspected
-bottlenecks as hypotheses and require only correctness checks and timing
-benchmarks. NCU-backed plans use the bundled NCU report skill and cite only
-metrics present in the current report.
-
-Each run creates a timestamped directory under `output_traces/`, containing
-prompts, model responses, evaluated candidate JSON and PTX artifacts, and the
-final candidate. Speedup JSON artifacts include `run_cost_usd_so_far`, the
-cumulative API cost in USD at the time they were written. The final JSON
-includes the selected `tl.constexpr` values and autotuner metrics alongside
-the final speed and latency. `prices.log` is
-appended as API responses arrive and includes a total cost for each completed
-agent pipeline. At startup, `triton_generated.ptx` records the PTX compiled by
-Triton. Every candidate JSON, including successful PTX tool-call artifacts
-under `tool_output/`, embeds the selected autotuning configuration and launch
-hyperparameters. Configure the run with
-`--provider`, `--model`, `--max-tool-rounds`,
-`--max-repair-attempts`, `--reasoning-effort`, and `--trace-path`.
-When passed back with `--start-json`, these autotuner metrics are reused and
-the kernel skips autotuning.
-`--reasoning-effort` applies to OpenAI models; Anthropic requests use the
-Messages API's standard tool-use flow.
-
-Use `--disable-ncu-skill`, `--disable-ptx-skill`, `--disable-ncu-report`, or
-`--disable-sanitizer` to selectively omit the corresponding uploaded skill or
-local validation step. Disabling the NCU report uses the same improvement
-planning fallback without profiling.
+- `triton_generated.ptx`: the PTX Triton compiled at startup.
+- Prompts, model responses, and every evaluated candidate as JSON and PTX
+  (tool-call candidates under `tool_output/`).
+- The final candidate, with its speedup, latency, `tl.constexpr` values, and
+  autotuner configuration.
+- `prices.log`: API cost, appended as responses arrive, with a total per
+  pipeline. Speedup JSONs also record `run_cost_usd_so_far`.
 
 ## Utilities
 
-Extract PTX generated by every Triton kernel:
-
-```bash
-python -m extract_ptx
-```
-
-The extractor saves TTIR, TTGIR, LLVM IR, and PTX in separate `ttir/`,
-`ttgir/`, `llir/`, and `ptx/` directories under `triton_generated_ptx/`.
-
-Re-run compile, correctness, and timing measurement for a candidate JSON:
-
-```bash
-python -m remeasure_candidate PATH --kernel KernelClassName \
-  --output output.json
-```
-
-Remeasure every archived Triton baseline and write the correction factors used
-by the speedup plot:
-
-```bash
-.venv/bin/python remeasure_baseline.py
-```
-
-The command writes `correction factor.txt` to each immediate run directory in
-`kernels`. Each factor is the fresh Triton p50 divided by that run's archived
-Triton p50, so the plot adjusts its saved speedups to the fresh baseline.
+| Command | Purpose |
+| --- | --- |
+| `python -m extract_ptx` | Dump TTIR, TTGIR, LLVM IR, and PTX for every kernel into `triton_generated_ptx/{ttir,ttgir,llir,ptx}/`. |
+| `python -m remeasure_candidate PATH --kernel NAME --output out.json` | Re-run compile, correctness, and timing for a candidate JSON. |
+| `python remeasure_baseline.py` | Remeasure archived Triton baselines and write `correction factor.txt` (fresh p50 / archived p50) to each run directory, used by the speedup plot. |
 
 ## Validation
 
