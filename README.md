@@ -64,8 +64,13 @@ cd triton_ai_compiler
 git submodule update --init --recursive
 source .triton_ai_compiler/bin/activate
 uv venv .triton_ai_compiler
-uv pip install torch
+
+cd ptx_gym
+uv pip install torch numpy
 MAX_JOBS=64 uv pip install -e . -v 
+
+cd ..
+
 ```
 
 ### TODO: Add the instruction to fetch the previous results
