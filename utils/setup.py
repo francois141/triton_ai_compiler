@@ -246,17 +246,6 @@ def load_start_json_with_autotune(start_json):
     return PtxKernel.model_validate(candidate_data), autotune_metrics
 
 
-def load_start_ptx(start_ptx, *, num_threads_x, num_threads_y, num_threads_z):
-    if start_ptx is None:
-        return None
-    return PtxKernel(
-        ptx=Path(start_ptx).read_text(encoding="utf-8"),
-        num_threads_x=num_threads_x,
-        num_threads_y=num_threads_y,
-        num_threads_z=num_threads_z,
-    )
-
-
 def load_triton_generated_ptx(kernel_name):
     ptx_path = TRITON_GENERATED_PTX_DIRECTORY / f"{kernel_name}.ptx"
     try:

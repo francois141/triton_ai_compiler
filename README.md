@@ -63,13 +63,11 @@ uv pip install torch numpy
 MAX_JOBS=64 uv pip install -e . -v   # builds the patched Triton and ptx_gym
 cd ..
 
-uv pip install anthropic openai matplotlib pydantic tiktoken
+uv pip install anthropic openai matplotlib pydantic tiktoken ruff
 ```
 
 `MAX_JOBS` caps the parallelism of the Triton build; lower it on smaller
 machines.
-
-### TODO: Add the instruction to fetch the previous results
 
 ### Environment variables
 
@@ -98,10 +96,7 @@ calling any model:
 
 ```bash
 python run_kernel.py SoftmaxFloat16Kernel                       # verify + benchmark one baseline
-python -m pytest ptx_gym/ptx_gym/kernels/test_triton_kernels.py  # all baselines vs PyTorch
 ```
-
-## Quick run
 
 Optimize a kernel with the default provider (OpenAI):
 
@@ -138,8 +133,7 @@ On OpenRouter, pick a model that supports both `tools` and `response_format`
 | --- | --- |
 | *(none)* | Start from Triton's generated PTX. `--start-triton-generated-ptx` is an explicit alias. |
 | `--start-json PATH_OR_JSON` | Continue from a saved candidate JSON. Its autotuner metrics are reused, so autotuning is skipped. |
-| `--start-ptx PATH` | Edit an existing PTX file with small unified diffs. The result is written to `final_candidate.ptx`. |
-| `--initial-prompt-ptx PATH` | Include a reference PTX in the first prompt only; it does not become the working candidate. |
+
 
 ```bash
 python -m agent MatrixMultiplicationFloat16 \
@@ -193,9 +187,8 @@ Each run creates a timestamped directory under `--trace-path` containing:
 | `python -m remeasure_candidate PATH --kernel NAME --output out.json` | Re-run compile, correctness, and timing for a candidate JSON. |
 | `python remeasure_baseline.py` | Remeasure archived Triton baselines and write `correction factor.txt` (fresh p50 / archived p50) to each run directory, used by the speedup plot. |
 
-## Validation
+## Linter
 
 ```bash
 python -m ruff check --exclude ptx_gym .
-python -m compileall .
 ```

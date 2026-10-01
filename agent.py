@@ -41,7 +41,6 @@ from utils.response_format import (
 from utils.setup import (
     build_prompt_sections,
     load_start_json_with_autotune,
-    load_start_ptx,
     load_triton_generated_ptx,
 )
 from utils.traces import (
@@ -491,12 +490,7 @@ def run_agent_loop(
     reasoning_effort,
     trace_path,
     start_json=None,
-    start_ptx=None,
-    start_num_threads_x=128,
-    start_num_threads_y=1,
-    start_num_threads_z=1,
     start_triton_generated_ptx=False,
-    initial_prompt_ptx=None,
     disable_ncu_skill=False,
     disable_ncu_report=False,
     disable_sanitizer=False,
@@ -510,16 +504,9 @@ def run_agent_loop(
         not isfinite(max_budget_usd) or max_budget_usd < 0
     ):
         raise ValueError("max_budget_usd must be a finite, non-negative number.")
-    if (
-        sum(
-            value is not None and value is not False
-            for value in (start_json, start_ptx, start_triton_generated_ptx)
-        )
-        > 1
-    ):
+    if start_json is not None and start_triton_generated_ptx:
         raise ValueError(
-            "Use only one of --start-json, --start-ptx, or "
-            "--start-triton-generated-ptx."
+            "Use only one of --start-json or --start-triton-generated-ptx."
         )
 
     trace_path = create_trace_directory(
@@ -535,20 +522,14 @@ def run_agent_loop(
     )
     print(f"=== Writing trace artifacts to {trace_path} ===", flush=True)
 
-    starting_candidate = load_start_ptx(
-        start_ptx,
-        num_threads_x=start_num_threads_x,
-        num_threads_y=start_num_threads_y,
-        num_threads_z=start_num_threads_z,
-    )
+    starting_candidate = None
     loaded_autotune_metrics = None
-    if starting_candidate is None:
-        if start_json is not None:
-            starting_candidate, loaded_autotune_metrics = load_start_json_with_autotune(
-                start_json
-            )
-        elif start_triton_generated_ptx:
-            starting_candidate = load_triton_generated_ptx(kernel_name)
+    if start_json is not None:
+        starting_candidate, loaded_autotune_metrics = load_start_json_with_autotune(
+            start_json
+        )
+    elif start_triton_generated_ptx:
+        starting_candidate = load_triton_generated_ptx(kernel_name)
 
     evaluator = verifier_for_kernel(
         kernel_name,
@@ -585,17 +566,6 @@ def run_agent_loop(
         prompt_sections,
         initial_prompt_section_names(provider),
     )
-    if initial_prompt_ptx is not None:
-        ptx_content = Path(initial_prompt_ptx).read_text(encoding="utf-8")
-        initial_prompt = (
-            f"{initial_prompt}\n\n"
-            "## Reference PTX\n\n"
-            "Use the following PTX as reference when generating the initial "
-            "candidate.\n\n"
-            "```ptx\n"
-            f"{ptx_content.rstrip()}\n"
-            "```"
-        )
     responses = []
     wrote_daily_summary = False
 
@@ -884,22 +854,9 @@ def parse_args():
         help="Inline candidate JSON or path to a candidate JSON file.",
     )
     start_group.add_argument(
-        "--start-ptx",
-        type=Path,
-        help="Path to a PTX file to edit and optimize.",
-    )
-    start_group.add_argument(
         "--start-triton-generated-ptx",
         action="store_true",
         help="Start from the saved Triton-generated PTX for this kernel.",
-    )
-    parser.add_argument(
-        "--initial-prompt-ptx",
-        type=Path,
-        help=(
-            "Path to a PTX file whose content is included only in the initial "
-            "generation prompt."
-        ),
     )
     return parser.parse_args()
 
@@ -927,9 +884,7 @@ def main():
             ),
             trace_path=args.trace_path,
             start_json=args.start_json,
-            start_ptx=args.start_ptx,
             start_triton_generated_ptx=args.start_triton_generated_ptx,
-            initial_prompt_ptx=args.initial_prompt_ptx,
             disable_ncu_skill=args.disable_ncu_skill,
             disable_ncu_report=args.disable_ncu_report,
             disable_sanitizer=args.disable_sanitizer,
