@@ -59,12 +59,16 @@ exported variables only affect the Triton build: they cap its parallelism and
 make `uv` copy instead of hardlink.
 
 ```bash
-export MAX_JOBS=8
-export CMAKE_BUILD_PARALLEL_LEVEL=8
-export UV_LINK_MODE=copy
+git clone https://github.com/francois141/triton_ai_compiler
+cd triton_ai_compiler
 git submodule update --init --recursive
-uv sync
+source .triton_ai_compiler/bin/activate
+uv venv .triton_ai_compiler
+uv pip install torch
+MAX_JOBS=64 uv pip install -e . -v 
 ```
+
+### TODO: Add the instruction to fetch the previous results
 
 ### Environment variables
 
@@ -242,17 +246,4 @@ Triton p50, so the plot adjusts its saved speedups to the fresh baseline.
 ```bash
 python -m ruff check --exclude ptx_gym .
 python -m compileall .
-```
-
-## Citation
-
-The environment and this client are both part of the same work:
-
-```bibtex
-@inproceedings{aicompiler2027,
-  title     = {AI as a Compiler: Compiling Triton Kernels without the Triton Compiler},
-  author    = {Anonymous},
-  booktitle = {Under review at ICLR},
-  year      = {2027}
-}
 ```
