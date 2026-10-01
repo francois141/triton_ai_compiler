@@ -190,5 +190,5 @@ Each run creates a timestamped directory under `--trace-path` containing:
 ## Linter
 
 ```bash
-python -m ruff check --exclude ptx_gym .
+python -m ruff check --exclude ptx_gym --exclude skills .
 ```
