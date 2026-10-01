@@ -17,6 +17,12 @@ _PRICING_PER_1M_TOKENS = {
         "cache_write": 12.50,
         "output": 50.00,
     },
+    "gpt-6.1-sol": {
+        "input": 2.00,
+        "cached_input": 0.10,
+        "cache_write": 2.50,
+        "output": 10.00,
+    },
     "gpt-5.6-sol": {
         "input": 5.00,
         "cached_input": 0.50,
