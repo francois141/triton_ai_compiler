@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import argparse
 import atexit
 import json
@@ -138,9 +136,7 @@ def _evaluate_and_record(
 def _should_repair_candidate(evaluation):
     if evaluation.passed:
         return False
-    if not evaluation.compiles:
-        return True
-    if not evaluation.correct:
+    if not evaluation.compiles or not evaluation.correct:
         return True
     return bool(evaluation.timing_error)
 
@@ -351,11 +347,9 @@ def _generate_tested_candidate(
             prompt_name="candidate_repair",
             attempt_index=repair_index,
         )
-        if repaired_evaluation.passed and (
-            not best_attempt.passed or repaired_evaluation.p50 < best_attempt.p50
+        if not best_attempt.passed or (
+            repaired_evaluation.passed and repaired_evaluation.p50 < best_attempt.p50
         ):
-            best_attempt = repaired_evaluation
-        elif not best_attempt.passed:
             best_attempt = repaired_evaluation
 
     return best_attempt
@@ -478,11 +472,9 @@ def _repair_initial_candidate(
             prompt_name="initial_candidate_repair",
             attempt_index=repair_index,
         )
-        if repaired_evaluation.passed and (
-            not best_attempt.passed or repaired_evaluation.p50 < best_attempt.p50
+        if not best_attempt.passed or (
+            repaired_evaluation.passed and repaired_evaluation.p50 < best_attempt.p50
         ):
-            best_attempt = repaired_evaluation
-        elif not best_attempt.passed:
             best_attempt = repaired_evaluation
 
     return best_attempt
@@ -549,20 +541,14 @@ def run_agent_loop(
         num_threads_y=start_num_threads_y,
         num_threads_z=start_num_threads_z,
     )
+    loaded_autotune_metrics = None
     if starting_candidate is None:
         if start_json is not None:
             starting_candidate, loaded_autotune_metrics = load_start_json_with_autotune(
                 start_json
             )
-        else:
-            starting_candidate = (
-                load_triton_generated_ptx(kernel_name)
-                if start_triton_generated_ptx
-                else None
-            )
-            loaded_autotune_metrics = None
-    else:
-        loaded_autotune_metrics = None
+        elif start_triton_generated_ptx:
+            starting_candidate = load_triton_generated_ptx(kernel_name)
 
     evaluator = verifier_for_kernel(
         kernel_name,
@@ -630,10 +616,7 @@ def run_agent_loop(
                     "could be generated. Provide a positive budget or a starting "
                     "candidate."
                 )
-            print(
-                "=== Generating initial candidate ===",
-                flush=True,
-            )
+            print("=== Generating initial candidate ===", flush=True)
             record_prompt(
                 responses,
                 trace_path,
@@ -836,7 +819,6 @@ def run_agent_loop(
             final_candidate.ptx.rstrip() + "\n",
             encoding="utf-8",
         )
-        write_daily_summary()
         return final_json
     finally:
         write_daily_summary()

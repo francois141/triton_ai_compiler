@@ -7,6 +7,7 @@ from functools import cache
 from pathlib import Path
 
 from anthropic import transform_schema
+from openai import NotFoundError
 
 from prompts.blocks import anthropic_system_prompt, system_prompt
 from ptx_gym import Payload, TritonPTXCandidateEvaluator, resolve_kernel
@@ -71,7 +72,7 @@ def verifier_for_kernel(
 
     selected_config = autotune_metrics.get("selected_config")
     if not isinstance(selected_config, dict):
-        raise ValueError("autotune_metrics must include a selected_config object.")
+        raise TypeError("autotune_metrics must include a selected_config object.")
     if not all(
         isinstance(name, str) and isinstance(value, int)
         for name, value in selected_config.items()
@@ -110,6 +111,38 @@ def _launch_verifier_output(evaluation, payload):
     """Add compact source-correlated NCU diagnostics to verifier feedback."""
     line_by_line = ncu_instruction_issues(payload.ptx, evaluation.ncu_report)
     return evaluation.to_llm(ncu_line_by_line=line_by_line)
+
+
+def _run_ptx_tool(tool_name, arguments, verifier, workspace):
+    resulting_payload = None
+    verified_ptx = None
+    speedup_vs_triton = None
+    if tool_name == "launch_verifier":
+        payload = Payload.from_input(arguments)
+        evaluation = verifier.evaluate(payload)
+        output = _launch_verifier_output(evaluation, payload)
+        if evaluation.passed:
+            resulting_payload = arguments
+            verified_ptx = arguments["ptx"]
+            speedup_vs_triton = evaluation.speedup_vs_triton
+    elif tool_name == "apply_ptx_patch" and workspace is not None:
+        try:
+            output = json.dumps(workspace.apply_patch(arguments))
+            resulting_payload = workspace.candidate.model_dump(exclude_none=False)
+            verified_ptx = workspace.candidate.ptx
+        except ValueError as error:
+            output = json.dumps({"error": str(error)})
+    elif tool_name == "verify_current_ptx" and workspace is not None:
+        payload = Payload.from_input(workspace.candidate.model_dump())
+        evaluation = verifier.evaluate(payload)
+        output = _launch_verifier_output(evaluation, payload)
+        resulting_payload = workspace.candidate.model_dump(exclude_none=False)
+        if evaluation.passed:
+            verified_ptx = workspace.candidate.ptx
+            speedup_vs_triton = evaluation.speedup_vs_triton
+    else:
+        return None
+    return output, resulting_payload, verified_ptx, speedup_vs_triton
 
 
 def _format_tool_call(output_item):
@@ -307,7 +340,7 @@ class PtxPatchWorkspace:
         headers = [
             line for line in patch.splitlines() if line.startswith(("--- ", "+++ "))
         ]
-        if len(headers) != 2 or headers != ["--- candidate.ptx", "+++ candidate.ptx"]:
+        if headers != ["--- candidate.ptx", "+++ candidate.ptx"]:
             raise ValueError(
                 "PTX patch must modify only candidate.ptx with standard unified "
                 "diff headers."
@@ -341,6 +374,19 @@ class PtxPatchWorkspace:
             "num_threads_y": self.candidate.num_threads_y,
             "num_threads_z": self.candidate.num_threads_z,
         }
+
+
+def _update_anthropic_container(container, response):
+    container_id = _get_field(_get_field(response, "container"), "id")
+    if isinstance(container_id, str):
+        container["id"] = container_id
+
+
+def _anthropic_assistant_message(response):
+    return {
+        "role": "assistant",
+        "content": [_json_value(block) for block in response.content],
+    }
 
 
 def request_anthropic_json(
@@ -414,9 +460,7 @@ def request_anthropic_json(
                 }
             },
         }
-        response = client.beta.messages.create(
-            **request_arguments,
-        )
+        response = client.beta.messages.create(**request_arguments)
         cost = _append_response_cost(
             model=model,
             response=response,
@@ -432,17 +476,10 @@ def request_anthropic_json(
             if _get_field(block, "type") == "tool_use"
         ]
         stop_reason = _get_field(response, "stop_reason")
-        if _get_field(response, "stop_reason") == "pause_turn" and not tool_uses:
+        if stop_reason == "pause_turn" and not tool_uses:
             _raise_if_budget_exhausted(cost_log_path, max_budget_usd)
-            container_id = _get_field(_get_field(response, "container"), "id")
-            if isinstance(container_id, str):
-                container["id"] = container_id
-            messages.append(
-                {
-                    "role": "assistant",
-                    "content": [_json_value(block) for block in response.content],
-                }
-            )
+            _update_anthropic_container(container, response)
+            messages.append(_anthropic_assistant_message(response))
             continue
         if stop_reason == "max_tokens" and not tool_uses:
             _raise_if_budget_exhausted(cost_log_path, max_budget_usd)
@@ -453,9 +490,7 @@ def request_anthropic_json(
                     "requests."
                 )
             continuation_count += 1
-            container_id = _get_field(_get_field(response, "container"), "id")
-            if isinstance(container_id, str):
-                container["id"] = container_id
+            _update_anthropic_container(container, response)
             print(
                 "=== Anthropic reached its output-token limit; continuing "
                 f"({continuation_count}/{ANTHROPIC_MAX_CONTINUATIONS}) ===",
@@ -463,10 +498,7 @@ def request_anthropic_json(
             )
             messages.extend(
                 [
-                    {
-                        "role": "assistant",
-                        "content": [_json_value(block) for block in response.content],
-                    },
+                    _anthropic_assistant_message(response),
                     {
                         "role": "user",
                         "content": (
@@ -500,7 +532,7 @@ def request_anthropic_json(
             content_types = [_get_field(block, "type") for block in response.content]
             raise ValueError(
                 "Anthropic response contained neither a tool call nor a structured "
-                f"text response (stop_reason={_get_field(response, 'stop_reason')!r}, "
+                f"text response (stop_reason={stop_reason!r}, "
                 f"content_types={content_types!r})."
             )
 
@@ -508,43 +540,15 @@ def request_anthropic_json(
         for tool_use in tool_uses:
             tool_name = _get_field(tool_use, "name")
             tool_id = _get_field(tool_use, "id")
-            resulting_payload = None
-            verified_ptx = None
-            speedup_vs_triton = None
             print(
                 f"=== LLM called tool: tool={tool_name}, id={tool_id} ===",
                 flush=True,
             )
             arguments = _get_field(tool_use, "input")
-            if tool_name == "launch_verifier":
-                payload = Payload.from_input(arguments)
-                evaluation = verifier.evaluate(payload)
-                result = _launch_verifier_output(evaluation, payload)
-                if evaluation.passed:
-                    resulting_payload = arguments
-                    verified_ptx = arguments["ptx"]
-                    speedup_vs_triton = evaluation.speedup_vs_triton
-            elif tool_name == "apply_ptx_patch" and workspace is not None:
-                try:
-                    result = json.dumps(workspace.apply_patch(arguments))
-                    resulting_payload = workspace.candidate.model_dump(
-                        exclude_none=False
-                    )
-                    verified_ptx = workspace.candidate.ptx
-                except ValueError as error:
-                    result = json.dumps({"error": str(error)})
-            elif tool_name == "verify_current_ptx" and workspace is not None:
-                payload = Payload.from_input(workspace.candidate.model_dump())
-                evaluation = verifier.evaluate(payload)
-                result = _launch_verifier_output(evaluation, payload)
-                verified_ptx = workspace.candidate.ptx
-                resulting_payload = workspace.candidate.model_dump(exclude_none=False)
-                if evaluation.passed:
-                    speedup_vs_triton = evaluation.speedup_vs_triton
-                else:
-                    verified_ptx = None
-            else:
+            tool_result = _run_ptx_tool(tool_name, arguments, verifier, workspace)
+            if tool_result is None:
                 raise RuntimeError(f"Unsupported Anthropic tool call: {tool_name}")
+            result, resulting_payload, verified_ptx, speedup_vs_triton = tool_result
             if cost_log_path is not None:
                 record_tool_call(
                     Path(cost_log_path).parent,
@@ -567,10 +571,7 @@ def request_anthropic_json(
         _raise_if_budget_exhausted(cost_log_path, max_budget_usd)
         messages.extend(
             [
-                {
-                    "role": "assistant",
-                    "content": [_json_value(block) for block in response.content],
-                },
+                _anthropic_assistant_message(response),
                 {"role": "user", "content": tool_results},
             ]
         )
@@ -595,7 +596,7 @@ def _skill_path(skill, relative_path):
         raise ValueError("Skill paths must stay within the requested skill.") from error
     if not candidate.is_file():
         raise FileNotFoundError(f"Skill file not found: {relative_path}")
-    return skill_directory, candidate
+    return candidate
 
 
 def _run_openrouter_skill_tool(tool_name, arguments):
@@ -620,7 +621,7 @@ def _run_openrouter_skill_tool(tool_name, arguments):
         ]
         return json.dumps({"skill": skill, "files": sorted(files)[:500]})
     if tool_name == "read_skill_file":
-        _, path = _skill_path(skill, arguments["path"])
+        path = _skill_path(skill, arguments["path"])
         content = path.read_text(encoding="utf-8")
         return json.dumps(
             {
@@ -845,40 +846,14 @@ def request_openrouter_json(
                 raise ValueError(
                     f"OpenRouter tool {tool_name!r} returned invalid JSON arguments."
                 ) from error
-            resulting_payload = None
-            verified_ptx = None
-            speedup_vs_triton = None
             if tool_name in {"list_skill_files", "read_skill_file"}:
                 output = _run_openrouter_skill_tool(tool_name, arguments)
-            elif tool_name == "launch_verifier":
-                payload = Payload.from_input(arguments)
-                evaluation = verifier.evaluate(payload)
-                output = _launch_verifier_output(evaluation, payload)
-                if evaluation.passed:
-                    resulting_payload = arguments
-                    verified_ptx = arguments["ptx"]
-                    speedup_vs_triton = evaluation.speedup_vs_triton
-            elif tool_name == "apply_ptx_patch" and workspace is not None:
-                try:
-                    output = json.dumps(workspace.apply_patch(arguments))
-                    resulting_payload = workspace.candidate.model_dump(
-                        exclude_none=False
-                    )
-                    verified_ptx = workspace.candidate.ptx
-                except ValueError as error:
-                    output = json.dumps({"error": str(error)})
-            elif tool_name == "verify_current_ptx" and workspace is not None:
-                payload = Payload.from_input(workspace.candidate.model_dump())
-                evaluation = verifier.evaluate(payload)
-                output = _launch_verifier_output(evaluation, payload)
-                verified_ptx = workspace.candidate.ptx
-                resulting_payload = workspace.candidate.model_dump(exclude_none=False)
-                if evaluation.passed:
-                    speedup_vs_triton = evaluation.speedup_vs_triton
-                else:
-                    verified_ptx = None
+                resulting_payload = verified_ptx = speedup_vs_triton = None
             else:
-                raise RuntimeError(f"Unsupported OpenRouter tool call: {tool_name}")
+                tool_result = _run_ptx_tool(tool_name, arguments, verifier, workspace)
+                if tool_result is None:
+                    raise RuntimeError(f"Unsupported OpenRouter tool call: {tool_name}")
+                output, resulting_payload, verified_ptx, speedup_vs_triton = tool_result
             print(
                 f"=== LLM called tool: tool={tool_name}, id={tool_call.id} ===",
                 flush=True,
@@ -919,8 +894,6 @@ def request_openai_json(
     enable_sanitizer=True,
     max_budget_usd=None,
 ):
-    from openai import NotFoundError
-
     verifier = verifier_for_kernel(
         kernel_name,
         autotune_metrics,
@@ -936,17 +909,17 @@ def request_openai_json(
         PtxPatchWorkspace(current_candidate) if current_candidate is not None else None
     )
     available_tools = _tools_for_request(tools, current_candidate)
+    shared_kwargs = {"tools": available_tools, "text": {"format": response_format}}
+    if reasoning_effort is not None:
+        shared_kwargs["reasoning"] = {"effort": reasoning_effort}
     kwargs = {
         "model": model,
         "instructions": (
             system_prompt() if system_instruction is None else system_instruction
         ),
         "input": [{"role": "user", "content": prompt}],
-        "tools": available_tools,
-        "text": {"format": response_format},
+        **shared_kwargs,
     }
-    if reasoning_effort is not None:
-        kwargs["reasoning"] = {"effort": reasoning_effort}
 
     total_cost = None
     while True:
@@ -955,9 +928,10 @@ def request_openai_json(
                 response = client.responses.create(**kwargs)
                 break
             except NotFoundError as error:
-                if "Skill version" not in str(error):
-                    raise
-                if retry_index == RESPONSE_RETRY_ATTEMPTS - 1:
+                if (
+                    "Skill version" not in str(error)
+                    or retry_index == RESPONSE_RETRY_ATTEMPTS - 1
+                ):
                     raise
                 delay_seconds = 2**retry_index
                 print(
@@ -989,44 +963,20 @@ def request_openai_json(
                     cost=total_cost,
                     cost_log_path=cost_log_path,
                 )
-            return response, total_cost, workspace.candidate if workspace else None
+            return (
+                response,
+                total_cost,
+                workspace.candidate if workspace is not None else None,
+            )
 
         tool_outputs = []
         for function_call in function_calls:
             tool_name = _get_field(function_call, "name")
             arguments = json.loads(_get_field(function_call, "arguments"))
-            resulting_payload = None
-            verified_ptx = None
-            speedup_vs_triton = None
-            if tool_name == "launch_verifier":
-                payload = Payload.from_input(arguments)
-                evaluation = verifier.evaluate(payload)
-                output = _launch_verifier_output(evaluation, payload)
-                if evaluation.passed:
-                    resulting_payload = arguments
-                    verified_ptx = arguments["ptx"]
-                    speedup_vs_triton = evaluation.speedup_vs_triton
-            elif tool_name == "apply_ptx_patch" and workspace is not None:
-                try:
-                    output = json.dumps(workspace.apply_patch(arguments))
-                    resulting_payload = workspace.candidate.model_dump(
-                        exclude_none=False
-                    )
-                    verified_ptx = workspace.candidate.ptx
-                except ValueError as error:
-                    output = json.dumps({"error": str(error)})
-            elif tool_name == "verify_current_ptx" and workspace is not None:
-                payload = Payload.from_input(workspace.candidate.model_dump())
-                evaluation = verifier.evaluate(payload)
-                output = _launch_verifier_output(evaluation, payload)
-                verified_ptx = workspace.candidate.ptx
-                resulting_payload = workspace.candidate.model_dump(exclude_none=False)
-                if evaluation.passed:
-                    speedup_vs_triton = evaluation.speedup_vs_triton
-                else:
-                    verified_ptx = None
-            else:
+            tool_result = _run_ptx_tool(tool_name, arguments, verifier, workspace)
+            if tool_result is None:
                 raise RuntimeError(f"Unsupported function call: {tool_name}")
+            output, resulting_payload, verified_ptx, speedup_vs_triton = tool_result
             if cost_log_path is not None:
                 record_tool_call(
                     Path(cost_log_path).parent,
@@ -1052,8 +1002,5 @@ def request_openai_json(
             "model": model,
             "previous_response_id": _get_field(response, "id"),
             "input": tool_outputs,
-            "tools": available_tools,
-            "text": {"format": response_format},
+            **shared_kwargs,
         }
-        if reasoning_effort is not None:
-            kwargs["reasoning"] = {"effort": reasoning_effort}

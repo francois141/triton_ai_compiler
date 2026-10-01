@@ -49,52 +49,48 @@ def build_openai_tools(skill_ids=None):
                 "additionalProperties": False,
             },
             "strict": True,
-        }
+        },
+        {
+            "type": "function",
+            "name": "apply_ptx_patch",
+            "description": (
+                "Apply a unified diff to the current candidate PTX file. "
+                "Use this to make every source-code change; do not return "
+                "complete PTX in the final response."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "patch": {"type": "string", "minLength": 1},
+                    "num_threads_x": {"type": "integer", "minimum": 1},
+                    "num_threads_y": {"type": "integer", "minimum": 1},
+                    "num_threads_z": {"type": "integer", "minimum": 1},
+                },
+                "required": [
+                    "patch",
+                    "num_threads_x",
+                    "num_threads_y",
+                    "num_threads_z",
+                ],
+                "additionalProperties": False,
+            },
+            "strict": True,
+        },
+        {
+            "type": "function",
+            "name": "verify_current_ptx",
+            "description": (
+                "Compile, verify, and benchmark the current PTX file after "
+                "applying a patch."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False,
+            },
+            "strict": True,
+        },
     ]
-    tools.extend(
-        [
-            {
-                "type": "function",
-                "name": "apply_ptx_patch",
-                "description": (
-                    "Apply a unified diff to the current candidate PTX file. "
-                    "Use this to make every source-code change; do not return "
-                    "complete PTX in the final response."
-                ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "patch": {"type": "string", "minLength": 1},
-                        "num_threads_x": {"type": "integer", "minimum": 1},
-                        "num_threads_y": {"type": "integer", "minimum": 1},
-                        "num_threads_z": {"type": "integer", "minimum": 1},
-                    },
-                    "required": [
-                        "patch",
-                        "num_threads_x",
-                        "num_threads_y",
-                        "num_threads_z",
-                    ],
-                    "additionalProperties": False,
-                },
-                "strict": True,
-            },
-            {
-                "type": "function",
-                "name": "verify_current_ptx",
-                "description": (
-                    "Compile, verify, and benchmark the current PTX file after "
-                    "applying a patch."
-                ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {},
-                    "additionalProperties": False,
-                },
-                "strict": True,
-            },
-        ]
-    )
     if skill_ids:
         if isinstance(skill_ids, str):
             skill_ids = [skill_ids]
@@ -227,7 +223,7 @@ def load_start_json_with_autotune(start_json):
     )
     loaded_data = json.loads(serialized_candidate)
     if not isinstance(loaded_data, dict):
-        raise ValueError("Starting candidate JSON must contain an object.")
+        raise TypeError("Starting candidate JSON must contain an object.")
     candidate_data = loaded_data.get(
         "payload",
         loaded_data.get(
@@ -236,7 +232,7 @@ def load_start_json_with_autotune(start_json):
         ),
     )
     if not isinstance(candidate_data, dict):
-        raise ValueError("Starting candidate payload must contain an object.")
+        raise TypeError("Starting candidate payload must contain an object.")
     autotune_metrics = loaded_data.get("autotune_metrics")
     if autotune_metrics is None:
         autotune_metrics = candidate_data.get("autotune_metrics")

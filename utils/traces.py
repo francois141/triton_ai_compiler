@@ -22,6 +22,7 @@ STALL_COLUMNS = {
 }
 EXCLUDED_STALL_COLUMNS = {"stall_selected"}
 TOP_STALL_LINES = 20
+NCU_BLOCK_HEADERS = {"File Path", "Function Name", "Kernel Name"}
 
 
 @lru_cache(maxsize=1)
@@ -43,11 +44,14 @@ def autotune_metrics(operator):
     }
 
 
+def _safe_name(value):
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value)).strip("._")
+
+
 def create_trace_directory(trace_root, kernel_name, model, reasoning_effort):
-    timestamp = datetime.now().strftime("%y%m%d%H%M%S")
+    timestamp = datetime.now().astimezone().strftime("%y%m%d%H%M%S")
     safe_values = [
-        re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value)).strip("._")
-        for value in (kernel_name, model, reasoning_effort)
+        _safe_name(value) for value in (kernel_name, model, reasoning_effort)
     ]
     trace_directory = Path(trace_root) / f"{timestamp}_{'_'.join(safe_values)}"
     trace_directory.mkdir(parents=True, exist_ok=False)
@@ -55,17 +59,18 @@ def create_trace_directory(trace_root, kernel_name, model, reasoning_effort):
 
 
 def write_trace(trace_path, events):
-    if trace_path is not None:
-        (trace_path / "events_speedup_vs_triton_pending.json").write_text(
-            json.dumps(
-                normalize_nested_json(
-                    [{**event, "gpu_type": gpu_type()} for event in events]
-                ),
-                indent=2,
-                default=json_default,
+    if trace_path is None:
+        return
+    (trace_path / "events_speedup_vs_triton_pending.json").write_text(
+        json.dumps(
+            normalize_nested_json(
+                [{**event, "gpu_type": gpu_type()} for event in events]
             ),
-            encoding="utf-8",
-        )
+            indent=2,
+            default=json_default,
+        ),
+        encoding="utf-8",
+    )
 
 
 def _run_cost_usd_so_far(trace_path):
@@ -94,9 +99,11 @@ def render_annotated_ptx_report(ptx, ncu_report):
     lines = [
         "# NCU Report, Annotated PTX",
         "",
-        "Only the candidate entry named `kernel` is included. Metrics are collected "
-        "at SASS PCs and grouped under the PTX line carried by profiling-only "
-        "`.loc` metadata.",
+        (
+            "Only the candidate entry named `kernel` is included. Metrics are "
+            "collected at SASS PCs and grouped under the PTX line carried by "
+            "profiling-only `.loc` metadata."
+        ),
         "",
         "```ptx",
     ]
@@ -104,8 +111,10 @@ def render_annotated_ptx_report(ptx, ncu_report):
     if not source_report:
         lines.extend(
             [
-                "// NCU line annotations are unavailable because the source report "
-                "was not collected.",
+                (
+                    "// NCU line annotations are unavailable because the source "
+                    "report was not collected."
+                ),
                 *ptx_lines,
                 "```",
                 "",
@@ -113,31 +122,23 @@ def render_annotated_ptx_report(ptx, ncu_report):
         )
         return "\n".join(lines)
 
-    rows_by_line = _correlate_source_rows(
-        ptx_lines,
-        _read_ncu_source_rows(source_report),
-    )
-    records = [
-        _ptx_line_record(line_number, ptx_line, rows_by_line.get(line_number, []))
-        for line_number, ptx_line in enumerate(ptx_lines, start=1)
-    ]
+    records = _ptx_line_records(ptx_lines, source_report)
     top_records = _top_stall_records(records)
     rank_by_line_number = {
-        record["line_number"]: rank
-        for rank, record in enumerate(top_records, start=1)
+        record["line_number"]: rank for rank, record in enumerate(top_records, start=1)
     }
     lines.insert(
         4,
         f"The {len(top_records)} PTX lines with the most total stall samples are "
         "annotated below.",
     )
-    for record in records:
-        lines.append(
-            _format_annotated_ptx_line(
-                record,
-                rank=rank_by_line_number.get(record["line_number"]),
-            )
+    lines.extend(
+        _format_annotated_ptx_line(
+            record,
+            rank=rank_by_line_number.get(record["line_number"]),
         )
+        for record in records
+    )
     lines.extend(["```", ""])
     return "\n".join(lines)
 
@@ -148,16 +149,7 @@ def ncu_instruction_issues(ptx, ncu_report):
     if not source_report:
         return []
 
-    ptx_lines = ptx.splitlines()
-    rows_by_line = _correlate_source_rows(
-        ptx_lines,
-        _read_ncu_source_rows(source_report),
-    )
-    records = [
-        _ptx_line_record(line_number, ptx_line, rows_by_line.get(line_number, []))
-        for line_number, ptx_line in enumerate(ptx_lines, start=1)
-    ]
-    top_records = _top_stall_records(records)
+    top_records = _top_stall_records(_ptx_line_records(ptx.splitlines(), source_report))
     return [
         {
             "rank": rank,
@@ -169,6 +161,17 @@ def ncu_instruction_issues(ptx, ncu_report):
             },
         }
         for rank, record in enumerate(top_records, start=1)
+    ]
+
+
+def _ptx_line_records(ptx_lines, source_report):
+    rows_by_line = _correlate_source_rows(
+        ptx_lines,
+        _read_ncu_source_rows(source_report),
+    )
+    return [
+        _ptx_line_record(line_number, ptx_line, rows_by_line.get(line_number, []))
+        for line_number, ptx_line in enumerate(ptx_lines, start=1)
     ]
 
 
@@ -187,9 +190,8 @@ def _read_ncu_source_rows(source_report):
             break
         columns = _source_columns(csv_rows[row_index])
         row_index += 1
-        block_headers = {"File Path", "Function Name", "Kernel Name"}
         while row_index < len(csv_rows) and (
-            not csv_rows[row_index] or csv_rows[row_index][0] not in block_headers
+            not csv_rows[row_index] or csv_rows[row_index][0] not in NCU_BLOCK_HEADERS
         ):
             values = csv_rows[row_index]
             if kernel_name == NCU_KERNEL_NAME and values:
@@ -321,7 +323,7 @@ def _ptx_line_record(line_number, ptx_line, sass_rows):
 
 def _is_executable_ptx_line(ptx_line):
     stripped = ptx_line.strip()
-    return bool(stripped.endswith(";") and not stripped.startswith((".", "//")))
+    return stripped.endswith(";") and not stripped.startswith((".", "//"))
 
 
 def _sum_column(rows, column):
@@ -417,23 +419,6 @@ def _numeric_value(value):
         return 0.0
 
 
-def _mark_frequent_lines(records):
-    executed_counts = sorted(
-        record["executed_count"] for record in records if "executed_count" in record
-    )
-    if not executed_counts:
-        return
-    threshold = executed_counts[int((len(executed_counts) - 1) * 0.95)]
-    if not threshold:
-        return
-    for record in records:
-        executed_count = record.get("executed_count", 0)
-        if executed_count >= threshold:
-            record["issues"].append(
-                f"high execution frequency ({executed_count:g}, >= p95 {threshold:g})"
-            )
-
-
 def _format_annotated_ptx_line(record, *, rank=None):
     line = record["ptx"]
     if rank is None:
@@ -500,9 +485,7 @@ def _top_stall_records(records):
         record
         for record in records
         if (
-            record["executable"]
-            and record["sass"]
-            and _total_stall_samples(record) > 0
+            record["executable"] and record["sass"] and _total_stall_samples(record) > 0
         )
     ]
     return sorted(
@@ -513,23 +496,6 @@ def _top_stall_records(records):
 
 def _total_stall_samples(record):
     return sum(record["stalls"].values())
-
-
-def _problem_summary(records):
-    problematic = [record for record in records if record["issues"]]
-    problematic.sort(
-        key=lambda record: (
-            record.get("sample_count", 0),
-            record.get("executed_count", 0),
-        ),
-        reverse=True,
-    )
-    if not problematic:
-        return ["- No problematic correlated PTX line crossed the thresholds."]
-    return [
-        f"- PTX line {record['line_number']}: " + "; ".join(record["issues"])
-        for record in problematic[:20]
-    ]
 
 
 def record_tool_call(
@@ -546,9 +512,8 @@ def record_tool_call(
 ):
     tool_output_path = Path(trace_path) / "tool_output"
     tool_output_path.mkdir(parents=True, exist_ok=True)
-    safe_tool_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(tool_name)).strip("._")
     artifact_index = sum(1 for _ in tool_output_path.glob("*.json")) + 1
-    artifact_name = f"{artifact_index:03d}_{safe_tool_name or 'tool'}.json"
+    artifact_prefix = f"{artifact_index:03d}_{_safe_name(tool_name) or 'tool'}"
     record = {
         "provider": provider,
         "tool_name": tool_name,
@@ -569,7 +534,7 @@ def record_tool_call(
             for name in ("num_threads_x", "num_threads_y", "num_threads_z")
             if resulting_payload is not None and resulting_payload.get(name) is not None
         }
-    (tool_output_path / artifact_name).write_text(
+    (tool_output_path / f"{artifact_prefix}.json").write_text(
         json.dumps(
             record,
             indent=2,
@@ -583,10 +548,7 @@ def record_tool_call(
             speedup_vs_triton
         ):
             speedup_suffix = f"speedup_vs_triton_{speedup_vs_triton:.4f}x"
-        ptx_path = tool_output_path / (
-            f"{artifact_index:03d}_{safe_tool_name or 'tool'}_{speedup_suffix}.ptx"
-        )
-        ptx_path.write_text(
+        (tool_output_path / f"{artifact_prefix}_{speedup_suffix}.ptx").write_text(
             verified_ptx,
             encoding="utf-8",
         )

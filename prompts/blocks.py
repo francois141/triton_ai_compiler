@@ -138,12 +138,7 @@ def constexpr_values_block(spec):
         param for param in spec.parameters if is_constexpr_annotation(param.annotation)
     ]
     if not constexpr_params:
-        return "\n\n".join(
-            [
-                "## Operator Constexpr Values",
-                "None.",
-            ]
-        )
+        return "## Operator Constexpr Values\n\nNone."
 
     lines = []
     for param in constexpr_params:
@@ -256,12 +251,10 @@ def anthropic_signature_template(
 
 
 def shape_information_block(shape_information):
-    return "\n\n".join(
-        [
-            "## Pointer Shape Information",
-            "Use these exact dtype and shape details for pointer arguments.",
-            shape_information,
-        ]
+    return (
+        "## Pointer Shape Information\n\n"
+        "Use these exact dtype and shape details for pointer arguments.\n\n"
+        f"{shape_information}"
     )
 
 

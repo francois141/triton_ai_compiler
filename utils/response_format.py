@@ -2,7 +2,6 @@ from typing import Annotated
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-
 PositiveInteger = Annotated[int, Field(ge=1)]
 
 
@@ -49,15 +48,17 @@ PTX_KERNEL_RESPONSE_FORMAT = {
     "schema": PTX_KERNEL_JSON_SCHEMA,
 }
 
+PTX_KERNEL_METADATA_JSON_SCHEMA = PtxKernelMetadata.model_json_schema()
+PTX_KERNEL_METADATA_JSON_SCHEMA["required"] = list(
+    PTX_KERNEL_METADATA_JSON_SCHEMA["properties"]
+)
+
 PTX_KERNEL_METADATA_RESPONSE_FORMAT = {
     "type": "json_schema",
     "name": "ptx_kernel_metadata",
     "strict": True,
-    "schema": PtxKernelMetadata.model_json_schema(),
+    "schema": PTX_KERNEL_METADATA_JSON_SCHEMA,
 }
-PTX_KERNEL_METADATA_RESPONSE_FORMAT["schema"]["required"] = list(
-    PTX_KERNEL_METADATA_RESPONSE_FORMAT["schema"]["properties"]
-)
 
 FAILURE_ANALYSIS_RESPONSE_FORMAT = {
     "type": "json_schema",

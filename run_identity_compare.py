@@ -73,7 +73,6 @@ def main():
             )
             return 1
         performance = evaluate_ptx_performance(generated, inputs)
-
     except (OSError, RuntimeError, TypeError, ValueError) as exc:
         LOGGER.error("Failed to compare %s: %s", args.kernel, exc)
         return 1

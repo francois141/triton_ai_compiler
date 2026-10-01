@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from types import MappingProxyType
-from typing import Mapping
 
 PriceTable = Mapping[str, Mapping[str, float]]
+
+COST_LOG_PATH = Path(__file__).resolve().parent.parent / "costs.txt"
 
 _PRICING_PER_1M_TOKENS = {
     # Price estimates in USD per 1M tokens.
@@ -169,40 +171,34 @@ def estimate_token_cost(model, token_counts):
     ) / 1_000_000
 
 
-COST_LOG_PATH = Path(__file__).resolve().parent.parent / "costs.txt"
-
-
-def _get_nested_int(value, *keys):
+def _get_nested_value(value, *keys):
     for key in keys:
-        if value is None:
-            return 0
         if isinstance(value, dict):
             value = value.get(key)
         else:
             value = getattr(value, key, None)
-    return int(value or 0)
+    return value
+
+
+def _get_nested_int(value, *keys):
+    return int(_get_nested_value(value, *keys) or 0)
+
+
+def _token_count_summary(
+    input_tokens=0, cached_input_tokens=0, cache_write_tokens=0, output_tokens=0
+):
+    return {
+        "input_tokens": input_tokens,
+        "cached_input_tokens": cached_input_tokens,
+        "cache_write_tokens": cache_write_tokens,
+        "output_tokens": output_tokens,
+    }
 
 
 def estimate_response_cost(response, model):
     usage = getattr(response, "usage", None)
     if usage is None:
-        return None, {
-            "input_tokens": 0,
-            "cached_input_tokens": 0,
-            "cache_write_tokens": 0,
-            "output_tokens": 0,
-        }
-
-    reported_cost = _get_nested_value(usage, "cost")
-    if isinstance(reported_cost, (int, float)) and not isinstance(reported_cost, bool):
-        return float(reported_cost), {
-            "input_tokens": _get_nested_int(usage, "input_tokens")
-            or _get_nested_int(usage, "prompt_tokens"),
-            "cached_input_tokens": 0,
-            "cache_write_tokens": 0,
-            "output_tokens": _get_nested_int(usage, "output_tokens")
-            or _get_nested_int(usage, "completion_tokens"),
-        }
+        return None, _token_count_summary()
 
     input_tokens = _get_nested_int(usage, "input_tokens") or _get_nested_int(
         usage, "prompt_tokens"
@@ -210,6 +206,12 @@ def estimate_response_cost(response, model):
     output_tokens = _get_nested_int(usage, "output_tokens") or _get_nested_int(
         usage, "completion_tokens"
     )
+    reported_cost = _get_nested_value(usage, "cost")
+    if isinstance(reported_cost, (int, float)) and not isinstance(reported_cost, bool):
+        return float(reported_cost), _token_count_summary(
+            input_tokens=input_tokens, output_tokens=output_tokens
+        )
+
     cached_input_tokens = (
         _get_nested_int(usage, "input_tokens_details", "cached_tokens")
         or _get_nested_int(usage, "prompt_tokens_details", "cached_tokens")
@@ -220,12 +222,6 @@ def estimate_response_cost(response, model):
         or _get_nested_int(usage, "prompt_tokens_details", "cache_write_tokens")
         or _get_nested_int(usage, "cache_creation_input_tokens")
     )
-    token_counts = {
-        "input_tokens": input_tokens,
-        "cached_input_tokens": cached_input_tokens,
-        "cache_write_tokens": cache_write_tokens,
-        "output_tokens": output_tokens,
-    }
     token_cost = estimate_token_cost(
         model,
         TokenCounts(
@@ -235,27 +231,21 @@ def estimate_response_cost(response, model):
             cache_write_tokens=cache_write_tokens,
         ),
     )
-    if token_cost is None:
-        return None, token_counts
-    return token_cost, token_counts
+    return token_cost, _token_count_summary(
+        input_tokens=input_tokens,
+        cached_input_tokens=cached_input_tokens,
+        cache_write_tokens=cache_write_tokens,
+        output_tokens=output_tokens,
+    )
 
 
-def _get_nested_value(value, *keys):
-    for key in keys:
-        if isinstance(value, dict):
-            value = value.get(key)
-        else:
-            value = getattr(value, key, None)
-    return value
-
-
-def read_daily_total(cost_log_path, date_text):
+def _sum_logged_costs(cost_log_path, include_line):
     if not cost_log_path.exists():
         return 0.0
     total = 0.0
     with cost_log_path.open(encoding="utf-8") as cost_log:
         for line in cost_log:
-            if not line.startswith(f"{date_text}T") or " cost_usd=" not in line:
+            if not include_line(line) or " cost_usd=" not in line:
                 continue
             cost_text = line.split(" cost_usd=", maxsplit=1)[1].split()[0]
             try:
@@ -263,6 +253,11 @@ def read_daily_total(cost_log_path, date_text):
             except ValueError:
                 continue
     return total
+
+
+def read_daily_total(cost_log_path, date_text):
+    line_prefix = f"{date_text}T"
+    return _sum_logged_costs(cost_log_path, lambda line: line.startswith(line_prefix))
 
 
 def append_cost_log(
@@ -292,20 +287,7 @@ def append_cost_log(
 
 
 def read_cost_total(cost_log_path):
-    if not cost_log_path.exists():
-        return 0.0
-
-    total = 0.0
-    with cost_log_path.open(encoding="utf-8") as cost_log:
-        for line in cost_log:
-            if "event=api_response" not in line or " cost_usd=" not in line:
-                continue
-            cost_text = line.split(" cost_usd=", maxsplit=1)[1].split()[0]
-            try:
-                total += float(cost_text)
-            except ValueError:
-                continue
-    return total
+    return _sum_logged_costs(cost_log_path, lambda line: "event=api_response" in line)
 
 
 def append_pipeline_cost_summary(*, pipeline, cost, cost_log_path):

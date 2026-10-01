@@ -21,17 +21,8 @@ ASSEMBLY_STAGE_EXTENSIONS = {
 def disable_kernel_autotuning():
     original_init_compiled_kernels = TritonPTXKernel.init_compiled_kernels
 
-    def init_compiled_kernels_without_autotuning(
-        self,
-        *,
-        ptx,
-        autotune=True,
-    ):
-        return original_init_compiled_kernels(
-            self,
-            ptx=ptx,
-            autotune=False,
-        )
+    def init_compiled_kernels_without_autotuning(self, *, ptx, autotune=True):
+        return original_init_compiled_kernels(self, ptx=ptx, autotune=False)
 
     TritonPTXKernel.init_compiled_kernels = init_compiled_kernels_without_autotuning
     try:

@@ -30,10 +30,22 @@ def _improvement_context(prompt_sections):
     )
 
 
-def _annotated_evaluation_summary(evaluation):
-    if not (
+def _has_ncu_metrics(evaluation):
+    return bool(
         evaluation.ncu_report.get("available") and evaluation.ncu_report.get("metrics")
-    ):
+    )
+
+
+def _idea_block(idea):
+    return (
+        f"Name: {idea['name']}\n"
+        f"Rationale: {idea['rationale']}\n"
+        f"Instruction: {idea['instruction']}"
+    )
+
+
+def _annotated_evaluation_summary(evaluation):
+    if not _has_ncu_metrics(evaluation):
         return evaluation_summary(evaluation, include_ptx=True)
     summary = evaluation_summary(
         evaluation,
@@ -68,10 +80,7 @@ def _annotated_evaluation_summary(evaluation):
 
 
 def build_improvement_prompt(prompt_sections, best_evaluation):
-    if not (
-        best_evaluation.ncu_report.get("available")
-        and best_evaluation.ncu_report.get("metrics")
-    ):
+    if not _has_ncu_metrics(best_evaluation):
         return f"""
 ## Kernel Source, Constexpr Values, And Launch Contract
 
@@ -99,14 +108,15 @@ Preserve correctness, the PTX signature, and the launch contract. Each idea
 must be verifiable with the existing correctness checks and timing benchmarks,
 without NCU. Use the required improvement-plan response schema.
 """.strip()
-    research_context = prompt_sections["float16_gemm_research"]
-    research_constraint = ""
-    if research_context:
-        research_constraint = """
+    research_constraint = (
+        """
 For this NCU task, use the research only to implement a metric-supported Tensor
 Core or tiling change. The report remains the sole basis for bottleneck
 selection, impact ordering, and performance claims.
 """.strip()
+        if prompt_sections["float16_gemm_research"]
+        else ""
+    )
     return f"""
 
 ## Kernel Source, Constexpr Values, And Launch Contract
@@ -153,9 +163,7 @@ but did not improve the current PTX. Do not retry those changes.
 
 ## Single Improvement To Try
 
-Name: {idea["name"]}
-Rationale: {idea["rationale"]}
-Instruction: {idea["instruction"]}
+{_idea_block(idea)}
 
 Generate PTX candidate variations that apply only this improvement to the
 current best. Preserve correctness and the required output schema.
@@ -192,9 +200,7 @@ def build_repair_prompt(
 
 ## Original Improvement Being Tried
 
-Name: {idea["name"]}
-Rationale: {idea["rationale"]}
-Instruction: {idea["instruction"]}
+{_idea_block(idea)}
 
 ## Failed Candidate And Diagnostics
 
@@ -290,9 +296,7 @@ def build_failure_analysis_prompt(
         improvement_context = f"""
 ## Original Improvement Being Tried
 
-Name: {idea["name"]}
-Rationale: {idea["rationale"]}
-Instruction: {idea["instruction"]}
+{_idea_block(idea)}
 """
 
     return f"""{_improvement_context(prompt_sections)}

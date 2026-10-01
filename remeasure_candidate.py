@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import argparse
 import json
 from pathlib import Path
@@ -72,16 +70,13 @@ def resolve_kernel_name(record, explicit_kernel):
     kernel_name = explicit_kernel or record.get("kernel_name") or archived_kernel_name
     if not isinstance(kernel_name, str) or not kernel_name.strip():
         raise ValueError(
-            'Kernel name is missing. Include "kernel_name" in the JSON or pass --kernel.'
+            'Kernel name is missing. Include "kernel_name" in the JSON or pass '
+            "--kernel."
         )
     return kernel_name
 
 
-def remeasure_candidate(
-    record,
-    *,
-    kernel_name=None,
-):
+def remeasure_candidate(record, *, kernel_name=None):
     from ptx_gym.evaluation import Payload
 
     resolved_kernel_name = resolve_kernel_name(record, kernel_name)
@@ -120,10 +115,7 @@ def parse_args():
 def main():
     args = parse_args()
     record = load_candidate_record(args.json_path)
-    result = remeasure_candidate(
-        record,
-        kernel_name=args.kernel,
-    )
+    result = remeasure_candidate(record, kernel_name=args.kernel)
     output_data = json.loads(result.to_json())
     output_data.pop("ncu_report", None)
     output = json.dumps(

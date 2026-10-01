@@ -64,6 +64,18 @@ def candidate_from_evaluation(evaluation):
         raise ValueError("The evaluated candidate is unavailable.") from error
 
 
+def _fenced_section(title, language, body):
+    return ["", f"## {title}", f"```{language}", body, "```"]
+
+
+def _json_section(title, value):
+    return _fenced_section(
+        title,
+        "json",
+        json.dumps(normalize_nested_json(value), indent=2, default=json_default),
+    )
+
+
 def evaluation_summary(evaluation, *, include_ptx, include_ncu=True):
     payload = candidate_from_evaluation(evaluation).model_dump(exclude_none=False)
     ptx = payload.pop("ptx", "")
@@ -79,93 +91,28 @@ def evaluation_summary(evaluation, *, include_ptx, include_ncu=True):
     if message:
         lines.append(f"- Message: {message}")
 
-    lines.extend(
-        [
-            "",
-            "## Candidate Launch Metadata",
-            "```json",
-            json.dumps(
-                normalize_nested_json(payload),
-                indent=2,
-                default=json_default,
-            ),
-            "```",
-        ]
-    )
+    lines.extend(_json_section("Candidate Launch Metadata", payload))
     if include_ptx:
-        lines.extend(["", "## Candidate PTX", "```ptx", ptx, "```"])
-
+        lines.extend(_fenced_section("Candidate PTX", "ptx", ptx))
     if evaluation.verifier_report:
-        lines.extend(
-            [
-                "",
-                "## Verifier Report",
-                "```json",
-                json.dumps(
-                    normalize_nested_json(evaluation.verifier_report),
-                    indent=2,
-                    default=json_default,
-                ),
-                "```",
-            ]
-        )
+        lines.extend(_json_section("Verifier Report", evaluation.verifier_report))
     if include_ncu and evaluation.ncu_report:
         ncu_report = evaluation.ncu_report
         ncu_status = {
             key: ncu_report.get(key)
-            for key in (
-                "available",
-                "return_code",
-                "error",
-            )
+            for key in ("available", "return_code", "error")
             if ncu_report.get(key) not in (None, "")
         }
-        lines.extend(
-            [
-                "",
-                "## Nsight Compute Status",
-                "```json",
-                json.dumps(
-                    normalize_nested_json(ncu_status),
-                    indent=2,
-                    default=json_default,
-                ),
-                "```",
-            ]
-        )
+        lines.extend(_json_section("Nsight Compute Status", ncu_status))
     if evaluation.sanitizer_report:
-        lines.extend(
-            [
-                "",
-                "## Sanitizer Report",
-                "```json",
-                json.dumps(
-                    normalize_nested_json(evaluation.sanitizer_report),
-                    indent=2,
-                    default=json_default,
-                ),
-                "```",
-            ]
-        )
+        lines.extend(_json_section("Sanitizer Report", evaluation.sanitizer_report))
     if evaluation.compile_error:
         lines.extend(
-            [
-                "",
-                "## Compile Error",
-                "```text",
-                evaluation.compile_error[-2000:],
-                "```",
-            ]
+            _fenced_section("Compile Error", "text", evaluation.compile_error[-2000:])
         )
     if evaluation.timing_error:
         lines.extend(
-            [
-                "",
-                "## Timing Error",
-                "```text",
-                evaluation.timing_error[-2000:],
-                "```",
-            ]
+            _fenced_section("Timing Error", "text", evaluation.timing_error[-2000:])
         )
 
     return "\n".join(lines)

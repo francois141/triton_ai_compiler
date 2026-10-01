@@ -74,14 +74,14 @@ def initial_prompt_section_names(provider):
     raise ValueError(f"Unsupported provider: {provider}")
 
 
+def _operator_class(operator):
+    return operator if isinstance(operator, type) else type(operator)
+
+
 def _is_float16_operator(operator):
     return _operator_class(operator).__module__.startswith(
         "ptx_gym.kernels.level2_float16"
     )
-
-
-def _operator_class(operator):
-    return operator if isinstance(operator, type) else type(operator)
 
 
 def _is_convolution_2d_float16_operator(operator):
@@ -200,19 +200,16 @@ def build_prompt_for_operator(
     ptx_signature=None,
     provider="openai",
 ):
-    spec = extract_specification_from_operator(operator)
-    include_float16_gemm_research = _is_float16_operator(operator)
-    return prompt_builder(
-        spec,
+    prompt_sections = build_prompt_sections_for_operator(
+        operator,
         version=version,
         target=target,
         address_size=address_size,
         ptx_signature=ptx_signature,
-        include_float16_gemm_research=include_float16_gemm_research,
-        include_flash_attention=_is_flash_attention_float16_operator(operator),
-        include_convolution_memory_layout=_is_convolution_2d_float16_operator(operator),
         provider=provider,
-        shared_memory_bytes=get_kernel_shared_memory_bytes(operator),
+    )
+    return render_prompt_sections(
+        prompt_sections, initial_prompt_section_names(provider)
     )
 
 
@@ -225,15 +222,13 @@ def build_prompt_sections_for_operator(
     ptx_signature=None,
     provider="openai",
 ):
-    spec = extract_specification_from_operator(operator)
-    include_float16_gemm_research = _is_float16_operator(operator)
     return build_prompt_sections(
-        spec,
+        extract_specification_from_operator(operator),
         version=version,
         target=target,
         address_size=address_size,
         ptx_signature=ptx_signature,
-        include_float16_gemm_research=include_float16_gemm_research,
+        include_float16_gemm_research=_is_float16_operator(operator),
         include_flash_attention=_is_flash_attention_float16_operator(operator),
         include_convolution_memory_layout=_is_convolution_2d_float16_operator(operator),
         provider=provider,

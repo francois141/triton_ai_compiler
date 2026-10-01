@@ -65,9 +65,10 @@ def remeasure_run(run_directory, *, write=True):
     kernel_name, archived_p50 = archived_baseline(run_directory)
     fresh_p50 = measure_triton_p50(kernel_name)
     correction_factor = fresh_p50 / archived_p50
-    correction_path = run_directory / CORRECTION_FACTOR_FILENAME
     if write:
-        correction_path.write_text(f"{correction_factor:.17g}\n", encoding="utf-8")
+        (run_directory / CORRECTION_FACTOR_FILENAME).write_text(
+            f"{correction_factor:.17g}\n", encoding="utf-8"
+        )
     return kernel_name, archived_p50, fresh_p50, correction_factor
 
 
@@ -82,12 +83,16 @@ def parse_args():
         "--trace-directory",
         type=Path,
         default=Path("astra"),
-        help="Directory whose immediate subdirectories are trace runs (default: astra).",
+        help=(
+            "Directory whose immediate subdirectories are trace runs (default: astra)."
+        ),
     )
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Measure and report factors without writing correction factor.txt files.",
+        help=(
+            "Measure and report factors without writing correction factor.txt files."
+        ),
     )
     return parser.parse_args()
 
@@ -99,7 +104,9 @@ def main():
         return 1
 
     failures = 0
-    for run_directory in sorted(path for path in args.trace_directory.iterdir() if path.is_dir()):
+    for run_directory in sorted(
+        path for path in args.trace_directory.iterdir() if path.is_dir()
+    ):
         try:
             kernel_name, archived_p50, fresh_p50, correction_factor = remeasure_run(
                 run_directory,

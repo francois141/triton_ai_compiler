@@ -1,4 +1,5 @@
 import json
+import math
 
 
 def _format_scalar(value):
@@ -28,17 +29,21 @@ def _flatten_report(value, path=""):
         yield path, _format_scalar(value)
 
 
+def _as_number(value):
+    if isinstance(value, dict):
+        value = value.get("value")
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return value
+    return None
+
+
 def _number(report, *path):
     value = report
     for key in path:
         if not isinstance(value, dict) or key not in value:
             return None
         value = value[key]
-    if isinstance(value, dict):
-        value = value.get("value")
-    if isinstance(value, (int, float)) and not isinstance(value, bool):
-        return value
-    return None
+    return _as_number(value)
 
 
 def _percent(numerator, denominator):
@@ -58,10 +63,8 @@ def _first_number(report, paths):
 def _metric_number(report, *names):
     metrics = report.get("metrics", {})
     for name in names:
-        value = metrics.get(name)
-        if isinstance(value, dict):
-            value = value.get("value")
-        if isinstance(value, (int, float)) and not isinstance(value, bool):
+        value = _as_number(metrics.get(name))
+        if value is not None:
             return value
     return None
 
@@ -196,14 +199,10 @@ def _derived_ratios(report):
     )
     primary_limit = _number(report, "summary", "occupancy", "limit_warps")
 
-    threads_per_block = None
-    if None not in block_dimensions:
-        threads_per_block = (
-            block_dimensions[0] * block_dimensions[1] * block_dimensions[2]
-        )
-    grid_blocks = None
-    if None not in grid_dimensions:
-        grid_blocks = grid_dimensions[0] * grid_dimensions[1] * grid_dimensions[2]
+    threads_per_block = (
+        None if None in block_dimensions else math.prod(block_dimensions)
+    )
+    grid_blocks = None if None in grid_dimensions else math.prod(grid_dimensions)
 
     ratios = {
         "achieved_of_theoretical_occupancy": (_percent(achieved, theoretical), "%"),
@@ -316,7 +315,7 @@ def _derived_ratios(report):
             "shared_memory",
             _number(report, "summary", "occupancy", "limit_shared_memory"),
         ),
-        ("warps", _number(report, "summary", "occupancy", "limit_warps")),
+        ("warps", primary_limit),
     ):
         ratios[f"occupancy_limit_{name}_of_primary"] = (
             _percent(primary_limit, limit),
