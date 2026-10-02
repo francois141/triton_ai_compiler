@@ -98,7 +98,7 @@ calling any model:
 python run_kernel.py SoftmaxFloat16Kernel                       # verify + benchmark one baseline
 ```
 
-Optimize a kernel with the default provider (OpenAI):
+Compile a kernel with the default provider (OpenAI):
 
 ```bash
 python -m agent MatrixMultiplicationFloat16
