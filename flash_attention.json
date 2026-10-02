@@ -1,0 +1,148 @@
+{
+  "iteration": 0,
+  "try": 0,
+  "candidate_index": 0,
+  "prompt_name": "initial_candidate",
+  "candidate": {
+    "ptx": ".version 8.7\n.target sm_100a\n.address_size 64\n\n.extern .shared .align 16 .b8 global_smem[];\n\n.visible .entry kernel(\n    .param .u64 Q_ptr,\n    .param .u64 K_ptr,\n    .param .u64 V_ptr,\n    .param .u64 Bias_ptr,\n    .param .u64 Out_ptr,\n    .param .u64 Lse_ptr,\n    .param .u64 TMP_ptr,\n    .param .u64 dummy_ptr1,\n    .param .u64 dummy_ptr2\n)\n{\n .reg .pred %p0, %pw, %pf, %pt, %pd, %pc, %pl;\n .reg .b32 %r<40>, %h<16>;\n .reg .b64 %fa, %fb, %fs, %fc;\n .reg .b64 %rd<12>, %da, %db, %dp, %dv, %dx;\n .reg .f32 %c<16>, %o<32>, %u<16>, %sc<3>, %norm, %t<16>, %m, %l, %mx, %z, %a, %sum, %old;\n\n // Select the 64-row query tile and contiguous batch/head slice.\n ld.param.u64 %rd0, [Q_ptr]; ld.param.u64 %rd1, [K_ptr];\n ld.param.u64 %rd2, [V_ptr]; ld.param.u64 %rd3, [Out_ptr];\n ld.param.u64 %rd4, [Lse_ptr];\n mov.u32 %r0, %tid.x; mov.u32 %r1, %ctaid.x;\n mov.u32 %r2, %ctaid.y; mov.u32 %r3, %laneid;\n shr.u32 %r4, %r0, 5; mov.u32 %r5, global_smem;\n mul.wide.u32 %rd5, %r2, 16384;\n add.u64 %rd1, %rd1, %rd5; add.u64 %rd2, %rd2, %rd5;\n mul.wide.u32 %rd6, %r1, 8192;\n add.u64 %rd5, %rd5, %rd6;\n add.u64 %rd0, %rd0, %rd5; add.u64 %rd3, %rd3, %rd5;\n mad.lo.u32 %r6, %r2, 128, 0; mad.lo.u32 %r6, %r1, 64, %r6;\n mul.wide.u32 %rd5, %r6, 4; add.u64 %rd4, %rd4, %rd5;\n\n // Barriers and allocation metadata fit in the final 32 shared bytes.\n add.u32 %r6, %r5, 32768; add.u32 %r7, %r5, 32784;\n add.u32 %r28, %r5, 32776;\n setp.eq.u32 %p0, %r0, 0; setp.eq.u32 %pw, %r4, 0;\n setp.ne.u32 %pf, %r0, %r0; setp.eq.u32 %pt, %r0, %r0;\n @%p0 mbarrier.init.shared::cta.b64 [%r6], 1;\n @%p0 mbarrier.init.shared::cta.b64 [%r28], 1;\n @%p0 fence.mbarrier_init.release.cluster;\n @%pw tcgen05.alloc.cta_group::1.sync.aligned.shared::cta.b32 [%r7], 64;\n @%pw tcgen05.relinquish_alloc_permit.cta_group::1.sync.aligned;\n\n // Stage the complete Q tile and all K in shared bytes [0,24576).\n // Every tile is in bounds; XOR swizzling distributes accesses across banks.\n shl.b32 %r8, %r0, 4; shr.u32 %r9, %r8, 3;\n and.b32 %r9, %r9, 112; xor.b32 %r10, %r8, %r9;\n add.u32 %r10, %r10, %r5; cvt.u64.u32 %rd5, %r8;\n add.u64 %rd6, %rd0, %rd5; add.u64 %rd7, %rd1, %rd5;\n add.u32 %r11, %r10, 0; cp.async.cg.shared.global [%r11], [%rd6+0], 16;\n add.u32 %r11, %r10, 8192; cp.async.cg.shared.global [%r11], [%rd7+0], 16;\n add.u32 %r11, %r10, 2048; cp.async.cg.shared.global [%r11], [%rd6+2048], 16;\n add.u32 %r11, %r10, 10240; cp.async.cg.shared.global [%r11], [%rd7+2048], 16;\n add.u32 %r11, %r10, 4096; cp.async.cg.shared.global [%r11], [%rd6+4096], 16;\n add.u32 %r11, %r10, 12288; cp.async.cg.shared.global [%r11], [%rd7+4096], 16;\n add.u32 %r11, %r10, 6144; cp.async.cg.shared.global [%r11], [%rd6+6144], 16;\n add.u32 %r11, %r10, 14336; cp.async.cg.shared.global [%r11], [%rd7+6144], 16;\n add.u32 %r11, %r10, 16384; cp.async.cg.shared.global [%r11], [%rd7+8192], 16;\n add.u32 %r11, %r10, 18432; cp.async.cg.shared.global [%r11], [%rd7+10240], 16;\n add.u32 %r11, %r10, 20480; cp.async.cg.shared.global [%r11], [%rd7+12288], 16;\n add.u32 %r11, %r10, 22528; cp.async.cg.shared.global [%r11], [%rd7+14336], 16;\n cp.async.commit_group; cp.async.wait_group 0;\n fence.proxy.async.shared::cta; bar.sync 0;\n ld.shared.b32 %r12, [%r7];\n\n // Two 64-key score matrices occupy opposite lane halves of 64 tensor columns.\n shl.b32 %r13, %r4, 21; add.u32 %r13, %r13, %r12;\n add.u32 %r14, %r13, 1048576; add.u32 %r15, %r12, 1048576;\n shr.u32 %r16, %r5, 4; cvt.u64.u32 %dx, %r16;\n mov.b64 %da, 0x4000404000010000; add.u64 %da, %da, %dx;\n add.u64 %db, %da, 512; mov.u32 %r17, 0x04100010;\n\n // Accumulate Q times K-transpose over four 16-feature tensor operations.\n // Load A independently for the two tensor-memory lane alignments.\n @%p0 tcgen05.mma.cta_group::1.kind::f16 [%r12], %da, %db, %r17, %pf;\n add.u64 %dx, %db, 512;\n @%p0 tcgen05.mma.cta_group::1.kind::f16 [%r15], %da, %dx, %r17, %pf;\n add.u64 %da, %da, 2; add.u64 %db, %db, 2;\n @%p0 tcgen05.mma.cta_group::1.kind::f16 [%r12], %da, %db, %r17, %pt;\n add.u64 %dx, %db, 512;\n @%p0 tcgen05.mma.cta_group::1.kind::f16 [%r15], %da, %dx, %r17, %pt;\n add.u64 %da, %da, 2; add.u64 %db, %db, 2;\n @%p0 tcgen05.mma.cta_group::1.kind::f16 [%r12], %da, %db, %r17, %pt;\n add.u64 %dx, %db, 512;\n @%p0 tcgen05.mma.cta_group::1.kind::f16 [%r15], %da, %dx, %r17, %pt;\n add.u64 %da, %da, 2; add.u64 %db, %db, 2;\n @%p0 tcgen05.mma.cta_group::1.kind::f16 [%r12], %da, %db, %r17, %pt;\n add.u64 %dx, %db, 512;\n @%p0 tcgen05.mma.cta_group::1.kind::f16 [%r15], %da, %dx, %r17, %pt;\n @%p0 tcgen05.commit.cta_group::1.mbarrier::arrive::one.shared::cluster.b64 [%r6];\nWAIT_QK:\n mbarrier.try_wait.parity.acquire.cta.shared::cta.b64 %pc, [%r6], 0;\n @!%pc bra WAIT_QK;\n tcgen05.fence::after_thread_sync;\n\n // Reuse consumed Q/K storage for V and overlap its copy with softmax.\n add.u64 %rd6, %rd2, %rd5;\n add.u32 %r11, %r10, 0; cp.async.cg.shared.global [%r11], [%rd6+0], 16;\n add.u32 %r11, %r10, 2048; cp.async.cg.shared.global [%r11], [%rd6+2048], 16;\n add.u32 %r11, %r10, 4096; cp.async.cg.shared.global [%r11], [%rd6+4096], 16;\n add.u32 %r11, %r10, 6144; cp.async.cg.shared.global [%r11], [%rd6+6144], 16;\n add.u32 %r11, %r10, 8192; cp.async.cg.shared.global [%r11], [%rd6+8192], 16;\n add.u32 %r11, %r10, 10240; cp.async.cg.shared.global [%r11], [%rd6+10240], 16;\n add.u32 %r11, %r10, 12288; cp.async.cg.shared.global [%r11], [%rd6+12288], 16;\n add.u32 %r11, %r10, 14336; cp.async.cg.shared.global [%r11], [%rd6+14336], 16;\n cp.async.commit_group;\n\n // Two lanes share each query row, each owning 16 consecutive logits.\n cvt.u64.u32 %dx, %r16;\n and.b32 %r18, %r3, 15; mad.lo.u32 %r18, %r4, 16, %r18;\n shr.u32 %r19, %r3, 4; shl.b32 %r19, %r19, 5;\n shl.b32 %r20, %r18, 6; add.u32 %r20, %r20, %r19;\n shr.u32 %r21, %r20, 3; and.b32 %r21, %r21, 48;\n xor.b32 %r20, %r20, %r21; add.u32 %r21, %r5, 16384;\n\n // Four compact probability tiles fill shared bytes [16384,32768).\n // Statistics use base-two logarithms until the final LSE conversion.\n mov.b64 %dp, 0x8000402000010400; add.u64 %dp, %dp, %dx;\n mov.b64 %dv, 0x4000404000010000; add.u64 %dv, %dv, %dx;\n mov.u32 %r17, 0x04110010; mov.u32 %r22, 0; mov.u32 %r29, 0;\n mov.f32 %m, 0fFF800000; mov.f32 %l, 0fFF800000;\n mov.f32 %sc0, 0f00000000; mov.f32 %sc1, 0f00000000; mov.f32 %sc2, 0f00000000;\nLOOP_N:\n // Read the next 32 scores from the appropriate tensor-memory half.\n and.b32 %r24, %r22, 64; shl.b32 %r24, %r24, 14;\n and.b32 %r27, %r22, 63; add.u32 %r24, %r24, %r27;\n add.u32 %r24, %r24, %r13;\n tcgen05.ld.sync.aligned.16x32bx2.x16.b32 {%c0,%c1,%c2,%c3,%c4,%c5,%c6,%c7,%c8,%c9,%c10,%c11,%c12,%c13,%c14,%c15}, [%r24], 16;\n tcgen05.wait::ld.sync.aligned;\n\n // Reduce row maxima and retain the three nontrivial output rescaling factors.\n max.f32 %t0, %c0, %c1; max.f32 %t1, %c2, %c3;\n max.f32 %t2, %c4, %c5; max.f32 %t3, %c6, %c7;\n max.f32 %t4, %c8, %c9; max.f32 %t5, %c10, %c11;\n max.f32 %t6, %c12, %c13; max.f32 %t7, %c14, %c15;\n max.f32 %t0, %t0, %t1; max.f32 %t1, %t2, %t3;\n max.f32 %t2, %t4, %t5; max.f32 %t3, %t6, %t7;\n max.f32 %t0, %t0, %t1; max.f32 %t1, %t2, %t3;\n max.f32 %t0, %t0, %t1;\n shfl.sync.bfly.b32 %z, %t0, 16, 31, -1;\n max.f32 %mx, %t0, %z; mul.f32 %mx, %mx, 0f3E38AA3B;\n max.f32 %mx, %mx, %l; sub.f32 %a, %m, %mx; ex2.approx.f32 %a, %a;\n mov.f32 %sc0, %sc1; mov.f32 %sc1, %sc2; mov.f32 %sc2, %a;\n\n // Packed float32 multiply-adds form the scaled exponential arguments.\n neg.f32 %z, %mx; mov.b64 %fc, {%z,%z}; mov.b64 %fs, 0x3E38AA3B3E38AA3B;\n mov.b64 %fa, {%c0,%c1}; fma.rn.f32x2 %fa, %fa, %fs, %fc; mov.b64 {%c0,%c1}, %fa;\n ex2.approx.f32 %c0, %c0; ex2.approx.f32 %c1, %c1;\n mov.b64 %fa, {%c2,%c3}; fma.rn.f32x2 %fa, %fa, %fs, %fc; mov.b64 {%c2,%c3}, %fa;\n ex2.approx.f32 %c2, %c2; ex2.approx.f32 %c3, %c3;\n mov.b64 %fa, {%c4,%c5}; fma.rn.f32x2 %fa, %fa, %fs, %fc; mov.b64 {%c4,%c5}, %fa;\n ex2.approx.f32 %c4, %c4; ex2.approx.f32 %c5, %c5;\n mov.b64 %fa, {%c6,%c7}; fma.rn.f32x2 %fa, %fa, %fs, %fc; mov.b64 {%c6,%c7}, %fa;\n ex2.approx.f32 %c6, %c6; ex2.approx.f32 %c7, %c7;\n mov.b64 %fa, {%c8,%c9}; fma.rn.f32x2 %fa, %fa, %fs, %fc; mov.b64 {%c8,%c9}, %fa;\n ex2.approx.f32 %c8, %c8; ex2.approx.f32 %c9, %c9;\n mov.b64 %fa, {%c10,%c11}; fma.rn.f32x2 %fa, %fa, %fs, %fc; mov.b64 {%c10,%c11}, %fa;\n ex2.approx.f32 %c10, %c10; ex2.approx.f32 %c11, %c11;\n mov.b64 %fa, {%c12,%c13}; fma.rn.f32x2 %fa, %fa, %fs, %fc; mov.b64 {%c12,%c13}, %fa;\n ex2.approx.f32 %c12, %c12; ex2.approx.f32 %c13, %c13;\n mov.b64 %fa, {%c14,%c15}; fma.rn.f32x2 %fa, %fa, %fs, %fc; mov.b64 {%c14,%c15}, %fa;\n ex2.approx.f32 %c14, %c14; ex2.approx.f32 %c15, %c15;\n\n // Update log-sum-exp using unrounded probabilities.\n add.f32 %t0, %c0, %c1; add.f32 %t1, %c2, %c3;\n add.f32 %t2, %c4, %c5; add.f32 %t3, %c6, %c7;\n add.f32 %t4, %c8, %c9; add.f32 %t5, %c10, %c11;\n add.f32 %t6, %c12, %c13; add.f32 %t7, %c14, %c15;\n add.f32 %t0, %t0, %t1; add.f32 %t1, %t2, %t3;\n add.f32 %t2, %t4, %t5; add.f32 %t3, %t6, %t7;\n add.f32 %t0, %t0, %t1; add.f32 %t1, %t2, %t3;\n add.f32 %t0, %t0, %t1;\n shfl.sync.bfly.b32 %z, %t0, 16, 31, -1;\n add.f32 %sum, %t0, %z; sub.f32 %old, %l, %mx;\n ex2.approx.f32 %old, %old; add.f32 %sum, %sum, %old;\n lg2.approx.f32 %z, %sum; add.f32 %l, %z, %mx; mov.f32 %m, %mx;\n\n // Round P to the value dtype and store its compact 64-byte-swizzled tile.\n cvt.rn.f16x2.f32 %h0, %c1, %c0; cvt.rn.f16x2.f32 %h1, %c3, %c2;\n cvt.rn.f16x2.f32 %h2, %c5, %c4; cvt.rn.f16x2.f32 %h3, %c7, %c6;\n cvt.rn.f16x2.f32 %h4, %c9, %c8; cvt.rn.f16x2.f32 %h5, %c11, %c10;\n cvt.rn.f16x2.f32 %h6, %c13, %c12; cvt.rn.f16x2.f32 %h7, %c15, %c14;\n xor.b32 %r24, %r20, 0; add.u32 %r24, %r24, %r21; add.u32 %r24, %r24, %r29;\n st.shared.v4.b32 [%r24], {%h0,%h1,%h2,%h3};\n xor.b32 %r24, %r20, 16; add.u32 %r24, %r24, %r21; add.u32 %r24, %r24, %r29;\n st.shared.v4.b32 [%r24], {%h4,%h5,%h6,%h7};\n add.u32 %r22, %r22, 32; add.u32 %r29, %r29, 4096;\n setp.lt.u32 %pl, %r22, 128; @%pl bra LOOP_N;\n\n // Wait for V and publish all P tiles before reusing score tensor memory.\n cp.async.wait_group 0; tcgen05.fence::before_thread_sync;\n fence.proxy.async.shared::cta; bar.sync 0; tcgen05.fence::after_thread_sync;\n\n // Store natural-log LSE and retain the final output normalizer.\n sub.f32 %norm, %m, %l; ex2.approx.f32 %norm, %norm;\n mul.f32 %l, %l, 0f3F317218;\n mul.wide.u32 %rd5, %r18, 4; add.u64 %rd5, %rd4, %rd5;\n setp.eq.u32 %pd, %r19, 0; @%pd st.global.f32 [%rd5], %l;\n\n // Launch the first two value products into separate tensor-memory halves.\n add.u64 %da, %dp, 0; add.u64 %db, %dv, 0;\n @%p0 tcgen05.mma.cta_group::1.kind::f16 [%r12], %da, %db, %r17, %pf;\n add.u64 %da, %da, 2; add.u64 %db, %db, 128;\n @%p0 tcgen05.mma.cta_group::1.kind::f16 [%r12], %da, %db, %r17, %pt;\n @%p0 tcgen05.commit.cta_group::1.mbarrier::arrive::one.shared::cluster.b64 [%r6];\n add.u64 %da, %dp, 256; add.u64 %db, %dv, 256;\n @%p0 tcgen05.mma.cta_group::1.kind::f16 [%r15], %da, %db, %r17, %pf;\n add.u64 %da, %da, 2; add.u64 %db, %db, 128;\n @%p0 tcgen05.mma.cta_group::1.kind::f16 [%r15], %da, %db, %r17, %pt;\n @%p0 tcgen05.commit.cta_group::1.mbarrier::arrive::one.shared::cluster.b64 [%r28];\n\n // Load the first result while the second product runs.\nWAIT_V0:\n mbarrier.try_wait.parity.acquire.cta.shared::cta.b64 %pc, [%r6], 1;\n @!%pc bra WAIT_V0; tcgen05.fence::after_thread_sync;\n add.u32 %r24, %r13, 0;\n tcgen05.ld.sync.aligned.16x32bx2.x16.b32 {%o0,%o1,%o2,%o3,%o4,%o5,%o6,%o7,%o8,%o9,%o10,%o11,%o12,%o13,%o14,%o15}, [%r24], 32;\n tcgen05.wait::ld.sync.aligned; add.u32 %r24, %r13, 16;\n tcgen05.ld.sync.aligned.16x32bx2.x16.b32 {%o16,%o17,%o18,%o19,%o20,%o21,%o22,%o23,%o24,%o25,%o26,%o27,%o28,%o29,%o30,%o31}, [%r24], 32;\n tcgen05.wait::ld.sync.aligned;\n tcgen05.fence::before_thread_sync; bar.sync 0; tcgen05.fence::after_thread_sync;\n\n // Reuse the consumed tensor half for keys 64 through 95.\n add.u64 %da, %dp, 512; add.u64 %db, %dv, 512;\n @%p0 tcgen05.mma.cta_group::1.kind::f16 [%r12], %da, %db, %r17, %pf;\n add.u64 %da, %da, 2; add.u64 %db, %db, 128;\n @%p0 tcgen05.mma.cta_group::1.kind::f16 [%r12], %da, %db, %r17, %pt;\n @%p0 tcgen05.commit.cta_group::1.mbarrier::arrive::one.shared::cluster.b64 [%r6];\n\n // Apply the second tile's online rescaling and add its value product.\nWAIT_V1:\n mbarrier.try_wait.parity.acquire.cta.shared::cta.b64 %pc, [%r28], 0;\n @!%pc bra WAIT_V1; tcgen05.fence::after_thread_sync;\n add.u32 %r24, %r14, 0;\n tcgen05.ld.sync.aligned.16x32bx2.x16.b32 {%u0,%u1,%u2,%u3,%u4,%u5,%u6,%u7,%u8,%u9,%u10,%u11,%u12,%u13,%u14,%u15}, [%r24], 32;\n tcgen05.wait::ld.sync.aligned; mov.b64 %fs, {%sc0,%sc0};\n mov.b64 %fa, {%o0,%o1}; mov.b64 %fb, {%u0,%u1}; fma.rn.f32x2 %fa, %fa, %fs, %fb; mov.b64 {%o0,%o1}, %fa;\n mov.b64 %fa, {%o2,%o3}; mov.b64 %fb, {%u2,%u3}; fma.rn.f32x2 %fa, %fa, %fs, %fb; mov.b64 {%o2,%o3}, %fa;\n mov.b64 %fa, {%o4,%o5}; mov.b64 %fb, {%u4,%u5}; fma.rn.f32x2 %fa, %fa, %fs, %fb; mov.b64 {%o4,%o5}, %fa;\n mov.b64 %fa, {%o6,%o7}; mov.b64 %fb, {%u6,%u7}; fma.rn.f32x2 %fa, %fa, %fs, %fb; mov.b64 {%o6,%o7}, %fa;\n mov.b64 %fa, {%o8,%o9}; mov.b64 %fb, {%u8,%u9}; fma.rn.f32x2 %fa, %fa, %fs, %fb; mov.b64 {%o8,%o9}, %fa;\n mov.b64 %fa, {%o10,%o11}; mov.b64 %fb, {%u10,%u11}; fma.rn.f32x2 %fa, %fa, %fs, %fb; mov.b64 {%o10,%o11}, %fa;\n mov.b64 %fa, {%o12,%o13}; mov.b64 %fb, {%u12,%u13}; fma.rn.f32x2 %fa, %fa, %fs, %fb; mov.b64 {%o12,%o13}, %fa;\n mov.b64 %fa, {%o14,%o15}; mov.b64 %fb, {%u14,%u15}; fma.rn.f32x2 %fa, %fa, %fs, %fb; mov.b64 {%o14,%o15}, %fa;\n add.u32 %r24, %r14, 16;\n tcgen05.ld.sync.aligned.16x32bx2.x16.b32 {%u0,%u1,%u2,%u3,%u4,%u5,%u6,%u7,%u8,%u9,%u10,%u11,%u12,%u13,%u14,%u15}, [%r24], 32;\n tcgen05.wait::ld.sync.aligned;\n mov.b64 %fa, {%o16,%o17}; mov.b64 %fb, {%u0,%u1}; fma.rn.f32x2 %fa, %fa, %fs, %fb; mov.b64 {%o16,%o17}, %fa;\n mov.b64 %fa, {%o18,%o19}; mov.b64 %fb, {%u2,%u3}; fma.rn.f32x2 %fa, %fa, %fs, %fb; mov.b64 {%o18,%o19}, %fa;\n mov.b64 %fa, {%o20,%o21}; mov.b64 %fb, {%u4,%u5}; fma.rn.f32x2 %fa, %fa, %fs, %fb; mov.b64 {%o20,%o21}, %fa;\n mov.b64 %fa, {%o22,%o23}; mov.b64 %fb, {%u6,%u7}; fma.rn.f32x2 %fa, %fa, %fs, %fb; mov.b64 {%o22,%o23}, %fa;\n mov.b64 %fa, {%o24,%o25}; mov.b64 %fb, {%u8,%u9}; fma.rn.f32x2 %fa, %fa, %fs, %fb; mov.b64 {%o24,%o25}, %fa;\n mov.b64 %fa, {%o26,%o27}; mov.b64 %fb, {%u10,%u11}; fma.rn.f32x2 %fa, %fa, %fs, %fb; mov.b64 {%o26,%o27}, %fa;\n mov.b64 %fa, {%o28,%o29}; mov.b64 %fb, {%u12,%u13}; fma.rn.f32x2 %fa, %fa, %fs, %fb; mov.b64 {%o28,%o29}, %fa;\n mov.b64 %fa, {%o30,%o31}; mov.b64 %fb, {%u14,%u15}; fma.rn.f32x2 %fa, %fa, %fs, %fb; mov.b64 {%o30,%o31}, %fa;\n tcgen05.fence::before_thread_sync; bar.sync 0; tcgen05.fence::after_thread_sync;\n\n // Reuse the other tensor half for keys 96 through 127.\n add.u64 %da, %dp, 768; add.u64 %db, %dv, 768;\n @%p0 tcgen05.mma.cta_group::1.kind::f16 [%r15], %da, %db, %r17, %pf;\n add.u64 %da, %da, 2; add.u64 %db, %db, 128;\n @%p0 tcgen05.mma.cta_group::1.kind::f16 [%r15], %da, %db, %r17, %pt;\n @%p0 tcgen05.commit.cta_group::1.mbarrier::arrive::one.shared::cluster.b64 [%r28];\n\n // Apply the third tile's online rescaling and add its value product.\nWAIT_V2:\n mbarrier.try_wait.parity.acquire.cta.shared::cta.b64 %pc, [%r6], 0;\n @!%pc bra WAIT_V2; tcgen05.fence::after_thread_sync;\n add.u32 %r24, %r13, 0;\n tcgen05.ld.sync.aligned.16x32bx2.x16.b32 {%u0,%u1,%u2,%u3,%u4,%u5,%u6,%u7,%u8,%u9,%u10,%u11,%u12,%u13,%u14,%u15}, [%r24], 32;\n tcgen05.wait::ld.sync.aligned; mov.b64 %fs, {%sc1,%sc1};\n mov.b64 %fa, {%o0,%o1}; mov.b64 %fb, {%u0,%u1}; fma.rn.f32x2 %fa, %fa, %fs, %fb; mov.b64 {%o0,%o1}, %fa;\n mov.b64 %fa, {%o2,%o3}; mov.b64 %fb, {%u2,%u3}; fma.rn.f32x2 %fa, %fa, %fs, %fb; mov.b64 {%o2,%o3}, %fa;\n mov.b64 %fa, {%o4,%o5}; mov.b64 %fb, {%u4,%u5}; fma.rn.f32x2 %fa, %fa, %fs, %fb; mov.b64 {%o4,%o5}, %fa;\n mov.b64 %fa, {%o6,%o7}; mov.b64 %fb, {%u6,%u7}; fma.rn.f32x2 %fa, %fa, %fs, %fb; mov.b64 {%o6,%o7}, %fa;\n mov.b64 %fa, {%o8,%o9}; mov.b64 %fb, {%u8,%u9}; fma.rn.f32x2 %fa, %fa, %fs, %fb; mov.b64 {%o8,%o9}, %fa;\n mov.b64 %fa, {%o10,%o11}; mov.b64 %fb, {%u10,%u11}; fma.rn.f32x2 %fa, %fa, %fs, %fb; mov.b64 {%o10,%o11}, %fa;\n mov.b64 %fa, {%o12,%o13}; mov.b64 %fb, {%u12,%u13}; fma.rn.f32x2 %fa, %fa, %fs, %fb; mov.b64 {%o12,%o13}, %fa;\n mov.b64 %fa, {%o14,%o15}; mov.b64 %fb, {%u14,%u15}; fma.rn.f32x2 %fa, %fa, %fs, %fb; mov.b64 {%o14,%o15}, %fa;\n add.u32 %r24, %r13, 16;\n tcgen05.ld.sync.aligned.16x32bx2.x16.b32 {%u0,%u1,%u2,%u3,%u4,%u5,%u6,%u7,%u8,%u9,%u10,%u11,%u12,%u13,%u14,%u15}, [%r24], 32;\n tcgen05.wait::ld.sync.aligned;\n mov.b64 %fa, {%o16,%o17}; mov.b64 %fb, {%u0,%u1}; fma.rn.f32x2 %fa, %fa, %fs, %fb; mov.b64 {%o16,%o17}, %fa;\n mov.b64 %fa, {%o18,%o19}; mov.b64 %fb, {%u2,%u3}; fma.rn.f32x2 %fa, %fa, %fs, %fb; mov.b64 {%o18,%o19}, %fa;\n mov.b64 %fa, {%o20,%o21}; mov.b64 %fb, {%u4,%u5}; fma.rn.f32x2 %fa, %fa, %fs, %fb; mov.b64 {%o20,%o21}, %fa;\n mov.b64 %fa, {%o22,%o23}; mov.b64 %fb, {%u6,%u7}; fma.rn.f32x2 %fa, %fa, %fs, %fb; mov.b64 {%o22,%o23}, %fa;\n mov.b64 %fa, {%o24,%o25}; mov.b64 %fb, {%u8,%u9}; fma.rn.f32x2 %fa, %fa, %fs, %fb; mov.b64 {%o24,%o25}, %fa;\n mov.b64 %fa, {%o26,%o27}; mov.b64 %fb, {%u10,%u11}; fma.rn.f32x2 %fa, %fa, %fs, %fb; mov.b64 {%o26,%o27}, %fa;\n mov.b64 %fa, {%o28,%o29}; mov.b64 %fb, {%u12,%u13}; fma.rn.f32x2 %fa, %fa, %fs, %fb; mov.b64 {%o28,%o29}, %fa;\n mov.b64 %fa, {%o30,%o31}; mov.b64 %fb, {%u14,%u15}; fma.rn.f32x2 %fa, %fa, %fs, %fb; mov.b64 {%o30,%o31}, %fa;\n\n // Drain the last value product and apply the final online rescaling.\nWAIT_V3:\n mbarrier.try_wait.parity.acquire.cta.shared::cta.b64 %pc, [%r28], 1;\n @!%pc bra WAIT_V3; tcgen05.fence::after_thread_sync;\n add.u32 %r24, %r14, 0;\n tcgen05.ld.sync.aligned.16x32bx2.x16.b32 {%u0,%u1,%u2,%u3,%u4,%u5,%u6,%u7,%u8,%u9,%u10,%u11,%u12,%u13,%u14,%u15}, [%r24], 32;\n tcgen05.wait::ld.sync.aligned; mov.b64 %fs, {%sc2,%sc2};\n mov.b64 %fa, {%o0,%o1}; mov.b64 %fb, {%u0,%u1}; fma.rn.f32x2 %fa, %fa, %fs, %fb; mov.b64 {%o0,%o1}, %fa;\n mov.b64 %fa, {%o2,%o3}; mov.b64 %fb, {%u2,%u3}; fma.rn.f32x2 %fa, %fa, %fs, %fb; mov.b64 {%o2,%o3}, %fa;\n mov.b64 %fa, {%o4,%o5}; mov.b64 %fb, {%u4,%u5}; fma.rn.f32x2 %fa, %fa, %fs, %fb; mov.b64 {%o4,%o5}, %fa;\n mov.b64 %fa, {%o6,%o7}; mov.b64 %fb, {%u6,%u7}; fma.rn.f32x2 %fa, %fa, %fs, %fb; mov.b64 {%o6,%o7}, %fa;\n mov.b64 %fa, {%o8,%o9}; mov.b64 %fb, {%u8,%u9}; fma.rn.f32x2 %fa, %fa, %fs, %fb; mov.b64 {%o8,%o9}, %fa;\n mov.b64 %fa, {%o10,%o11}; mov.b64 %fb, {%u10,%u11}; fma.rn.f32x2 %fa, %fa, %fs, %fb; mov.b64 {%o10,%o11}, %fa;\n mov.b64 %fa, {%o12,%o13}; mov.b64 %fb, {%u12,%u13}; fma.rn.f32x2 %fa, %fa, %fs, %fb; mov.b64 {%o12,%o13}, %fa;\n mov.b64 %fa, {%o14,%o15}; mov.b64 %fb, {%u14,%u15}; fma.rn.f32x2 %fa, %fa, %fs, %fb; mov.b64 {%o14,%o15}, %fa;\n add.u32 %r24, %r14, 16;\n tcgen05.ld.sync.aligned.16x32bx2.x16.b32 {%u0,%u1,%u2,%u3,%u4,%u5,%u6,%u7,%u8,%u9,%u10,%u11,%u12,%u13,%u14,%u15}, [%r24], 32;\n tcgen05.wait::ld.sync.aligned;\n mov.b64 %fa, {%o16,%o17}; mov.b64 %fb, {%u0,%u1}; fma.rn.f32x2 %fa, %fa, %fs, %fb; mov.b64 {%o16,%o17}, %fa;\n mov.b64 %fa, {%o18,%o19}; mov.b64 %fb, {%u2,%u3}; fma.rn.f32x2 %fa, %fa, %fs, %fb; mov.b64 {%o18,%o19}, %fa;\n mov.b64 %fa, {%o20,%o21}; mov.b64 %fb, {%u4,%u5}; fma.rn.f32x2 %fa, %fa, %fs, %fb; mov.b64 {%o20,%o21}, %fa;\n mov.b64 %fa, {%o22,%o23}; mov.b64 %fb, {%u6,%u7}; fma.rn.f32x2 %fa, %fa, %fs, %fb; mov.b64 {%o22,%o23}, %fa;\n mov.b64 %fa, {%o24,%o25}; mov.b64 %fb, {%u8,%u9}; fma.rn.f32x2 %fa, %fa, %fs, %fb; mov.b64 {%o24,%o25}, %fa;\n mov.b64 %fa, {%o26,%o27}; mov.b64 %fb, {%u10,%u11}; fma.rn.f32x2 %fa, %fa, %fs, %fb; mov.b64 {%o26,%o27}, %fa;\n mov.b64 %fa, {%o28,%o29}; mov.b64 %fb, {%u12,%u13}; fma.rn.f32x2 %fa, %fa, %fs, %fb; mov.b64 {%o28,%o29}, %fa;\n mov.b64 %fa, {%o30,%o31}; mov.b64 %fb, {%u14,%u15}; fma.rn.f32x2 %fa, %fa, %fs, %fb; mov.b64 {%o30,%o31}, %fa;\n\n // Reuse consumed P storage to rearrange output for coalesced global stores.\n shl.b32 %r25, %r18, 7; mad.lo.u32 %r25, %r19, 2, %r25;\n shr.u32 %r26, %r25, 3; and.b32 %r26, %r26, 112;\n xor.b32 %r25, %r25, %r26; mov.b64 %fs, {%norm,%norm};\n\n // Normalize float32 pairs and pack groups of eight half-precision features.\n mov.b64 %fa, {%o0,%o1}; mul.rn.f32x2 %fa, %fa, %fs; mov.b64 {%o0,%o1}, %fa;\n mov.b64 %fa, {%o2,%o3}; mul.rn.f32x2 %fa, %fa, %fs; mov.b64 {%o2,%o3}, %fa;\n mov.b64 %fa, {%o4,%o5}; mul.rn.f32x2 %fa, %fa, %fs; mov.b64 {%o4,%o5}, %fa;\n mov.b64 %fa, {%o6,%o7}; mul.rn.f32x2 %fa, %fa, %fs; mov.b64 {%o6,%o7}, %fa;\n cvt.rn.f16x2.f32 %h0, %o1, %o0; cvt.rn.f16x2.f32 %h1, %o3, %o2;\n cvt.rn.f16x2.f32 %h2, %o5, %o4; cvt.rn.f16x2.f32 %h3, %o7, %o6;\n xor.b32 %r26, %r25, 0; add.u32 %r26, %r26, %r21;\n st.shared.v4.b32 [%r26], {%h0,%h1,%h2,%h3};\n mov.b64 %fa, {%o8,%o9}; mul.rn.f32x2 %fa, %fa, %fs; mov.b64 {%o8,%o9}, %fa;\n mov.b64 %fa, {%o10,%o11}; mul.rn.f32x2 %fa, %fa, %fs; mov.b64 {%o10,%o11}, %fa;\n mov.b64 %fa, {%o12,%o13}; mul.rn.f32x2 %fa, %fa, %fs; mov.b64 {%o12,%o13}, %fa;\n mov.b64 %fa, {%o14,%o15}; mul.rn.f32x2 %fa, %fa, %fs; mov.b64 {%o14,%o15}, %fa;\n cvt.rn.f16x2.f32 %h0, %o9, %o8; cvt.rn.f16x2.f32 %h1, %o11, %o10;\n cvt.rn.f16x2.f32 %h2, %o13, %o12; cvt.rn.f16x2.f32 %h3, %o15, %o14;\n xor.b32 %r26, %r25, 16; add.u32 %r26, %r26, %r21;\n st.shared.v4.b32 [%r26], {%h0,%h1,%h2,%h3};\n mov.b64 %fa, {%o16,%o17}; mul.rn.f32x2 %fa, %fa, %fs; mov.b64 {%o16,%o17}, %fa;\n mov.b64 %fa, {%o18,%o19}; mul.rn.f32x2 %fa, %fa, %fs; mov.b64 {%o18,%o19}, %fa;\n mov.b64 %fa, {%o20,%o21}; mul.rn.f32x2 %fa, %fa, %fs; mov.b64 {%o20,%o21}, %fa;\n mov.b64 %fa, {%o22,%o23}; mul.rn.f32x2 %fa, %fa, %fs; mov.b64 {%o22,%o23}, %fa;\n cvt.rn.f16x2.f32 %h0, %o17, %o16; cvt.rn.f16x2.f32 %h1, %o19, %o18;\n cvt.rn.f16x2.f32 %h2, %o21, %o20; cvt.rn.f16x2.f32 %h3, %o23, %o22;\n xor.b32 %r26, %r25, 32; add.u32 %r26, %r26, %r21;\n st.shared.v4.b32 [%r26], {%h0,%h1,%h2,%h3};\n mov.b64 %fa, {%o24,%o25}; mul.rn.f32x2 %fa, %fa, %fs; mov.b64 {%o24,%o25}, %fa;\n mov.b64 %fa, {%o26,%o27}; mul.rn.f32x2 %fa, %fa, %fs; mov.b64 {%o26,%o27}, %fa;\n mov.b64 %fa, {%o28,%o29}; mul.rn.f32x2 %fa, %fa, %fs; mov.b64 {%o28,%o29}, %fa;\n mov.b64 %fa, {%o30,%o31}; mul.rn.f32x2 %fa, %fa, %fs; mov.b64 {%o30,%o31}, %fa;\n cvt.rn.f16x2.f32 %h0, %o25, %o24; cvt.rn.f16x2.f32 %h1, %o27, %o26;\n cvt.rn.f16x2.f32 %h2, %o29, %o28; cvt.rn.f16x2.f32 %h3, %o31, %o30;\n xor.b32 %r26, %r25, 48; add.u32 %r26, %r26, %r21;\n st.shared.v4.b32 [%r26], {%h0,%h1,%h2,%h3};\n bar.warp.sync 0xffffffff;\n\n // Each warp writes its 16 rows as four contiguous 512-byte strips.\n shl.b32 %r25, %r4, 11; mad.lo.u32 %r25, %r3, 16, %r25;\n cvt.u64.u32 %rd5, %r25; add.u64 %rd5, %rd3, %rd5;\n shr.u32 %r26, %r25, 3; and.b32 %r26, %r26, 112; xor.b32 %r25, %r25, %r26;\n xor.b32 %r26, %r25, 0; add.u32 %r26, %r26, %r21;\n ld.shared.v4.b32 {%h0,%h1,%h2,%h3}, [%r26]; st.global.v4.b32 [%rd5+0], {%h0,%h1,%h2,%h3};\n xor.b32 %r26, %r25, 576; add.u32 %r26, %r26, %r21;\n ld.shared.v4.b32 {%h0,%h1,%h2,%h3}, [%r26]; st.global.v4.b32 [%rd5+512], {%h0,%h1,%h2,%h3};\n xor.b32 %r26, %r25, 1024; add.u32 %r26, %r26, %r21;\n ld.shared.v4.b32 {%h0,%h1,%h2,%h3}, [%r26]; st.global.v4.b32 [%rd5+1024], {%h0,%h1,%h2,%h3};\n xor.b32 %r26, %r25, 1600; add.u32 %r26, %r26, %r21;\n ld.shared.v4.b32 {%h0,%h1,%h2,%h3}, [%r26]; st.global.v4.b32 [%rd5+1536], {%h0,%h1,%h2,%h3};\n\n // Release tensor memory only after all warp loads have completed.\n tcgen05.fence::before_thread_sync; bar.sync 0;\n @%pw tcgen05.dealloc.cta_group::1.sync.aligned.b32 %r12, 64;\n ret;\n}\n",
+    "num_threads_x": 128,
+    "num_threads_y": 1,
+    "num_threads_z": 1,
+    "difficulties": [
+      "Explicit immediate lane masks on tcgen05.mma caused argument-mismatch compilation errors.",
+      "The initial 16x256b tensor-memory fragment mapping failed numerical verification.",
+      "The A-collector reuse variant failed numerical verification."
+    ]
+  },
+  "evaluation": {
+    "kernel_name": "FlashAttentionNeurIPS2022Forward",
+    "git_commit_hash": "9df594ab619026382c21015669f321ba2d3d1a93",
+    "compiles": true,
+    "correct": true,
+    "message": "Compiled, passed correctness, benchmarked successfully",
+    "triton_p20": 0.08799807950854302,
+    "triton_p50": 0.08810240030288696,
+    "triton_p80": 0.08899775967001915,
+    "triton_p90": 0.089243840649724,
+    "triton_p95": 0.08987545669078827,
+    "triton_p99": 0.0907070285141468,
+    "p20": 0.0634796790778637,
+    "p50": 0.0644851191341877,
+    "p80": 0.06562368050217629,
+    "p90": 0.06824985656142236,
+    "p95": 0.07202131392806768,
+    "p99": 0.07372653037011624,
+    "speedup_vs_triton": 1.3662438944953152,
+    "compile_output": "Command: /workspace/triton_ptx_client/triton_ptx/triton/third_party/nvidia/backend/bin/ptxas-blackwell -arch=sm_100a -v --warning-as-error /tmp/triton-ptxas-a9c36swg/kernel.ptx -o /tmp/triton-ptxas-a9c36swg/kernel.cubin\n\nReturn code: 0\n\nSTDOUT:\n\n\nSTDERR:\nptxas-blackwell info    : 0 bytes gmem\nptxas-blackwell info    : Compiling entry function 'kernel' for 'sm_100a'\nptxas-blackwell info    : Function properties for kernel\n    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads\nptxas-blackwell info    : Used 66 registers, used 1 barriers\nptxas-blackwell info    : Compile time = 30.965 ms",
+    "compile_error": "",
+    "timing_error": "",
+    "ncu_report": {
+      "available": true,
+      "summary": {},
+      "metrics": {},
+      "error": "",
+      "return_code": 1
+    },
+    "sanitizer_report": {
+      "available": true,
+      "clean": true,
+      "tool": "all",
+      "reports": [
+        {
+          "available": true,
+          "clean": true,
+          "tool": "memcheck",
+          "returncode": 0,
+          "error_count": 0,
+          "diagnostics": [],
+          "ptx_locations": []
+        },
+        {
+          "available": true,
+          "clean": true,
+          "tool": "racecheck",
+          "returncode": 0,
+          "error_count": 0,
+          "diagnostics": [],
+          "ptx_locations": []
+        },
+        {
+          "available": true,
+          "clean": true,
+          "tool": "synccheck",
+          "returncode": 0,
+          "error_count": 0,
+          "diagnostics": [],
+          "ptx_locations": []
+        },
+        {
+          "available": true,
+          "clean": true,
+          "tool": "initcheck",
+          "returncode": 0,
+          "error_count": 0,
+          "diagnostics": [],
+          "ptx_locations": []
+        }
+      ]
+    },
+    "verifier_report": {
+      "status": "passed",
+      "seed": 42,
+      "iteration": 999
+    },
+    "passed": true
+  },
+  "autotune_metrics": {
+    "operator": "FlashAttentionNeurIPS2022Forward",
+    "constexpr_values": {
+      "BIAS_TYPE": "none",
+      "stride_ob": 524288,
+      "BLOCK_HEADDIM": 64,
+      "CACHE_KEY_SEQLEN_K": 128,
+      "stride_kb": 524288,
+      "stride_kn": 64,
+      "stride_vb": 524288,
+      "stride_oh": 8192,
+      "stride_vh": 8192,
+      "stride_bb": 0,
+      "stride_bm": 0,
+      "softmax_scale": 0.125,
+      "stride_kh": 8192,
+      "nheads": 64,
+      "stride_qb": 524288,
+      "stride_vn": 64,
+      "BLOCK_M": 64,
+      "seqlen_q": 128,
+      "seqlen_q_rounded": 128,
+      "stride_bh": 0,
+      "stride_qh": 8192,
+      "seqlen_k": 128,
+      "stride_qm": 64,
+      "stride_om": 64,
+      "CACHE_KEY_SEQLEN_Q": 128,
+      "IS_CAUSAL": false,
+      "BLOCK_N": 32,
+      "headdim": 64
+    },
+    "selected_config": {
+      "block_m": 64,
+      "block_n": 32,
+      "num_warps": 4,
+      "num_stages": 3
+    },
+    "tuning_result": {
+      "parameters": {
+        "block_m": 64,
+        "block_n": 32,
+        "num_warps": 4,
+        "num_stages": 3
+      },
+      "latency_ms": 0.08840898800454916,
+      "evaluated_configurations": 54,
+      "rejected_configurations": 0
+    }
+  },
+  "gpu_type": "NVIDIA B200",
+  "run_cost_usd_so_far": 12.056432999999998
+}
