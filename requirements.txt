@@ -1,0 +1,6 @@
+anthropic
+matplotlib
+openai
+pydantic
+ruff
+tiktoken

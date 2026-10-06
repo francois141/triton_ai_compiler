@@ -1,0 +1,22 @@
+[project]
+name = "triton_ai_compiler"
+version = "0.1.0"
+requires-python = ">=3.10,<3.15"
+dependencies = [
+    "anthropic",
+    "matplotlib",
+    "openai",
+    "pydantic",
+    "tiktoken",
+    "ptx_gym",
+    "torch",
+]
+
+[tool.uv]
+package = false
+# ptx_gym ships the patched triton package, so keep torch from installing stock
+# Triton over it.
+override-dependencies = ["triton; sys_platform == 'never'"]
+
+[tool.uv.sources]
+ptx_gym = { path = "ptx_gym", editable = true }

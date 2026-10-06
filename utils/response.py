@@ -1,0 +1,1006 @@
+import json
+import subprocess
+import tempfile
+import time
+from dataclasses import dataclass
+from functools import cache
+from pathlib import Path
+
+from anthropic import transform_schema
+from openai import NotFoundError
+
+from prompts.blocks import anthropic_system_prompt, system_prompt
+from ptx_gym import Payload, TritonPTXCandidateEvaluator, resolve_kernel
+from skills.load_ptx import NCU_REPORT_SKILL_DIR, PTX_SKILL_DIR
+
+from .cost import (
+    COST_LOG_PATH,
+    append_cost_log,
+    append_pipeline_cost_summary,
+    read_cost_total,
+)
+from .response_format import PtxKernel
+from .traces import autotune_metrics as collect_autotune_metrics
+from .traces import ncu_instruction_issues, record_tool_call
+
+RESPONSE_RETRY_ATTEMPTS = 6
+ANTHROPIC_MAX_TOKENS = 16_384
+ANTHROPIC_MAX_CONTINUATIONS = 3
+ANTHROPIC_SKILLS_BETA = "skills-2025-10-02"
+ANTHROPIC_CODE_EXECUTION_TOOL = {
+    "type": "code_execution_20260521",
+    "name": "code_execution",
+}
+PATCH_WORKFLOW_TOOL_NAMES = frozenset({"apply_ptx_patch", "verify_current_ptx"})
+
+
+class BudgetExceededError(RuntimeError):
+    pass
+
+
+def _raise_if_budget_exhausted(cost_log_path, max_budget_usd):
+    if max_budget_usd is None or cost_log_path is None:
+        return
+    spent = read_cost_total(Path(cost_log_path))
+    if spent >= max_budget_usd:
+        raise BudgetExceededError(
+            "Maximum budget reached after an API response and before a continuation "
+            f"(${spent:.6f} spent; ${max_budget_usd:.6f} configured)."
+        )
+
+
+@cache
+def _default_verifier_for_kernel(kernel_name):
+    return TritonPTXCandidateEvaluator(resolve_kernel(kernel_name))
+
+
+def verifier_for_kernel(
+    kernel_name,
+    autotune_metrics=None,
+    *,
+    enable_ncu_report=True,
+    enable_sanitizer=True,
+):
+    if autotune_metrics is None:
+        if enable_ncu_report and enable_sanitizer:
+            return _default_verifier_for_kernel(kernel_name)
+        return TritonPTXCandidateEvaluator(
+            resolve_kernel(kernel_name),
+            enable_ncu_report=enable_ncu_report,
+            enable_sanitizer=enable_sanitizer,
+        )
+
+    selected_config = autotune_metrics.get("selected_config")
+    if not isinstance(selected_config, dict):
+        raise TypeError("autotune_metrics must include a selected_config object.")
+    if not all(
+        isinstance(name, str) and isinstance(value, int)
+        for name, value in selected_config.items()
+    ):
+        raise ValueError("autotune_metrics selected_config must map names to integers.")
+
+    operator_cls = resolve_kernel(kernel_name)
+    operator = operator_cls(ptx={"tuning_config": selected_config})
+    operator.tuning_result = autotune_metrics.get("tuning_result")
+    return TritonPTXCandidateEvaluator(
+        operator_cls,
+        operator=operator,
+        enable_ncu_report=enable_ncu_report,
+        enable_sanitizer=enable_sanitizer,
+    )
+
+
+def _get_field(value, field_name):
+    if isinstance(value, dict):
+        return value.get(field_name)
+    return getattr(value, field_name, None)
+
+
+def _tools_for_request(tools, current_candidate):
+    if current_candidate is not None:
+        return tools
+    return [
+        tool
+        for tool in tools
+        if (tool.get("name") or tool.get("function", {}).get("name"))
+        not in PATCH_WORKFLOW_TOOL_NAMES
+    ]
+
+
+def _launch_verifier_output(evaluation, payload):
+    """Add compact source-correlated NCU diagnostics to verifier feedback."""
+    line_by_line = ncu_instruction_issues(payload.ptx, evaluation.ncu_report)
+    return evaluation.to_llm(ncu_line_by_line=line_by_line)
+
+
+def _run_ptx_tool(tool_name, arguments, verifier, workspace):
+    resulting_payload = None
+    verified_ptx = None
+    speedup_vs_triton = None
+    if tool_name == "launch_verifier":
+        payload = Payload.from_input(arguments)
+        evaluation = verifier.evaluate(payload)
+        output = _launch_verifier_output(evaluation, payload)
+        if evaluation.passed:
+            resulting_payload = arguments
+            verified_ptx = arguments["ptx"]
+            speedup_vs_triton = evaluation.speedup_vs_triton
+    elif tool_name == "apply_ptx_patch" and workspace is not None:
+        try:
+            output = json.dumps(workspace.apply_patch(arguments))
+            resulting_payload = workspace.candidate.model_dump(exclude_none=False)
+            verified_ptx = workspace.candidate.ptx
+        except ValueError as error:
+            output = json.dumps({"error": str(error)})
+    elif tool_name == "verify_current_ptx" and workspace is not None:
+        payload = Payload.from_input(workspace.candidate.model_dump())
+        evaluation = verifier.evaluate(payload)
+        output = _launch_verifier_output(evaluation, payload)
+        resulting_payload = workspace.candidate.model_dump(exclude_none=False)
+        if evaluation.passed:
+            verified_ptx = workspace.candidate.ptx
+            speedup_vs_triton = evaluation.speedup_vs_triton
+    else:
+        return None
+    return output, resulting_payload, verified_ptx, speedup_vs_triton
+
+
+def _format_tool_call(output_item):
+    item_type = _get_field(output_item, "type")
+    if not isinstance(item_type, str) or not item_type.endswith("_call"):
+        return None
+
+    tool_name = (
+        _get_field(output_item, "name")
+        or _get_field(output_item, "tool_name")
+        or _get_field(output_item, "server_label")
+        or item_type.removesuffix("_call")
+    )
+    call_id = _get_field(output_item, "call_id") or _get_field(output_item, "id")
+    status = _get_field(output_item, "status")
+    details = [f"tool={tool_name}"]
+    if call_id is not None:
+        details.append(f"id={call_id}")
+    if status is not None:
+        details.append(f"status={status}")
+    return ", ".join(details)
+
+
+def print_tool_calls(response):
+    output_items = _get_field(response, "output")
+    if output_items is None:
+        return
+    for output_item in output_items:
+        tool_call = _format_tool_call(output_item)
+        if tool_call is not None:
+            print(f"=== LLM called tool: {tool_call} ===", flush=True)
+
+
+def _append_response_cost(*, model, response, cost_log_path, pipeline):
+    cost = append_cost_log(
+        model=model,
+        response=response,
+        cost_log_path=COST_LOG_PATH,
+        pipeline=pipeline,
+    )
+    if cost_log_path is not None and Path(cost_log_path) != COST_LOG_PATH:
+        append_cost_log(
+            model=model,
+            response=response,
+            cost_log_path=cost_log_path,
+            pipeline=pipeline,
+        )
+    return cost
+
+
+def _append_pipeline_cost(*, pipeline, cost, cost_log_path):
+    append_pipeline_cost_summary(
+        pipeline=pipeline,
+        cost=cost,
+        cost_log_path=COST_LOG_PATH,
+    )
+    if Path(cost_log_path) != COST_LOG_PATH:
+        append_pipeline_cost_summary(
+            pipeline=pipeline,
+            cost=cost,
+            cost_log_path=cost_log_path,
+        )
+
+
+def _message_output_text(output_item):
+    if _get_field(output_item, "type") != "message":
+        return None
+    content_items = _get_field(output_item, "content")
+    if content_items is None:
+        return None
+    text_parts = [
+        text
+        for content_item in content_items
+        if _get_field(content_item, "type") == "output_text"
+        for text in [_get_field(content_item, "text")]
+        if isinstance(text, str)
+    ]
+    return "".join(text_parts) if text_parts else None
+
+
+def response_json_text(response):
+    output_items = _get_field(response, "output")
+    if output_items is None:
+        output_text = _get_field(response, "output_text")
+        if isinstance(output_text, str) and output_text:
+            return output_text
+        raise ValueError("Response did not contain output text.")
+
+    fallback_text = None
+    for output_item in output_items:
+        output_text = _message_output_text(output_item)
+        if output_text is None:
+            continue
+        if _get_field(output_item, "phase") == "final_answer":
+            return output_text
+        fallback_text = output_text
+    if fallback_text is None:
+        raise ValueError("Response did not contain message output text.")
+    return fallback_text
+
+
+@dataclass(slots=True)
+class _AnthropicResponse:
+    output_text: str
+    usage: object
+    response: object
+
+    def model_dump(self, mode="json"):
+        del mode
+        return {
+            "provider": "anthropic",
+            "output_text": self.output_text,
+            "response": _json_value(self.response),
+        }
+
+
+@dataclass(slots=True)
+class _OpenRouterResponse:
+    output_text: str
+    usage: object
+    response: object
+
+    def model_dump(self, mode="json"):
+        del mode
+        return {
+            "provider": "openrouter",
+            "output_text": self.output_text,
+            "response": _json_value(self.response),
+        }
+
+
+@dataclass(slots=True)
+class _OpenRouterStreamFunction:
+    name: str
+    arguments: str
+
+
+@dataclass(slots=True)
+class _OpenRouterStreamToolCall:
+    id: str
+    function: _OpenRouterStreamFunction
+
+
+@dataclass(slots=True)
+class _OpenRouterStreamMessage:
+    content: str | None
+    tool_calls: list[_OpenRouterStreamToolCall]
+    reasoning: str
+
+    def model_dump(self, exclude_none=True):
+        message = {"role": "assistant", "content": self.content}
+        if self.tool_calls:
+            message["tool_calls"] = [
+                {
+                    "id": tool_call.id,
+                    "type": "function",
+                    "function": {
+                        "name": tool_call.function.name,
+                        "arguments": tool_call.function.arguments,
+                    },
+                }
+                for tool_call in self.tool_calls
+            ]
+        if self.reasoning:
+            message["reasoning"] = self.reasoning
+        if exclude_none:
+            return {key: value for key, value in message.items() if value is not None}
+        return message
+
+
+@dataclass(slots=True)
+class _OpenRouterStreamResponse:
+    usage: object
+    message: _OpenRouterStreamMessage
+
+    def model_dump(self, mode="json"):
+        del mode
+        return {"usage": _json_value(self.usage), "message": self.message.model_dump()}
+
+
+def _json_value(value):
+    if hasattr(value, "model_dump"):
+        return value.model_dump(mode="json")
+    if hasattr(value, "to_dict"):
+        return value.to_dict()
+    return value
+
+
+class PtxPatchWorkspace:
+    def __init__(self, candidate):
+        self.candidate = candidate
+
+    def apply_patch(self, arguments):
+        patch = arguments["patch"]
+        headers = [
+            line for line in patch.splitlines() if line.startswith(("--- ", "+++ "))
+        ]
+        if headers != ["--- candidate.ptx", "+++ candidate.ptx"]:
+            raise ValueError(
+                "PTX patch must modify only candidate.ptx with standard unified "
+                "diff headers."
+            )
+        with tempfile.TemporaryDirectory() as directory:
+            ptx_path = Path(directory) / "candidate.ptx"
+            ptx_path.write_text(self.candidate.ptx, encoding="utf-8")
+            result = subprocess.run(
+                ["patch", "--batch", "--forward", "--strip=0", "--input=-"],
+                cwd=directory,
+                input=patch,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            if result.returncode != 0:
+                output = (result.stdout + result.stderr).strip()
+                raise ValueError(f"PTX patch did not apply: {output}")
+            ptx = ptx_path.read_text(encoding="utf-8")
+
+        self.candidate = PtxKernel(
+            ptx=ptx,
+            num_threads_x=arguments["num_threads_x"],
+            num_threads_y=arguments["num_threads_y"],
+            num_threads_z=arguments["num_threads_z"],
+        )
+        return {
+            "status": "applied",
+            "ptx_lines": self.candidate.ptx.count("\n") + 1,
+            "num_threads_x": self.candidate.num_threads_x,
+            "num_threads_y": self.candidate.num_threads_y,
+            "num_threads_z": self.candidate.num_threads_z,
+        }
+
+
+def _update_anthropic_container(container, response):
+    container_id = _get_field(_get_field(response, "container"), "id")
+    if isinstance(container_id, str):
+        container["id"] = container_id
+
+
+def _anthropic_assistant_message(response):
+    return {
+        "role": "assistant",
+        "content": [_json_value(block) for block in response.content],
+    }
+
+
+def request_anthropic_json(
+    client,
+    *,
+    model,
+    prompt,
+    response_format,
+    tools,
+    kernel_name,
+    skill_ids,
+    cost_log_path=None,
+    pipeline=None,
+    current_candidate=None,
+    autotune_metrics=None,
+    system_instruction=None,
+    enable_ncu_report=True,
+    enable_sanitizer=True,
+    max_budget_usd=None,
+):
+    verifier = verifier_for_kernel(
+        kernel_name,
+        autotune_metrics,
+        enable_ncu_report=enable_ncu_report,
+        enable_sanitizer=enable_sanitizer,
+    )
+    run_autotune_metrics = (
+        autotune_metrics
+        if autotune_metrics is not None
+        else collect_autotune_metrics(verifier.operator)
+    )
+    workspace = (
+        PtxPatchWorkspace(current_candidate) if current_candidate is not None else None
+    )
+    available_tools = _tools_for_request(tools, current_candidate)
+    messages = [{"role": "user", "content": prompt}]
+    anthropic_tools = [
+        *available_tools,
+        ANTHROPIC_CODE_EXECUTION_TOOL,
+    ]
+    container = {
+        "skills": [
+            {
+                "type": "custom",
+                "skill_id": skill_id,
+                "version": "latest",
+            }
+            for skill_id in skill_ids
+        ]
+    }
+    total_cost = None
+    continuation_count = 0
+
+    while True:
+        request_arguments = {
+            "model": model,
+            "max_tokens": ANTHROPIC_MAX_TOKENS,
+            "system": (
+                anthropic_system_prompt()
+                if system_instruction is None
+                else system_instruction
+            ),
+            "messages": messages,
+            "tools": anthropic_tools,
+            "container": container,
+            "betas": [ANTHROPIC_SKILLS_BETA],
+            "output_config": {
+                "format": {
+                    "type": "json_schema",
+                    "schema": transform_schema(response_format["schema"]),
+                }
+            },
+        }
+        response = client.beta.messages.create(**request_arguments)
+        cost = _append_response_cost(
+            model=model,
+            response=response,
+            cost_log_path=cost_log_path,
+            pipeline=pipeline,
+        )
+        if cost is not None:
+            total_cost = (total_cost or 0) + cost
+
+        tool_uses = [
+            block
+            for block in response.content
+            if _get_field(block, "type") == "tool_use"
+        ]
+        stop_reason = _get_field(response, "stop_reason")
+        if stop_reason == "pause_turn" and not tool_uses:
+            _raise_if_budget_exhausted(cost_log_path, max_budget_usd)
+            _update_anthropic_container(container, response)
+            messages.append(_anthropic_assistant_message(response))
+            continue
+        if stop_reason == "max_tokens" and not tool_uses:
+            _raise_if_budget_exhausted(cost_log_path, max_budget_usd)
+            if continuation_count == ANTHROPIC_MAX_CONTINUATIONS:
+                raise ValueError(
+                    "Anthropic exhausted its output-token budget before returning "
+                    f"a structured response after {continuation_count} continuation "
+                    "requests."
+                )
+            continuation_count += 1
+            _update_anthropic_container(container, response)
+            print(
+                "=== Anthropic reached its output-token limit; continuing "
+                f"({continuation_count}/{ANTHROPIC_MAX_CONTINUATIONS}) ===",
+                flush=True,
+            )
+            messages.extend(
+                [
+                    _anthropic_assistant_message(response),
+                    {
+                        "role": "user",
+                        "content": (
+                            "Continue from the previous response. Use tools as needed, "
+                            "then return the complete required structured response. Do "
+                            "not repeat completed work."
+                        ),
+                    },
+                ]
+            )
+            continue
+        if not tool_uses:
+            response_text = "".join(
+                _get_field(block, "text")
+                for block in response.content
+                if _get_field(block, "type") == "text"
+                and isinstance(_get_field(block, "text"), str)
+            )
+            if response_text:
+                if cost_log_path is not None:
+                    _append_pipeline_cost(
+                        pipeline=pipeline or "unnamed",
+                        cost=total_cost,
+                        cost_log_path=cost_log_path,
+                    )
+                return (
+                    _AnthropicResponse(response_text, response.usage, response),
+                    total_cost,
+                    workspace.candidate if workspace is not None else None,
+                )
+            content_types = [_get_field(block, "type") for block in response.content]
+            raise ValueError(
+                "Anthropic response contained neither a tool call nor a structured "
+                f"text response (stop_reason={stop_reason!r}, "
+                f"content_types={content_types!r})."
+            )
+
+        tool_results = []
+        for tool_use in tool_uses:
+            tool_name = _get_field(tool_use, "name")
+            tool_id = _get_field(tool_use, "id")
+            print(
+                f"=== LLM called tool: tool={tool_name}, id={tool_id} ===",
+                flush=True,
+            )
+            arguments = _get_field(tool_use, "input")
+            tool_result = _run_ptx_tool(tool_name, arguments, verifier, workspace)
+            if tool_result is None:
+                raise RuntimeError(f"Unsupported Anthropic tool call: {tool_name}")
+            result, resulting_payload, verified_ptx, speedup_vs_triton = tool_result
+            if cost_log_path is not None:
+                record_tool_call(
+                    Path(cost_log_path).parent,
+                    provider="anthropic",
+                    tool_name=tool_name,
+                    call_id=tool_id,
+                    answer=result,
+                    resulting_payload=resulting_payload,
+                    verified_ptx=verified_ptx,
+                    speedup_vs_triton=speedup_vs_triton,
+                    autotune_metrics=run_autotune_metrics,
+                )
+            tool_results.append(
+                {
+                    "type": "tool_result",
+                    "tool_use_id": tool_id,
+                    "content": result,
+                }
+            )
+        _raise_if_budget_exhausted(cost_log_path, max_budget_usd)
+        messages.extend(
+            [
+                _anthropic_assistant_message(response),
+                {"role": "user", "content": tool_results},
+            ]
+        )
+
+
+_SKILL_DIRECTORIES = {
+    "ptx": PTX_SKILL_DIR,
+    "ncu": NCU_REPORT_SKILL_DIR,
+}
+_MAX_SKILL_FILE_CHARS = 120_000
+
+
+def _skill_path(skill, relative_path):
+    try:
+        skill_directory = _SKILL_DIRECTORIES[skill].resolve()
+    except KeyError as error:
+        raise ValueError(f"Unknown local skill: {skill!r}") from error
+    candidate = (skill_directory / relative_path).resolve()
+    try:
+        candidate.relative_to(skill_directory)
+    except ValueError as error:
+        raise ValueError("Skill paths must stay within the requested skill.") from error
+    if not candidate.is_file():
+        raise FileNotFoundError(f"Skill file not found: {relative_path}")
+    return candidate
+
+
+def _run_openrouter_skill_tool(tool_name, arguments):
+    skill = arguments["skill"]
+    skill_directory = _SKILL_DIRECTORIES.get(skill)
+    if skill_directory is None:
+        raise ValueError(f"Unknown local skill: {skill!r}")
+    skill_directory = skill_directory.resolve()
+    if tool_name == "list_skill_files":
+        prefix = arguments.get("path_prefix", "")
+        if (
+            not isinstance(prefix, str)
+            or Path(prefix).is_absolute()
+            or ".." in Path(prefix).parts
+        ):
+            raise ValueError("path_prefix must be a relative path within the skill.")
+        files = [
+            str(path.relative_to(skill_directory))
+            for path in skill_directory.rglob("*")
+            if path.is_file()
+            and str(path.relative_to(skill_directory)).startswith(prefix)
+        ]
+        return json.dumps({"skill": skill, "files": sorted(files)[:500]})
+    if tool_name == "read_skill_file":
+        path = _skill_path(skill, arguments["path"])
+        content = path.read_text(encoding="utf-8")
+        return json.dumps(
+            {
+                "skill": skill,
+                "path": str(path.relative_to(skill_directory)),
+                "content": content[:_MAX_SKILL_FILE_CHARS],
+                "truncated": len(content) > _MAX_SKILL_FILE_CHARS,
+            }
+        )
+    raise RuntimeError(f"Unsupported OpenRouter skill tool: {tool_name}")
+
+
+def _openrouter_response_format(response_format):
+    return {"type": "json_schema", "json_schema": response_format}
+
+
+def _openrouter_assistant_message(message):
+    return message.model_dump(exclude_none=True)
+
+
+def _openrouter_reasoning_text(message):
+    reasoning_parts = []
+    for field_name in ("reasoning", "reasoning_content", "thinking"):
+        value = _get_field(message, field_name)
+        if isinstance(value, str) and value:
+            reasoning_parts.append(value)
+
+    reasoning_details = _get_field(message, "reasoning_details")
+    if not isinstance(reasoning_details, list):
+        return "\n\n".join(reasoning_parts)
+
+    for detail in reasoning_details:
+        text = _get_field(detail, "text")
+        if isinstance(text, str) and text:
+            reasoning_parts.append(text)
+    return "\n\n".join(dict.fromkeys(reasoning_parts))
+
+
+def _record_openrouter_reasoning(message, cost_log_path, *, display=True):
+    reasoning_text = _openrouter_reasoning_text(message)
+    if not reasoning_text:
+        return
+
+    if display:
+        print(
+            f"=== Model thinking ===\n{reasoning_text}\n=== End model thinking ===",
+            flush=True,
+        )
+    if cost_log_path is None:
+        return
+    thinking_log_path = Path(cost_log_path).parent / "thinking.log"
+    with thinking_log_path.open("a", encoding="utf-8") as thinking_log:
+        thinking_log.write(f"{reasoning_text}\n\n")
+
+
+def _stream_openrouter_response(client, **kwargs):
+    stream = client.chat.completions.create(
+        **kwargs,
+        stream=True,
+        stream_options={"include_usage": True},
+    )
+    content_parts = []
+    reasoning_parts = []
+    tool_call_parts = {}
+    usage = None
+    thinking_started = False
+
+    for chunk in stream:
+        chunk_usage = _get_field(chunk, "usage")
+        if chunk_usage is not None:
+            usage = chunk_usage
+        choices = _get_field(chunk, "choices")
+        if not choices:
+            continue
+        delta = _get_field(choices[0], "delta")
+        content = _get_field(delta, "content")
+        if isinstance(content, str):
+            content_parts.append(content)
+
+        reasoning_text = _openrouter_reasoning_text(delta)
+        if reasoning_text:
+            if not thinking_started:
+                print("=== Model thinking ===", flush=True)
+                thinking_started = True
+            print(reasoning_text, end="", flush=True)
+            reasoning_parts.append(reasoning_text)
+
+        for tool_call in _get_field(delta, "tool_calls") or []:
+            index = _get_field(tool_call, "index")
+            if not isinstance(index, int):
+                raise TypeError("OpenRouter returned a tool call without an index.")
+            parts = tool_call_parts.setdefault(
+                index, {"id": "", "name": "", "arguments": ""}
+            )
+            tool_call_id = _get_field(tool_call, "id")
+            if isinstance(tool_call_id, str):
+                parts["id"] = tool_call_id
+            function = _get_field(tool_call, "function")
+            function_name = _get_field(function, "name")
+            if isinstance(function_name, str):
+                parts["name"] += function_name
+            arguments = _get_field(function, "arguments")
+            if isinstance(arguments, str):
+                parts["arguments"] += arguments
+
+    if thinking_started:
+        print("\n=== End model thinking ===", flush=True)
+
+    message = _OpenRouterStreamMessage(
+        content="".join(content_parts) or None,
+        tool_calls=[
+            _OpenRouterStreamToolCall(
+                id=parts["id"],
+                function=_OpenRouterStreamFunction(
+                    name=parts["name"], arguments=parts["arguments"]
+                ),
+            )
+            for _, parts in sorted(tool_call_parts.items())
+        ],
+        reasoning="".join(reasoning_parts),
+    )
+    return message, _OpenRouterStreamResponse(usage=usage, message=message)
+
+
+def request_openrouter_json(
+    client,
+    *,
+    model,
+    prompt,
+    response_format,
+    tools,
+    kernel_name,
+    cost_log_path=None,
+    pipeline=None,
+    current_candidate=None,
+    autotune_metrics=None,
+    system_instruction=None,
+    enable_ncu_report=True,
+    enable_sanitizer=True,
+    max_budget_usd=None,
+):
+    """Run the verifier loop through OpenRouter's Chat Completions API."""
+    verifier = verifier_for_kernel(
+        kernel_name,
+        autotune_metrics,
+        enable_ncu_report=enable_ncu_report,
+        enable_sanitizer=enable_sanitizer,
+    )
+    run_autotune_metrics = (
+        autotune_metrics
+        if autotune_metrics is not None
+        else collect_autotune_metrics(verifier.operator)
+    )
+    workspace = (
+        PtxPatchWorkspace(current_candidate) if current_candidate is not None else None
+    )
+    available_tools = _tools_for_request(tools, current_candidate)
+    instruction = system_prompt() if system_instruction is None else system_instruction
+    enabled_skills = [
+        skill
+        for skill in _SKILL_DIRECTORIES
+        if any(
+            tool.get("function", {}).get("name") == "read_skill_file"
+            and skill in tool["function"]["parameters"]["properties"]["skill"]["enum"]
+            for tool in available_tools
+        )
+    ]
+    if enabled_skills:
+        instruction += (
+            "\n\nBundled local skills are available through list_skill_files and "
+            "read_skill_file. Consult the PTX skill for ISA details and the NCU skill "
+            "for profiling diagnosis when useful."
+        )
+    messages = [
+        {"role": "system", "content": instruction},
+        {"role": "user", "content": prompt},
+    ]
+    total_cost = None
+
+    while True:
+        message, response = _stream_openrouter_response(
+            client,
+            model=model,
+            messages=messages,
+            tools=available_tools,
+            tool_choice="auto",
+            response_format=_openrouter_response_format(response_format),
+        )
+        cost = _append_response_cost(
+            model=model,
+            response=response,
+            cost_log_path=cost_log_path,
+            pipeline=pipeline,
+        )
+        if cost is not None:
+            total_cost = (total_cost or 0) + cost
+        _record_openrouter_reasoning(message, cost_log_path, display=False)
+        tool_calls = message.tool_calls or []
+        if not tool_calls:
+            if not message.content:
+                raise ValueError(
+                    "OpenRouter response contained neither text nor a tool call."
+                )
+            if cost_log_path is not None:
+                _append_pipeline_cost(
+                    pipeline=pipeline or "unnamed",
+                    cost=total_cost,
+                    cost_log_path=cost_log_path,
+                )
+            return (
+                _OpenRouterResponse(message.content, response.usage, response),
+                total_cost,
+                workspace.candidate if workspace is not None else None,
+            )
+
+        messages.append(_openrouter_assistant_message(message))
+        for tool_call in tool_calls:
+            tool_name = tool_call.function.name
+            try:
+                arguments = json.loads(tool_call.function.arguments)
+            except json.JSONDecodeError as error:
+                raise ValueError(
+                    f"OpenRouter tool {tool_name!r} returned invalid JSON arguments."
+                ) from error
+            if tool_name in {"list_skill_files", "read_skill_file"}:
+                output = _run_openrouter_skill_tool(tool_name, arguments)
+                resulting_payload = verified_ptx = speedup_vs_triton = None
+            else:
+                tool_result = _run_ptx_tool(tool_name, arguments, verifier, workspace)
+                if tool_result is None:
+                    raise RuntimeError(f"Unsupported OpenRouter tool call: {tool_name}")
+                output, resulting_payload, verified_ptx, speedup_vs_triton = tool_result
+            print(
+                f"=== LLM called tool: tool={tool_name}, id={tool_call.id} ===",
+                flush=True,
+            )
+            if cost_log_path is not None:
+                record_tool_call(
+                    Path(cost_log_path).parent,
+                    provider="openrouter",
+                    tool_name=tool_name,
+                    call_id=tool_call.id,
+                    answer=output,
+                    resulting_payload=resulting_payload,
+                    verified_ptx=verified_ptx,
+                    speedup_vs_triton=speedup_vs_triton,
+                    autotune_metrics=run_autotune_metrics,
+                )
+            messages.append(
+                {"role": "tool", "tool_call_id": tool_call.id, "content": output}
+            )
+        _raise_if_budget_exhausted(cost_log_path, max_budget_usd)
+
+
+def request_openai_json(
+    client,
+    *,
+    model,
+    prompt,
+    response_format,
+    reasoning_effort,
+    tools,
+    kernel_name,
+    cost_log_path=None,
+    pipeline=None,
+    current_candidate=None,
+    autotune_metrics=None,
+    system_instruction=None,
+    enable_ncu_report=True,
+    enable_sanitizer=True,
+    max_budget_usd=None,
+):
+    verifier = verifier_for_kernel(
+        kernel_name,
+        autotune_metrics,
+        enable_ncu_report=enable_ncu_report,
+        enable_sanitizer=enable_sanitizer,
+    )
+    run_autotune_metrics = (
+        autotune_metrics
+        if autotune_metrics is not None
+        else collect_autotune_metrics(verifier.operator)
+    )
+    workspace = (
+        PtxPatchWorkspace(current_candidate) if current_candidate is not None else None
+    )
+    available_tools = _tools_for_request(tools, current_candidate)
+    shared_kwargs = {"tools": available_tools, "text": {"format": response_format}}
+    if reasoning_effort is not None:
+        shared_kwargs["reasoning"] = {"effort": reasoning_effort}
+    kwargs = {
+        "model": model,
+        "instructions": (
+            system_prompt() if system_instruction is None else system_instruction
+        ),
+        "input": [{"role": "user", "content": prompt}],
+        **shared_kwargs,
+    }
+
+    total_cost = None
+    while True:
+        for retry_index in range(RESPONSE_RETRY_ATTEMPTS):
+            try:
+                response = client.responses.create(**kwargs)
+                break
+            except NotFoundError as error:
+                if (
+                    "Skill version" not in str(error)
+                    or retry_index == RESPONSE_RETRY_ATTEMPTS - 1
+                ):
+                    raise
+                delay_seconds = 2**retry_index
+                print(
+                    "=== Uploaded skill version is not available yet; retrying "
+                    f"in {delay_seconds}s ===",
+                    flush=True,
+                )
+                time.sleep(delay_seconds)
+
+        print_tool_calls(response)
+        cost = _append_response_cost(
+            model=model,
+            response=response,
+            cost_log_path=cost_log_path,
+            pipeline=pipeline,
+        )
+        if cost is not None:
+            total_cost = (total_cost or 0) + cost
+
+        function_calls = [
+            item
+            for item in (_get_field(response, "output") or [])
+            if _get_field(item, "type") == "function_call"
+        ]
+        if not function_calls:
+            if cost_log_path is not None:
+                _append_pipeline_cost(
+                    pipeline=pipeline or "unnamed",
+                    cost=total_cost,
+                    cost_log_path=cost_log_path,
+                )
+            return (
+                response,
+                total_cost,
+                workspace.candidate if workspace is not None else None,
+            )
+
+        tool_outputs = []
+        for function_call in function_calls:
+            tool_name = _get_field(function_call, "name")
+            arguments = json.loads(_get_field(function_call, "arguments"))
+            tool_result = _run_ptx_tool(tool_name, arguments, verifier, workspace)
+            if tool_result is None:
+                raise RuntimeError(f"Unsupported function call: {tool_name}")
+            output, resulting_payload, verified_ptx, speedup_vs_triton = tool_result
+            if cost_log_path is not None:
+                record_tool_call(
+                    Path(cost_log_path).parent,
+                    provider="openai",
+                    tool_name=tool_name,
+                    call_id=_get_field(function_call, "call_id"),
+                    answer=output,
+                    resulting_payload=resulting_payload,
+                    verified_ptx=verified_ptx,
+                    speedup_vs_triton=speedup_vs_triton,
+                    autotune_metrics=run_autotune_metrics,
+                )
+            tool_outputs.append(
+                {
+                    "type": "function_call_output",
+                    "call_id": _get_field(function_call, "call_id"),
+                    "output": output,
+                }
+            )
+
+        _raise_if_budget_exhausted(cost_log_path, max_budget_usd)
+        kwargs = {
+            "model": model,
+            "previous_response_id": _get_field(response, "id"),
+            "input": tool_outputs,
+            **shared_kwargs,
+        }
